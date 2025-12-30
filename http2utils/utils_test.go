@@ -2,6 +2,7 @@ package http2utils
 
 import (
 	"bytes"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -40,4 +41,45 @@ func TestPaddingHelpers(t *testing.T) {
 func TestFastBytesToString(t *testing.T) {
 	b := []byte("hello")
 	require.Equal(t, "hello", FastBytesToString(b), "unexpected string conversion")
+}
+
+func TestAppendUint32Bytes(t *testing.T) {
+	start := []byte{0xFF}
+	result := AppendUint32Bytes(start, 0x01020304)
+	require.Equal(t, []byte{0xFF, 0x01, 0x02, 0x03, 0x04}, result)
+}
+
+func TestAssertEqual(t *testing.T) {
+	tb := &recordingTB{T: t, name: "assertion"}
+
+	AssertEqual(tb, 1, 1)
+	require.False(t, tb.fatalCalled, "fatal should not be triggered on equal values")
+
+	AssertEqual(tb, "expected", "actual", "different values")
+	require.True(t, tb.fatalCalled, "fatal should be triggered on mismatch")
+	require.Contains(t, tb.fatalMsg, "Description:")
+	require.Contains(t, tb.fatalMsg, "different values")
+	require.Contains(t, tb.fatalMsg, "Expect:")
+	require.Contains(t, tb.fatalMsg, "expected")
+	require.Contains(t, tb.fatalMsg, "Result:")
+	require.Contains(t, tb.fatalMsg, "actual")
+}
+
+type recordingTB struct {
+	*testing.T
+	name        string
+	fatalCalled bool
+	fatalMsg    string
+}
+
+func (tb *recordingTB) Name() string { return tb.name }
+
+func (tb *recordingTB) Fatal(args ...any) {
+	tb.fatalCalled = true
+	tb.fatalMsg = fmt.Sprint(args...)
+}
+
+func (tb *recordingTB) Fatalf(format string, args ...any) {
+	tb.fatalCalled = true
+	tb.fatalMsg = fmt.Sprintf(format, args...)
 }

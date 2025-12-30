@@ -1,0 +1,96 @@
+package http2
+
+import (
+	"bytes"
+	"errors"
+	"io"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
+
+func TestServerConnPingAndErrors(t *testing.T) {
+	writer := make(chan *FrameHeader, 4)
+	sc := &serverConn{
+		writer: writer,
+	}
+
+	ping := &Ping{}
+	sc.handlePing(ping)
+
+	fr := <-writer
+	require.Equal(t, FramePing, fr.Type())
+	require.True(t, fr.Body().(*Ping).IsAck())
+	ReleaseFrameHeader(fr)
+
+	sc.writePing()
+	fr = <-writer
+	require.Equal(t, FramePing, fr.Type())
+	ReleaseFrameHeader(fr)
+
+	strm := NewStream(1, 10)
+	sc.writeError(strm, errors.New("boom"))
+	fr = <-writer
+	require.Equal(t, FrameResetStream, fr.Type())
+	require.Equal(t, StreamStateClosed, strm.State())
+	ReleaseFrameHeader(fr)
+
+	sc.writeError(nil, NewGoAwayError(ProtocolError, "fail"))
+	fr = <-writer
+	require.Equal(t, FrameGoAway, fr.Type())
+	ReleaseFrameHeader(fr)
+}
+
+func TestStreamWriteHelpers(t *testing.T) {
+	writer := make(chan *FrameHeader, 4)
+	strm := NewStream(3, 100)
+
+	sw := acquireStreamWrite()
+	sw.size = int64(len("hello"))
+	sw.strm = strm
+	sw.writer = writer
+
+	n, err := sw.Write([]byte("hello"))
+	require.NoError(t, err)
+	require.Equal(t, 5, n)
+	fr := <-writer
+	require.Equal(t, FrameData, fr.Type())
+	ReleaseFrameHeader(fr)
+	releaseStreamWrite(sw)
+
+	lr := &io.LimitedReader{
+		R: bytes.NewBufferString("abc"),
+		N: 3,
+	}
+
+	sw = acquireStreamWrite()
+	sw.size = -1
+	sw.strm = strm
+	sw.writer = writer
+
+	num, err := sw.ReadFrom(lr)
+	require.NoError(t, err)
+	require.EqualValues(t, 3, num)
+
+	fr = <-writer
+	require.Equal(t, FrameData, fr.Type())
+	ReleaseFrameHeader(fr)
+	releaseStreamWrite(sw)
+}
+
+func TestStreamsAndWindowUpdateHelpers(t *testing.T) {
+	s1 := NewStream(1, 0)
+	s1.origType = FrameHeaders
+	s2 := NewStream(2, 0)
+	s2.origType = FrameData
+
+	strms := Streams{s1, s2}
+	require.Equal(t, s1, strms.GetFirstOf(FrameHeaders))
+	require.Nil(t, strms.GetFirstOf(FramePriority))
+
+	wu := &WindowUpdate{}
+	wu.SetIncrement(10)
+	var copied WindowUpdate
+	wu.CopyTo(&copied)
+	require.Equal(t, wu.Increment(), copied.Increment())
+}
