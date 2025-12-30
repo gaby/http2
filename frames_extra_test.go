@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/dgrr/http2/http2utils"
+	"github.com/stretchr/testify/require"
 )
 
 func TestDataFrameSerializeDeserialize(t *testing.T) {
@@ -22,16 +23,12 @@ func TestDataFrameSerializeDeserialize(t *testing.T) {
 	fr.length = len(fr.payload)
 
 	var decoded Data
-	if err := decoded.Deserialize(fr); err != nil {
-		t.Fatalf("deserialize: %v", err)
-	}
+	err := decoded.Deserialize(fr)
+	require.NoError(t, err)
 
-	if !decoded.EndStream() || decoded.Padding() {
-		t.Fatalf("flags not preserved: end=%v pad=%v", decoded.EndStream(), decoded.Padding())
-	}
-	if !bytes.Equal(decoded.Data(), []byte("payload")) {
-		t.Fatalf("unexpected data: %q", decoded.Data())
-	}
+	require.True(t, decoded.EndStream(), "end stream flag lost")
+	require.False(t, decoded.Padding(), "padding flag should not be set")
+	require.True(t, bytes.Equal(decoded.Data(), []byte("payload")), "unexpected data: %q", decoded.Data())
 }
 
 func TestHeadersSerializeDeserialize(t *testing.T) {
@@ -53,18 +50,14 @@ func TestHeadersSerializeDeserialize(t *testing.T) {
 	fr.length = len(fr.payload)
 
 	var decoded Headers
-	if err := decoded.Deserialize(fr); err != nil {
-		t.Fatalf("deserialize: %v", err)
-	}
-	if !decoded.EndHeaders() || !decoded.EndStream() || !decoded.Padding() {
-		t.Fatalf("flags missing after decode")
-	}
-	if decoded.Stream() != 5 || decoded.Weight() != 10 {
-		t.Fatalf("stream/weight mismatch")
-	}
-	if !bytes.Equal(decoded.Headers(), []byte("abc")) {
-		t.Fatalf("headers mismatch")
-	}
+	err := decoded.Deserialize(fr)
+	require.NoError(t, err)
+	require.True(t, decoded.EndHeaders(), "end headers flag missing")
+	require.True(t, decoded.EndStream(), "end stream flag missing")
+	require.True(t, decoded.Padding(), "padding flag missing")
+	require.Equal(t, uint32(5), decoded.Stream(), "stream mismatch")
+	require.Equal(t, uint8(10), decoded.Weight(), "weight mismatch")
+	require.True(t, bytes.Equal(decoded.Headers(), []byte("abc")), "headers mismatch")
 }
 
 func TestContinuationRoundTrip(t *testing.T) {
@@ -80,15 +73,10 @@ func TestContinuationRoundTrip(t *testing.T) {
 	fr.length = len(fr.payload)
 
 	var decoded Continuation
-	if err := decoded.Deserialize(fr); err != nil {
-		t.Fatalf("deserialize: %v", err)
-	}
-	if !decoded.EndHeaders() {
-		t.Fatalf("end headers flag lost")
-	}
-	if !bytes.Equal(decoded.Headers(), []byte("xyz")) {
-		t.Fatalf("payload mismatch")
-	}
+	err := decoded.Deserialize(fr)
+	require.NoError(t, err)
+	require.True(t, decoded.EndHeaders(), "end headers flag lost")
+	require.True(t, bytes.Equal(decoded.Headers(), []byte("xyz")), "payload mismatch")
 }
 
 func TestPriorityRoundTrip(t *testing.T) {
@@ -104,15 +92,10 @@ func TestPriorityRoundTrip(t *testing.T) {
 	fr.length = len(fr.payload)
 
 	var decoded Priority
-	if err := decoded.Deserialize(fr); err != nil {
-		t.Fatalf("deserialize: %v", err)
-	}
-	if decoded.Stream() != 0x7FFFFFFE { // mask reserved bit
-		t.Fatalf("unexpected stream: %d", decoded.Stream())
-	}
-	if decoded.Weight() != 20 {
-		t.Fatalf("weight mismatch")
-	}
+	err := decoded.Deserialize(fr)
+	require.NoError(t, err)
+	require.Equal(t, uint32(0x7FFFFFFE), decoded.Stream(), "unexpected stream")
+	require.Equal(t, uint8(20), decoded.Weight(), "weight mismatch")
 }
 
 func TestWindowUpdateRoundTrip(t *testing.T) {
@@ -127,12 +110,9 @@ func TestWindowUpdateRoundTrip(t *testing.T) {
 	fr.length = len(fr.payload)
 
 	var decoded WindowUpdate
-	if err := decoded.Deserialize(fr); err != nil {
-		t.Fatalf("deserialize: %v", err)
-	}
-	if decoded.Increment() != 123 {
-		t.Fatalf("increment mismatch: %d", decoded.Increment())
-	}
+	err := decoded.Deserialize(fr)
+	require.NoError(t, err)
+	require.EqualValues(t, 123, decoded.Increment(), "increment mismatch")
 }
 
 func TestPingRoundTrip(t *testing.T) {
@@ -148,15 +128,10 @@ func TestPingRoundTrip(t *testing.T) {
 	fr.length = len(fr.payload)
 
 	var decoded Ping
-	if err := decoded.Deserialize(fr); err != nil {
-		t.Fatalf("deserialize: %v", err)
-	}
-	if !decoded.IsAck() {
-		t.Fatalf("ack lost")
-	}
-	if decoded.DataAsTime().After(time.Now()) {
-		t.Fatalf("unexpected timestamp in future")
-	}
+	err := decoded.Deserialize(fr)
+	require.NoError(t, err)
+	require.True(t, decoded.IsAck(), "ack lost")
+	require.False(t, decoded.DataAsTime().After(time.Now()), "unexpected timestamp in future")
 }
 
 func TestPushPromiseRoundTrip(t *testing.T) {
@@ -176,13 +151,8 @@ func TestPushPromiseRoundTrip(t *testing.T) {
 	fr.length = len(fr.payload)
 
 	var decoded PushPromise
-	if err := decoded.Deserialize(fr); err != nil {
-		t.Fatalf("deserialize: %v", err)
-	}
-	if decoded.stream != 33 {
-		t.Fatalf("stream mismatch: %d", decoded.stream)
-	}
-	if string(decoded.header) != "hdrs" {
-		t.Fatalf("header mismatch: %q", decoded.header)
-	}
+	err := decoded.Deserialize(fr)
+	require.NoError(t, err)
+	require.Equal(t, uint32(33), decoded.stream, "stream mismatch")
+	require.Equal(t, "hdrs", string(decoded.header), "header mismatch")
 }

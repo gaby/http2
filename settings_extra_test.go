@@ -1,6 +1,10 @@
 package http2
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
 
 func TestSettingsSerializeDeserialize(t *testing.T) {
 	fr := AcquireFrameHeader()
@@ -19,16 +23,15 @@ func TestSettingsSerializeDeserialize(t *testing.T) {
 	st.Serialize(fr)
 
 	var decoded Settings
-	if err := decoded.Deserialize(fr); err != nil {
-		t.Fatalf("deserialize: %v", err)
-	}
+	err := decoded.Deserialize(fr)
+	require.NoError(t, err)
 
-	if decoded.HeaderTableSize() != 1234 || !decoded.Push() || decoded.MaxConcurrentStreams() != 10 {
-		t.Fatalf("settings not decoded correctly")
-	}
-	if decoded.MaxWindowSize() != 65535 || decoded.MaxFrameSize() != 1<<15+1 || decoded.MaxHeaderListSize() != 2048 {
-		t.Fatalf("unexpected values after decode")
-	}
+	require.Equal(t, uint32(1234), decoded.HeaderTableSize())
+	require.True(t, decoded.Push())
+	require.Equal(t, uint32(10), decoded.MaxConcurrentStreams())
+	require.Equal(t, uint32(65535), decoded.MaxWindowSize())
+	require.Equal(t, uint32(1<<15+1), decoded.MaxFrameSize())
+	require.Equal(t, uint32(2048), decoded.MaxHeaderListSize())
 }
 
 func TestSettingsInvalidValues(t *testing.T) {
@@ -40,21 +43,15 @@ func TestSettingsInvalidValues(t *testing.T) {
 
 	// Invalid EnablePush value
 	fr.payload = []byte{0, byte(EnablePush), 0, 0, 0, 2}
-	if err := st.Deserialize(fr); err == nil {
-		t.Fatalf("expected error for invalid enable_push")
-	}
+	require.Error(t, st.Deserialize(fr), "expected error for invalid enable_push")
 
 	// Invalid frame size
 	fr.payload = []byte{0, byte(MaxFrameSize), 0, 0, 0, 0}
-	if err := st.Deserialize(fr); err == nil {
-		t.Fatalf("expected error for invalid frame size")
-	}
+	require.Error(t, st.Deserialize(fr), "expected error for invalid frame size")
 
 	// ACK with payload should error
 	st.SetAck(true)
 	fr.SetFlags(FlagAck)
 	fr.payload = []byte{0, 0, 0, 0, 0, 0}
-	if err := st.Deserialize(fr); err == nil {
-		t.Fatalf("expected error for ack with payload")
-	}
+	require.Error(t, st.Deserialize(fr), "expected error for ack with payload")
 }

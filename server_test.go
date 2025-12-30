@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	"github.com/valyala/fasthttp"
 	"github.com/valyala/fasthttp/fasthttputil"
 )
@@ -81,9 +82,7 @@ func testIssue52(t *testing.T) {
 	}
 
 	c, ln, err := getConn(s)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer c.Close()
 	defer ln.Close()
 
@@ -123,9 +122,7 @@ func testIssue52(t *testing.T) {
 
 	for _, h := range []*FrameHeader{h1, h2} {
 		err = writeData(c.bw, h, msg)
-		if err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, err)
 
 		c.bw.Flush()
 	}
@@ -140,32 +137,21 @@ func testIssue52(t *testing.T) {
 		next := expect[0]
 
 		fr, err := c.readNext()
-		if err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, err)
 
-		if fr.Type() != next {
-			t.Fatalf("unexpected frame type: %s <> %s", next, fr.Type())
-		}
+		require.Equal(t, next, fr.Type(), "unexpected frame type")
 
 		if fr.Type() == FrameResetStream {
 			rst := fr.Body().(*RstStream)
-			if rst.Code() != RefusedStreamError {
-				t.Fatalf("expected RefusedStreamError, got %s", rst.Code())
-			}
+			require.Equal(t, RefusedStreamError, rst.Code(), "expected RefusedStreamError")
 		}
 
 		expect = expect[1:]
 	}
 
 	_, err = c.readNext()
-	if err == nil {
-		t.Fatal("Expecting error")
-	}
-
-	if err != io.EOF {
-		t.Fatalf("expected EOF, got %s", err)
-	}
+	require.Error(t, err, "Expecting error")
+	require.ErrorIs(t, err, io.EOF)
 }
 
 func TestIssue27(t *testing.T) {
@@ -182,9 +168,7 @@ func TestIssue27(t *testing.T) {
 	}
 
 	c, ln, err := getConn(s)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer c.Close()
 	defer ln.Close()
 
@@ -222,22 +206,13 @@ func TestIssue27(t *testing.T) {
 
 	for i := 0; i < 3; i++ {
 		fr, err := c.readNext()
-		if err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, err)
 
-		if fr.Stream() != id {
-			t.Fatalf("Expecting update on stream %d, got %d", id, fr.Stream())
-		}
-
-		if fr.Type() != FrameResetStream {
-			t.Fatalf("Expecting Reset, got %s", fr.Type())
-		}
+		require.Equal(t, id, fr.Stream(), "Expecting update on stream %d", id)
+		require.Equal(t, FrameResetStream, fr.Type(), "Expecting Reset")
 
 		rst := fr.Body().(*RstStream)
-		if rst.Code() != StreamCanceled {
-			t.Fatalf("Expecting StreamCanceled, got %s", rst.Code())
-		}
+		require.Equal(t, StreamCanceled, rst.Code(), "Expecting StreamCanceled")
 
 		id += 2
 	}
@@ -258,9 +233,7 @@ func TestIdleConnection(t *testing.T) {
 	}
 
 	c, ln, err := getConn(s)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer c.Close()
 	defer ln.Close()
 
@@ -279,28 +252,18 @@ func TestIdleConnection(t *testing.T) {
 
 	for i := 0; i < 2; i++ {
 		fr, err := c.readNext()
-		if err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, err)
 
-		if fr.Stream() != 3 {
-			t.Fatalf("Expecting update on stream %d, got %d", 3, fr.Stream())
-		}
-
-		if fr.Type() != expect[i] {
-			t.Fatalf("Expecting %s, got %s", expect[i], fr.Type())
-		}
+		require.Equal(t, uint32(3), fr.Stream(), "Expecting update on stream 3")
+		require.Equal(t, expect[i], fr.Type(), "Unexpected frame type")
 	}
 
 	_, err = c.readNext()
 	if err != nil {
-		if _, ok := err.(*GoAway); !ok {
-			t.Fatal(err)
-		}
+		_, ok := err.(*GoAway)
+		require.True(t, ok, "expected GoAway error")
 	}
 
 	_, err = c.readNext()
-	if err == nil {
-		t.Fatal("Expecting error")
-	}
+	require.Error(t, err, "Expecting error")
 }
