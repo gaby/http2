@@ -67,6 +67,11 @@ func TestErrorHelpers(t *testing.T) {
 	require.Equal(t, InternalError, err.Code())
 	require.Equal(t, "debug", err.Debug())
 	require.NotEmpty(t, err.Error())
+
+	resetErr := NewResetStreamError(EnhanceYourCalm, "boom")
+	require.True(t, resetErr.Is(EnhanceYourCalm))
+	require.Equal(t, EnhanceYourCalm, resetErr.Code())
+	require.Contains(t, resetErr.Error(), "boom")
 }
 
 func TestConfigureDialerSetsDefaults(t *testing.T) {
