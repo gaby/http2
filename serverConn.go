@@ -71,6 +71,7 @@ type serverConn struct {
 	pingTimer       *time.Timer
 	maxRequestTimer *time.Timer
 	maxIdleTimer    *time.Timer
+	pingTimerMu     sync.Mutex
 
 	closer chan struct{}
 
@@ -117,7 +118,11 @@ func (sc *serverConn) Serve() error {
 	go func() {
 		sc.handleStreams()
 		// Fix #55: The pingTimer fired while we were closing the connection.
-		sc.pingTimer.Stop()
+		sc.pingTimerMu.Lock()
+		if sc.pingTimer != nil {
+			sc.pingTimer.Stop()
+		}
+		sc.pingTimerMu.Unlock()
 		// close the writer here to ensure that no pending requests
 		// are writing to a closed channel
 		close(sc.writer)
@@ -149,9 +154,11 @@ func (sc *serverConn) Serve() error {
 }
 
 func (sc *serverConn) close() {
+	sc.pingTimerMu.Lock()
 	if sc.pingTimer != nil {
 		sc.pingTimer.Stop()
 	}
+	sc.pingTimerMu.Unlock()
 
 	if sc.maxIdleTimer != nil {
 		sc.maxIdleTimer.Stop()
@@ -976,12 +983,18 @@ func (sc *serverConn) writeData(strm *Stream, body []byte) {
 func (sc *serverConn) sendPingAndSchedule() {
 	sc.writePing()
 
-	sc.pingTimer.Reset(sc.pingInterval)
+	sc.pingTimerMu.Lock()
+	if sc.pingTimer != nil {
+		sc.pingTimer.Reset(sc.pingInterval)
+	}
+	sc.pingTimerMu.Unlock()
 }
 
 func (sc *serverConn) writeLoop() {
 	if sc.pingInterval > 0 {
+		sc.pingTimerMu.Lock()
 		sc.pingTimer = time.AfterFunc(sc.pingInterval, sc.sendPingAndSchedule)
+		sc.pingTimerMu.Unlock()
 	}
 
 	buffered := 0
