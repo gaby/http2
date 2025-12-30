@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 )
 
@@ -40,17 +41,17 @@ type HPACK struct {
 }
 
 func headerFieldsToString(hfs []*HeaderField, indexOffset int) string {
-	s := ""
+	var s strings.Builder
 
 	for i := len(hfs) - 1; i >= 0; i-- {
-		s += fmt.Sprintf("%d - %s\n", (len(hfs)-i)+indexOffset-1, hfs[i])
+		s.WriteString(fmt.Sprintf("%d - %s\n", (len(hfs)-i)+indexOffset-1, hfs[i]))
 	}
 
-	return s
+	return s.String()
 }
 
 var hpackPool = sync.Pool{
-	New: func() interface{} {
+	New: func() any {
 		return &HPACK{
 			maxTableSize:         defaultHeaderTableSize,
 			maxTableSizeSettings: defaultHeaderTableSize,
@@ -201,7 +202,7 @@ const (
 )
 
 var bytePool = sync.Pool{
-	New: func() interface{} {
+	New: func() any {
 		return make([]byte, 128)
 	},
 }

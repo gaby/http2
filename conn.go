@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -161,13 +162,7 @@ type Dialer struct {
 
 func (d *Dialer) tryDial() (net.Conn, error) {
 	if d.TLSConfig == nil || !func() bool {
-		for _, proto := range d.TLSConfig.NextProtos {
-			if proto == "h2" {
-				return true
-			}
-		}
-
-		return false
+		return slices.Contains(d.TLSConfig.NextProtos, "h2")
 	}() {
 		configureDialer(d)
 	}
@@ -384,7 +379,7 @@ func (we WriteError) Is(target error) bool {
 	return errors.Is(we.err, target)
 }
 
-func (we WriteError) As(target interface{}) bool {
+func (we WriteError) As(target any) bool {
 	return errors.As(we.err, target)
 }
 
@@ -409,7 +404,7 @@ func (c *Conn) writeLoop() {
 			lastErr = io.ErrUnexpectedEOF
 		}
 
-		c.reqQueued.Range(func(_, v interface{}) bool {
+		c.reqQueued.Range(func(_, v any) bool {
 			r := v.(*Ctx)
 			r.resolve(lastErr)
 

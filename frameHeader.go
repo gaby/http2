@@ -30,7 +30,7 @@ const (
 // TODO: Develop methods for FrameFlags
 
 var frameHeaderPool = sync.Pool{
-	New: func() interface{} {
+	New: func() any {
 		return &FrameHeader{}
 	},
 }

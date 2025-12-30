@@ -55,7 +55,7 @@ func EqualsFold(a, b []byte) bool {
 	if n != len(b) {
 		return false
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		if a[i]|0x20 != b[i]|0x20 {
 			return false
 		}
@@ -105,7 +105,7 @@ func FastBytesToString(b []byte) string {
 }
 
 // AssertEqual checks if values are equal.
-func AssertEqual(tb testing.TB, expected, actual interface{}, description ...string) {
+func AssertEqual(tb testing.TB, expected, actual any, description ...string) {
 	tb.Helper()
 
 	if reflect.DeepEqual(expected, actual) {
