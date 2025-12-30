@@ -3,6 +3,8 @@ package http2
 import (
 	"fmt"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 var (
@@ -29,9 +31,8 @@ func decodeHuffman(t *testing.T, b, bb, toCompare []byte) {
 	t.Helper()
 
 	b, _ = HuffmanDecode(b[:0], bb)
-	if err := compareBytes(b, toCompare); err != nil {
-		t.Fatal(err)
-	}
+	err := compareBytes(b, toCompare)
+	require.NoError(t, err)
 }
 
 func TestHuffmanDecodeHuge(t *testing.T) {
@@ -62,9 +63,8 @@ func encodeHuffman(t *testing.T, b, bb, toCompare []byte) {
 	t.Helper()
 
 	b = HuffmanEncode(b[:0], bb)
-	if err := compareBytes(b, toCompare); err != nil {
-		t.Fatal(err)
-	}
+	err := compareBytes(b, toCompare)
+	require.NoError(t, err)
 }
 
 func TestHuffmanEncodeHuge(t *testing.T) {

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dgrr/http2/http2utils"
+	"github.com/stretchr/testify/require"
 )
 
 var hfs = []*HeaderField{
@@ -16,14 +16,14 @@ var hfs = []*HeaderField{
 }
 
 func TestHeaderFieldsToString(t *testing.T) {
-	http2utils.AssertEqual(t, "0 - context-type: text/plain\n1 - cookie: testcookie\n",
+	require.Equal(t, "0 - context-type: text/plain\n1 - cookie: testcookie\n",
 		headerFieldsToString(hfs, 0))
 }
 
 func TestAcquireHPACKAndReleaseHPACK(t *testing.T) {
 	hp := &HPACK{}
 	ReleaseHPACK(hp)
-	http2utils.AssertEqual(t, hp, AcquireHPACK())
+	require.Equal(t, hp, AcquireHPACK())
 }
 
 func TestHPACKAppendInt(t *testing.T) {
@@ -36,33 +36,23 @@ func TestHPACKAppendInt(t *testing.T) {
 	var dst []byte
 
 	dst = appendInt(dst, 5, n)
-	if !bytes.Equal(dst, b15) {
-		t.Fatalf("got %v. Expects %v", dst[:1], b15)
-	}
+	require.True(t, bytes.Equal(dst, b15), "got %v. Expects %v", dst[:1], b15)
 
 	dst = appendInt(dst, 5, nn)
-	if !bytes.Equal(dst, b1337) {
-		t.Fatalf("got %v. Expects %v", dst, b1337)
-	}
+	require.True(t, bytes.Equal(dst, b1337), "got %v. Expects %v", dst, b1337)
 
 	dst[0] = 0
 	dst = appendInt(dst[:1], 7, nnn)
-	if !bytes.Equal(dst[:1], b122) {
-		t.Fatalf("got %v. Expects %v", dst[:1], b122)
-	}
+	require.True(t, bytes.Equal(dst[:1], b122), "got %v. Expects %v", dst[:1], b122)
 }
 
 func checkInt(t *testing.T, err error, n, e uint64, elen int, b []byte) {
 	t.Helper()
 
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n != e {
-		t.Fatalf("%d <> %d", n, e)
-	}
-	if b != nil && len(b) != elen {
-		t.Fatalf("bad length. Got %d. Expected %d", len(b), elen)
+	require.NoError(t, err)
+	require.Equal(t, e, n)
+	if b != nil {
+		require.Len(t, b, elen, "bad length")
 	}
 }
 
@@ -93,39 +83,25 @@ func TestHPACKWriteTwoStrings(t *testing.T) {
 	dst = appendString(dst, strB, false)
 
 	dst, dstA, err = readString(nil, dst)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	_, dstB, err = readString(nil, dst)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
-	if !bytes.Equal(strA, dstA) {
-		t.Fatalf("%s<>%s", dstA, strA)
-	}
+	require.True(t, bytes.Equal(strA, dstA), "%s<>%s", dstA, strA)
 
-	if !bytes.Equal(strB, dstB) {
-		t.Fatalf("%s<>%s", dstB, strB)
-	}
+	require.True(t, bytes.Equal(strB, dstB), "%s<>%s", dstB, strB)
 }
 
 func check(t *testing.T, slice []*HeaderField, i int, k, v string) {
 	t.Helper()
 
-	if len(slice) <= i {
-		t.Fatalf("fields len exceeded. %d <> %d", len(slice), i)
-	}
+	require.Greater(t, len(slice), i, "fields len exceeded. %d <> %d", len(slice), i)
 
 	hf := slice[i]
-	if string(hf.key) != k {
-		t.Fatalf("unexpected key: %s<>%s", hf.key, k)
-	}
+	require.Equal(t, k, string(hf.key), "unexpected key")
 
-	if string(hf.value) != v {
-		t.Fatalf("unexpected value: %s<>%s", hf.value, v)
-	}
+	require.Equal(t, v, string(hf.value), "unexpected value")
 }
 
 func readHPACKAndCheck(t *testing.T, hpack *HPACK, b []byte, fields, table []string, tableSize uint32) {
@@ -147,17 +123,13 @@ func readHPACKAndCheck(t *testing.T, hpack *HPACK, b []byte, fields, table []str
 	for i := 0; len(b) > 0 && !ok; i++ {
 		hfields[i] = AcquireHeaderField()
 		b, err = hpack.Next(hfields[i], b)
-		if err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, err)
 	}
 	lck.Lock()
 	ok = true
 	lck.Unlock()
 
-	if len(b) > 0 {
-		t.Fatal("error reading headers: timeout")
-	}
+	require.Len(t, b, 0, "error reading headers: timeout")
 
 	n := 0
 	for i := 0; i < len(fields); i += 2 {
@@ -170,9 +142,7 @@ func readHPACKAndCheck(t *testing.T, hpack *HPACK, b []byte, fields, table []str
 		n++
 	}
 
-	if hpack.DynamicSize() != tableSize {
-		t.Fatalf("Unexpected table size: %d<>%d", hpack.DynamicSize(), tableSize)
-	}
+	require.Equal(t, tableSize, hpack.DynamicSize(), "Unexpected table size")
 }
 
 func TestHPACKReadRequestWithoutHuffman(t *testing.T) {
@@ -463,7 +433,7 @@ func writeHPACKAndCheck(t *testing.T, hpack *HPACK, r []byte, fields, table []st
 	}
 
 	if i := compare(b, r); i != -1 {
-		t.Fatalf("failed in %d (%d): %s", i, tableSize, hexComparison(b[i:], r[i:]))
+		require.Failf(t, "compare", "failed in %d (%d): %s", i, tableSize, hexComparison(b[i:], r[i:]))
 	}
 
 	n = 0
@@ -472,9 +442,7 @@ func writeHPACKAndCheck(t *testing.T, hpack *HPACK, r []byte, fields, table []st
 		n++
 	}
 
-	if hpack.DynamicSize() != tableSize {
-		t.Fatalf("Unexpected table size: %d<>%d", hpack.DynamicSize(), tableSize)
-	}
+	require.Equal(t, tableSize, hpack.DynamicSize(), "Unexpected table size")
 }
 
 func TestHPACKWriteRequestWithoutHuffman(t *testing.T) {
