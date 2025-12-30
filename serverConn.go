@@ -633,7 +633,7 @@ func handleState(fr *FrameHeader, strm *Stream) {
 var logger = log.New(os.Stdout, "[HTTP/2] ", log.LstdFlags)
 
 var ctxPool = sync.Pool{
-	New: func() interface{} {
+	New: func() any {
 		return &fasthttp.RequestCtx{}
 	},
 }
@@ -851,12 +851,12 @@ func (sc *serverConn) handleEndRequest(strm *Stream) {
 
 var (
 	copyBufPool = sync.Pool{
-		New: func() interface{} {
+		New: func() any {
 			return make([]byte, 1<<14) // max frame size 16384
 		},
 	}
 	streamWritePool = sync.Pool{
-		New: func() interface{} {
+		New: func() any {
 			return &streamWrite{}
 		},
 	}

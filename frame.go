@@ -63,52 +63,52 @@ var framePools = func() [FrameContinuation + 1]*sync.Pool {
 	var pools [FrameContinuation + 1]*sync.Pool
 
 	pools[FrameData] = &sync.Pool{
-		New: func() interface{} {
+		New: func() any {
 			return &Data{}
 		},
 	}
 	pools[FrameHeaders] = &sync.Pool{
-		New: func() interface{} {
+		New: func() any {
 			return &Headers{}
 		},
 	}
 	pools[FramePriority] = &sync.Pool{
-		New: func() interface{} {
+		New: func() any {
 			return &Priority{}
 		},
 	}
 	pools[FrameResetStream] = &sync.Pool{
-		New: func() interface{} {
+		New: func() any {
 			return &RstStream{}
 		},
 	}
 	pools[FrameSettings] = &sync.Pool{
-		New: func() interface{} {
+		New: func() any {
 			return &Settings{}
 		},
 	}
 	pools[FramePushPromise] = &sync.Pool{
-		New: func() interface{} {
+		New: func() any {
 			return &PushPromise{}
 		},
 	}
 	pools[FramePing] = &sync.Pool{
-		New: func() interface{} {
+		New: func() any {
 			return &Ping{}
 		},
 	}
 	pools[FrameGoAway] = &sync.Pool{
-		New: func() interface{} {
+		New: func() any {
 			return &GoAway{}
 		},
 	}
 	pools[FrameWindowUpdate] = &sync.Pool{
-		New: func() interface{} {
+		New: func() any {
 			return &WindowUpdate{}
 		},
 	}
 	pools[FrameContinuation] = &sync.Pool{
-		New: func() interface{} {
+		New: func() any {
 			return &Continuation{}
 		},
 	}

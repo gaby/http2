@@ -18,7 +18,7 @@ func (hf *HeaderField) String() string {
 }
 
 var headerPool = sync.Pool{
-	New: func() interface{} {
+	New: func() any {
 		return &HeaderField{}
 	},
 }
