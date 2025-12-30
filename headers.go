@@ -114,6 +114,7 @@ func (h *Headers) Deserialize(frh *FrameHeader) error {
 	payload := frh.payload
 
 	if flags.Has(FlagPadded) {
+		h.hasPadding = true
 		var err error
 		payload, err = http2utils.CutPadding(payload, len(payload))
 		if err != nil {
