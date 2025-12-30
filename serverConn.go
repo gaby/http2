@@ -160,6 +160,8 @@ func (sc *serverConn) close() {
 	}
 	sc.pingTimerMu.Unlock()
 
+	atomic.StoreInt32((*int32)(&sc.state), int32(connStateClosed))
+
 	if sc.maxIdleTimer != nil {
 		sc.maxIdleTimer.Stop()
 	}
@@ -176,12 +178,22 @@ func (sc *serverConn) handlePing(ping *Ping) {
 }
 
 func (sc *serverConn) writePing() {
+	if atomic.LoadInt32((*int32)(&sc.state)) == int32(connStateClosed) {
+		return
+	}
+
 	fr := AcquireFrameHeader()
 
 	ping := AcquireFrame(FramePing).(*Ping)
 	ping.SetCurrentTime()
 
 	fr.SetBody(ping)
+
+	defer func() {
+		if r := recover(); r != nil {
+			ReleaseFrameHeader(fr)
+		}
+	}()
 
 	sc.writer <- fr
 }
@@ -981,10 +993,14 @@ func (sc *serverConn) writeData(strm *Stream, body []byte) {
 }
 
 func (sc *serverConn) sendPingAndSchedule() {
+	if atomic.LoadInt32((*int32)(&sc.state)) == int32(connStateClosed) {
+		return
+	}
+
 	sc.writePing()
 
 	sc.pingTimerMu.Lock()
-	if sc.pingTimer != nil {
+	if sc.pingTimer != nil && atomic.LoadInt32((*int32)(&sc.state)) != int32(connStateClosed) {
 		sc.pingTimer.Reset(sc.pingInterval)
 	}
 	sc.pingTimerMu.Unlock()
