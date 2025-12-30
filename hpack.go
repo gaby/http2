@@ -70,6 +70,7 @@ func AcquireHPACK() *HPACK {
 
 // ReleaseHPACK puts HPACK to the pool.
 func ReleaseHPACK(hp *HPACK) {
+	hp.Reset()
 	hpackPool.Put(hp)
 }
 
@@ -78,7 +79,7 @@ func (hp *HPACK) releaseDynamic() {
 		ReleaseHeaderField(hf)
 	}
 
-	hp.dynamic = hp.dynamic[:0]
+	hp.dynamic = nil
 }
 
 // Reset deletes and releases all dynamic header fields.
