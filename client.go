@@ -50,14 +50,29 @@ type Ctx struct {
 	Err      chan error
 
 	streamID uint32
+
+	onResolve   func()
+	resolveOnce sync.Once
 }
 
 // resolve will resolve the context, meaning that provided an error,
-func (ctx *Ctx) resolve(err error) {
-	select {
-	case ctx.Err <- err:
-	default:
-	}
+func (ctx *Ctx) resolve(err error) bool {
+	resolved := false
+
+	ctx.resolveOnce.Do(func() {
+		resolved = true
+
+		if ctx.onResolve != nil {
+			ctx.onResolve()
+		}
+
+		select {
+		case ctx.Err <- err:
+		default:
+		}
+	})
+
+	return resolved
 }
 
 type Client struct {
@@ -144,35 +159,40 @@ func (cl *Client) RoundTrip(_ *fasthttp.HostClient, req *fasthttp.Request, res *
 
 	ch := make(chan error, 1)
 
-	var cancelTimer *time.Timer
-
 	ctx := &Ctx{
 		Request:  req,
 		Response: res,
 		Err:      ch,
 	}
 
-	if cl.opts.MaxResponseTime > 0 {
-		cancelTimer = time.AfterFunc(cl.opts.MaxResponseTime, func() {
-			select {
-			case ch <- ErrRequestCanceled:
-			}
+	var cancelTimer *time.Timer
+	var timerMu sync.Mutex
 
-			c.cancel(ctx)
+	stopTimer := func() {
+		timerMu.Lock()
+		if cancelTimer != nil {
+			cancelTimer.Stop()
+		}
+		timerMu.Unlock()
+	}
+
+	if cl.opts.MaxResponseTime > 0 {
+		ctx.onResolve = stopTimer
+
+		timerMu.Lock()
+		cancelTimer = time.AfterFunc(cl.opts.MaxResponseTime, func() {
+			if ctx.resolve(ErrRequestCanceled) {
+				c.cancel(ctx)
+			}
 		})
+		timerMu.Unlock()
+	} else {
+		ctx.onResolve = stopTimer
 	}
 
 	c.Write(ctx)
 
-	select {
-	case err = <-ch:
-	}
-
-	if cancelTimer != nil {
-		cancelTimer.Stop()
-	}
-
-	close(ch)
+	err = <-ch
 
 	return false, err
 }

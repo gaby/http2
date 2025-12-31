@@ -406,7 +406,7 @@ func (c *Conn) writeLoop() {
 
 		c.reqQueued.Range(func(_, v any) bool {
 			r := v.(*Ctx)
-			r.resolve(lastErr)
+			_ = r.resolve(lastErr)
 
 			return true
 		})
@@ -429,7 +429,7 @@ loop:
 
 			err := c.writeRequest(ctx)
 			if err != nil {
-				ctx.resolve(err)
+				_ = ctx.resolve(err)
 
 				if errors.Is(err, ErrNotAvailableStreams) {
 					continue
@@ -479,7 +479,7 @@ func (c *Conn) writeFrame(fr *FrameHeader) error {
 func (c *Conn) finish(r *Ctx, stream uint32, err error) {
 	atomic.AddInt32(&c.openStreams, -1)
 
-	r.resolve(err)
+	_ = r.resolve(err)
 
 	c.reqQueued.Delete(stream)
 }

@@ -42,7 +42,7 @@ func TestClientAdapterRoundTrip(t *testing.T) {
 		ctx := <-conn.in
 		require.Same(t, req, ctx.Request)
 		require.Same(t, res, ctx.Response)
-		ctx.resolve(nil)
+		_ = ctx.resolve(nil)
 		close(done)
 	}()
 

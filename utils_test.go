@@ -104,8 +104,8 @@ func TestClientOptionsSanitize(t *testing.T) {
 func TestCtxResolveNonBlocking(t *testing.T) {
 	ch := make(chan error, 1)
 	ctx := &Ctx{Err: ch}
-	ctx.resolve(io.EOF)
-	ctx.resolve(nil) // should not panic or block
+	_ = ctx.resolve(io.EOF)
+	_ = ctx.resolve(nil) // should not panic or block
 	err := <-ch
 	require.ErrorIs(t, err, io.EOF)
 }
