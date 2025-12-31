@@ -131,7 +131,7 @@ func TestConnWritePing(t *testing.T) {
 
 	require.NoError(t, conn.writePing())
 	require.Greater(t, buf.Len(), 0)
-	require.Equal(t, 1, conn.unacks)
+	require.Equal(t, int32(1), atomic.LoadInt32(&conn.unacks))
 }
 
 func TestConnFinishResolves(t *testing.T) {
@@ -186,6 +186,74 @@ func TestWriteErrorWrapping(t *testing.T) {
 
 	var target customErr
 	require.True(t, errors.As(we, &target))
+}
+
+func TestConnSettingsUpdateLimitsStreamsDuringRequests(t *testing.T) {
+	var buf bytes.Buffer
+	conn := &Conn{
+		bw:     bufio.NewWriter(&buf),
+		enc:    AcquireHPACK(),
+		out:    make(chan *FrameHeader, 1),
+		nextID: 1,
+	}
+	defer ReleaseHPACK(conn.enc)
+
+	conn.serverS.Reset()
+	conn.serverS.SetMaxConcurrentStreams(2)
+	atomic.StoreInt32(&conn.openStreams, 1)
+
+	st := &Settings{}
+	st.Reset()
+	st.SetMaxConcurrentStreams(1)
+
+	start := make(chan struct{})
+	settingsDone := make(chan struct{})
+	go func() {
+		<-start
+		time.Sleep(time.Millisecond * 10)
+		conn.handleSettings(st)
+		close(settingsDone)
+	}()
+
+	checksDone := make(chan struct{})
+	go func() {
+		<-start
+		for i := 0; i < 100; i++ {
+			conn.CanOpenStream()
+			time.Sleep(time.Millisecond)
+		}
+		close(checksDone)
+	}()
+
+	close(start)
+	<-settingsDone
+	<-checksDone
+
+	select {
+	case fr := <-conn.out:
+		require.Equal(t, FrameSettings, fr.Type())
+		require.True(t, fr.Body().(*Settings).IsAck())
+		ReleaseFrameHeader(fr)
+	default:
+		t.Fatal("expected settings ack frame")
+	}
+
+	req := fasthttp.AcquireRequest()
+	res := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(res)
+
+	req.SetRequestURI("https://example.com/test")
+	req.Header.SetMethod("GET")
+
+	ctx := &Ctx{
+		Request:  req,
+		Response: res,
+		Err:      make(chan error, 1),
+	}
+
+	require.ErrorIs(t, conn.writeRequest(ctx), ErrNotAvailableStreams)
+	require.Equal(t, int32(1), atomic.LoadInt32(&conn.openStreams))
 }
 
 func TestConnWriteRequest(t *testing.T) {

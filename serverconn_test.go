@@ -5,7 +5,11 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"sync"
+	"sync/atomic"
+	"log"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -148,4 +152,96 @@ func TestServerConnOversizedDataFrameResetsStream(t *testing.T) {
 		ReleaseFrameHeader(fr)
 	default:
 	}
+}
+
+func TestHandleStreamsConcurrentSettings(t *testing.T) {
+	sc := &serverConn{
+		reader:          make(chan *FrameHeader, 64),
+		writer:          make(chan *FrameHeader, 64),
+		maxRequestTimer: time.NewTimer(time.Hour),
+		maxRequestTime:  time.Hour,
+		closer:          make(chan struct{}),
+	}
+
+	sc.st.Reset()
+	sc.clientS.Reset()
+	atomic.StoreInt64(&sc.clientWindow, int64(sc.clientS.MaxWindowSize()))
+
+	writerDone := make(chan struct{})
+	go func() {
+		for fr := range sc.writer {
+			ReleaseFrameHeader(fr)
+		}
+		close(writerDone)
+	}()
+
+	streamsDone := make(chan struct{})
+	go func() {
+		sc.handleStreams()
+		close(streamsDone)
+	}()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 20; i++ {
+			st := &Settings{}
+			st.Reset()
+			st.SetMaxWindowSize(defaultWindowSize + uint32(i))
+			sc.handleSettings(st)
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 20; i++ {
+			fr := AcquireFrameHeader()
+			fr.SetStream(uint32(i*2 + 1))
+
+			priority := AcquireFrame(FramePriority).(*Priority)
+			priority.SetStream(0)
+			fr.SetBody(priority)
+
+			sc.reader <- fr
+		}
+	}()
+
+	wg.Wait()
+	close(sc.closer)
+	<-streamsDone
+
+	close(sc.writer)
+	<-writerDone
+}
+
+func TestServerConnFrameTooLargeSendsGoAway(t *testing.T) {
+	const maxSize = 16
+	const oversized = maxSize + 1
+
+	header := []byte{
+		0x0, 0x0, byte(oversized),
+		byte(FrameData), 0x0,
+		0x0, 0x0, 0x0, 0x1,
+	}
+	payload := bytes.Repeat([]byte{0}, oversized)
+	data := append(header, payload...)
+
+	sc := &serverConn{
+		br:      bufio.NewReader(bytes.NewReader(data)),
+		clientS: Settings{},
+		writer:  make(chan *FrameHeader, 1),
+		logger:  log.New(io.Discard, "", 0),
+	}
+	sc.clientS.Reset()
+	sc.clientS.SetMaxFrameSize(maxSize)
+
+	err := sc.readLoop()
+	require.ErrorIs(t, err, ErrPayloadExceeds)
+
+	fr := <-sc.writer
+	require.Equal(t, FrameGoAway, fr.Type())
+	require.Equal(t, FrameSizeError, fr.Body().(*GoAway).Code())
+	ReleaseFrameHeader(fr)
 }
