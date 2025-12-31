@@ -227,7 +227,7 @@ func TestServerConnSettingsWhileEncoding(t *testing.T) {
 	<-writerDone
 }
 
-func TestServerConnFrameTooLargeSendsGoAway(t *testing.T) {
+func TestServerConnFrameTooLargeSendsReset(t *testing.T) {
 	const maxSize = 16
 	const oversized = maxSize + 1
 
@@ -252,8 +252,8 @@ func TestServerConnFrameTooLargeSendsGoAway(t *testing.T) {
 	require.ErrorIs(t, err, ErrPayloadExceeds)
 
 	fr := <-sc.writer
-	require.Equal(t, FrameGoAway, fr.Type())
-	require.Equal(t, FrameSizeError, fr.Body().(*GoAway).Code())
+	require.Equal(t, FrameResetStream, fr.Type())
+	require.Equal(t, FrameSizeError, fr.Body().(*RstStream).Code())
 	ReleaseFrameHeader(fr)
 }
 

@@ -261,7 +261,21 @@ func (sc *serverConn) readLoop() (err error) {
 			}
 
 			if errors.Is(err, ErrPayloadExceeds) {
-				sc.writeGoAway(0, FrameSizeError, "frame size exceeds maximum")
+				switch {
+				case fr == nil,
+					fr.Stream() == 0,
+					fr.Type() == FrameSettings,
+					fr.Type() == FrameHeaders,
+					fr.Type() == FramePushPromise,
+					fr.Type() == FrameContinuation:
+					sc.writeGoAway(0, FrameSizeError, "frame size exceeds maximum")
+				default:
+					sc.writeReset(fr.Stream(), FrameSizeError)
+				}
+
+				if fr != nil {
+					ReleaseFrameHeader(fr)
+				}
 			}
 
 			break
