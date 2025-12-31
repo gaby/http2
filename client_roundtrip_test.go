@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -74,6 +75,53 @@ func TestClientRoundTripTimeoutCancelsStream(t *testing.T) {
 		}
 	}, time.Second, time.Millisecond*10, "cancel frame not enqueued")
 	require.True(t, resetReceived, "cancel frame not enqueued")
+}
+
+func TestClientRoundTripTimeoutIgnoresLateResponse(t *testing.T) {
+	conn := &Conn{
+		in:  make(chan *Ctx, 1),
+		out: make(chan *FrameHeader, 1),
+	}
+	conn.serverS.maxStreams = 1
+
+	client := createClient(&Dialer{}, ClientOpts{MaxResponseTime: time.Millisecond * 10})
+	client.conns.PushBack(conn)
+
+	req := fasthttp.AcquireRequest()
+	res := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(res)
+
+	panicCh := make(chan any, 1)
+	timeoutDone := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				panicCh <- r
+			}
+		}()
+
+		ctx := <-conn.in
+		<-timeoutDone
+
+		ctx.resolve(nil)
+	}()
+
+	retry, err := client.RoundTrip(nil, req, res)
+	require.False(t, retry)
+	require.ErrorIs(t, err, ErrRequestCanceled)
+
+	close(timeoutDone)
+	wg.Wait()
+
+	select {
+	case p := <-panicCh:
+		require.Failf(t, "panic triggered", "%v", p)
+	default:
+	}
 }
 
 func TestConfigureClientRemovesH2WhenServerDoesNotSupportIt(t *testing.T) {
