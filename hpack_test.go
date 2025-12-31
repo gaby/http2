@@ -2,8 +2,8 @@ package http2
 
 import (
 	"bytes"
+	"context"
 	"fmt"
-	"sync"
 	"testing"
 	"time"
 
@@ -107,29 +107,25 @@ func check(t *testing.T, slice []*HeaderField, i int, k, v string) {
 func readHPACKAndCheck(t *testing.T, hpack *HPACK, b []byte, fields, table []string, tableSize uint32) {
 	t.Helper()
 
-	var err error
-	var lck sync.Mutex
-	var ok bool
-
-	go func() {
-		// timeout in case a header has any error
-		time.Sleep(time.Second * 2)
-		lck.Lock()
-		ok = true
-		lck.Unlock()
-	}()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*2)
+	defer cancel()
 
 	hfields := make([]*HeaderField, len(fields)/2)
-	for i := 0; len(b) > 0 && !ok; i++ {
-		hfields[i] = AcquireHeaderField()
-		b, err = hpack.Next(hfields[i], b)
-		require.NoError(t, err)
-	}
-	lck.Lock()
-	ok = true
-	lck.Unlock()
+	for i := 0; len(b) > 0; i++ {
+		select {
+		case <-ctx.Done():
+			require.FailNowf(t, "timeout", "error reading headers: %d bytes remaining", len(b))
+		default:
+		}
 
-	require.Len(t, b, 0, "error reading headers: timeout")
+		hfields[i] = AcquireHeaderField()
+		next, err := hpack.Next(hfields[i], b)
+		require.NoError(t, err)
+		require.Less(t, len(next), len(b), "decoder made no progress")
+		b = next
+	}
+
+	require.Len(t, b, 0, "error reading headers")
 
 	n := 0
 	for i := 0; i < len(fields); i += 2 {

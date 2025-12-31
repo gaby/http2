@@ -160,7 +160,7 @@ func TestIssue27(t *testing.T) {
 			Handler: func(ctx *fasthttp.RequestCtx) {
 				io.WriteString(ctx, "Hello world")
 			},
-			ReadTimeout: time.Second * 1,
+			ReadTimeout: time.Millisecond * 50,
 		},
 		cnf: ServerConfig{
 			Debug: false,
@@ -199,23 +199,27 @@ func TestIssue27(t *testing.T) {
 	c.writeFrame(h1)
 	c.writeFrame(h2)
 
-	time.Sleep(time.Second)
-	c.writeFrame(h3)
+	readReset := func(expectedID uint32) {
+		t.Helper()
 
-	id := uint32(3)
-
-	for i := 0; i < 3; i++ {
+		require.NoError(t, c.c.SetReadDeadline(time.Now().Add(time.Second)))
 		fr, err := c.readNext()
 		require.NoError(t, err)
 
-		require.Equal(t, id, fr.Stream(), "Expecting update on stream %d", id)
+		require.Equal(t, expectedID, fr.Stream(), "Expecting update on stream %d", expectedID)
 		require.Equal(t, FrameResetStream, fr.Type(), "Expecting Reset")
 
 		rst := fr.Body().(*RstStream)
 		require.Equal(t, StreamCanceled, rst.Code(), "Expecting StreamCanceled")
 
-		id += 2
+		require.NoError(t, c.c.SetReadDeadline(time.Time{}))
 	}
+
+	readReset(3)
+	readReset(5)
+	c.writeFrame(h3)
+
+	readReset(7)
 }
 
 func TestIdleConnection(t *testing.T) {
