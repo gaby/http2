@@ -37,10 +37,35 @@ func (pp *PushPromise) Write(b []byte) (int, error) {
 	return n, nil
 }
 
+func (pp *PushPromise) Stream() uint32 {
+	return pp.stream
+}
+
+func (pp *PushPromise) SetStream(stream uint32) {
+	pp.stream = stream & (1<<31 - 1)
+}
+
+func (pp *PushPromise) EndHeaders() bool {
+	return pp.ended
+}
+
+func (pp *PushPromise) SetEndHeaders(value bool) {
+	pp.ended = value
+}
+
+func (pp *PushPromise) Padding() bool {
+	return pp.pad
+}
+
+func (pp *PushPromise) SetPadding(value bool) {
+	pp.pad = value
+}
+
 func (pp *PushPromise) Deserialize(fr *FrameHeader) error {
 	payload := fr.payload
 
 	if fr.Flags().Has(FlagPadded) {
+		pp.pad = true
 		var err error
 		payload, err = http2utils.CutPadding(payload, fr.Len())
 		if err != nil {
@@ -48,25 +73,29 @@ func (pp *PushPromise) Deserialize(fr *FrameHeader) error {
 		}
 	}
 
-	if len(fr.payload) < 4 {
+	if len(payload) < 4 {
 		return ErrMissingBytes
 	}
 
 	pp.stream = http2utils.BytesToUint32(payload) & (1<<31 - 1)
-	pp.header = append(pp.header, payload[4:]...)
+	pp.SetHeader(payload[4:])
 	pp.ended = fr.Flags().Has(FlagEndHeaders)
 
 	return nil
 }
 
 func (pp *PushPromise) Serialize(fr *FrameHeader) {
-	fr.payload = fr.payload[:0]
+	payload := http2utils.AppendUint32Bytes(fr.payload[:0], pp.stream)
+	payload = append(payload, pp.header...)
 
-	// if pp.pad {
-	// 	fr.Flags().Add(FlagPadded)
-	// 	// TODO: Write padding flag
-	// }
+	if pp.pad {
+		fr.SetFlags(fr.Flags().Add(FlagPadded))
+		payload = http2utils.AddPadding(payload)
+	}
 
-	fr.payload = append(fr.payload, pp.header...)
-	// TODO: write padding
+	if pp.ended {
+		fr.SetFlags(fr.Flags().Add(FlagEndHeaders))
+	}
+
+	fr.payload = payload
 }

@@ -231,6 +231,11 @@ func (sc *serverConn) readLoop() (err error) {
 				continue
 			}
 
+			if errors.Is(err, ErrPayloadExceeds) {
+				sc.writeGoAway(0, FrameSizeError, "frame size exceeds maximum")
+				continue
+			}
+
 			break
 		}
 

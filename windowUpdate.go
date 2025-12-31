@@ -30,6 +30,9 @@ func (wu *WindowUpdate) Increment() int {
 }
 
 func (wu *WindowUpdate) SetIncrement(increment int) {
+	if increment <= 0 || increment > 1<<31-1 {
+		panic("invalid window size increment")
+	}
 	wu.increment = increment
 }
 
@@ -40,6 +43,9 @@ func (wu *WindowUpdate) Deserialize(fr *FrameHeader) error {
 	}
 
 	wu.increment = int(http2utils.BytesToUint32(fr.payload) & (1<<31 - 1))
+	if wu.increment == 0 {
+		return NewGoAwayError(ProtocolError, "window size increment is 0")
+	}
 
 	return nil
 }

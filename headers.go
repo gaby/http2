@@ -45,6 +45,7 @@ func (h *Headers) CopyTo(h2 *Headers) {
 	h2.weight = h.weight
 	h2.endStream = h.endStream
 	h2.endHeaders = h.endHeaders
+	h2.priority = h.priority
 	h2.rawHeaders = append(h2.rawHeaders[:0], h.rawHeaders...)
 }
 
@@ -109,6 +110,14 @@ func (h *Headers) SetPadding(value bool) {
 	h.hasPadding = value
 }
 
+func (h *Headers) Priority() bool {
+	return h.priority
+}
+
+func (h *Headers) SetPriority(value bool) {
+	h.priority = value
+}
+
 func (h *Headers) Deserialize(frh *FrameHeader) error {
 	flags := frh.Flags()
 	payload := frh.payload
@@ -154,11 +163,11 @@ func (h *Headers) Serialize(frh *FrameHeader) {
 		frh.SetFlags(
 			frh.Flags().Add(FlagPriority))
 
-		// prepend stream and weight to rawHeaders
-		h.rawHeaders = append(h.rawHeaders, 0, 0, 0, 0, 0)
-		copy(h.rawHeaders[5:], h.rawHeaders)
-		http2utils.Uint32ToBytes(h.rawHeaders[0:4], frh.stream)
-		h.rawHeaders[4] = h.weight
+		raw := make([]byte, 5+len(h.rawHeaders))
+		http2utils.Uint32ToBytes(raw[0:4], h.stream)
+		raw[4] = h.weight
+		copy(raw[5:], h.rawHeaders)
+		h.rawHeaders = raw
 	}
 
 	if h.hasPadding {

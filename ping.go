@@ -32,7 +32,8 @@ func (p *Ping) Reset() {
 }
 
 func (p *Ping) CopyTo(other *Ping) {
-	p.ack = other.ack
+	other.ack = p.ack
+	other.data = p.data
 }
 
 func (p *Ping) Write(b []byte) (n int, err error) {
