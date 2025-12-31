@@ -469,7 +469,9 @@ loop:
 					continue
 				}
 
-				strm = NewStream(fr.Stream(), int32(atomic.LoadInt64(&sc.clientWindow)))
+				recvWindow := int32(sc.st.MaxWindowSize())
+				sendWindow := int32(atomic.LoadInt64(&sc.clientWindow))
+				strm = NewStream(fr.Stream(), recvWindow, sendWindow)
 				strms = append(strms, strm)
 
 				// RFC(5.1.1):
@@ -535,6 +537,17 @@ loop:
 
 				if sc.maxIdleTimer != nil {
 					sc.resetMaxIdleTimer()
+				}
+			}
+
+			if fr.Type() == FrameData {
+				payloadLen := fr.Body().(*Data).Len()
+				if err := sc.consumeConnectionWindow(payloadLen); err != nil {
+					sc.writeError(nil, err)
+					if strm != nil {
+						strm.SetState(StreamStateClosed)
+					}
+					break loop
 				}
 			}
 
@@ -733,8 +746,15 @@ func (sc *serverConn) handleFrame(strm *Stream, fr *FrameHeader) error {
 			return NewGoAwayError(StreamClosedError, "stream closed")
 		}
 
-		strm.ctx.Request.AppendBody(
-			fr.Body().(*Data).Data())
+		data := fr.Body().(*Data)
+		payloadLen := data.Len()
+
+		if err := sc.consumeStreamWindow(strm, payloadLen); err != nil {
+			return err
+		}
+
+		strm.ctx.Request.AppendBody(data.Data())
+		sc.queueWindowUpdate(strm, payloadLen)
 	case FrameResetStream:
 		if strm.State() == StreamStateIdle {
 			return NewGoAwayError(ProtocolError, "RST_STREAM on idle stream")
@@ -757,7 +777,7 @@ func (sc *serverConn) handleFrame(strm *Stream, fr *FrameHeader) error {
 			return NewGoAwayError(ProtocolError, "window increment of 0")
 		}
 
-		if atomic.AddInt64(&strm.window, win) >= 1<<31-1 {
+		if atomic.AddInt64(&strm.sendWindow, win) >= 1<<31-1 {
 			return NewResetStreamError(FlowControlError, "window is above limits")
 		}
 	default:
@@ -1018,8 +1038,8 @@ func (s *streamWrite) ReadFrom(r io.Reader) (num int64, err error) {
 
 func (sc *serverConn) writeData(strm *Stream, body []byte) {
 	step := 1 << 14 // max frame size 16384
-	if strm.window > 0 && step > int(strm.window) {
-		step = int(strm.window)
+	if strm.sendWindow > 0 && step > int(strm.sendWindow) {
+		step = int(strm.sendWindow)
 	}
 
 	for i := 0; i < len(body); i += step {
@@ -1108,6 +1128,99 @@ func (sc *serverConn) handleSettings(st *Settings) {
 	fr.SetBody(stRes)
 
 	sc.writer <- fr
+}
+
+const maxWindowIncrement = 1<<31 - 1
+
+func (sc *serverConn) consumeConnectionWindow(n int) error {
+	if n == 0 {
+		return nil
+	}
+
+	if n < 0 {
+		return NewGoAwayError(FlowControlError, "invalid DATA size")
+	}
+
+	if int32(n) > sc.currentWindow {
+		return NewGoAwayError(FlowControlError, "connection flow control window exceeded")
+	}
+
+	sc.currentWindow -= int32(n)
+	return nil
+}
+
+func (sc *serverConn) consumeStreamWindow(strm *Stream, n int) error {
+	if n == 0 {
+		return nil
+	}
+
+	if strm == nil || n < 0 {
+		return NewResetStreamError(FlowControlError, "invalid DATA size")
+	}
+
+	if int64(n) > atomic.LoadInt64(&strm.window) {
+		return NewResetStreamError(FlowControlError, "stream flow control window exceeded")
+	}
+
+	atomic.AddInt64(&strm.window, -int64(n))
+	return nil
+}
+
+func (sc *serverConn) queueWindowUpdate(strm *Stream, n int) {
+	if n <= 0 || strm == nil {
+		return
+	}
+
+	connInc := sc.windowIncrement(int64(sc.maxWindow), int64(sc.currentWindow), n)
+	streamInc := sc.windowIncrement(int64(strm.recvWindowSize), atomic.LoadInt64(&strm.window), n)
+
+	if connInc > 0 {
+		sc.sendWindowIncrement(0, connInc, func(inc int) {
+			sc.currentWindow += int32(inc)
+		})
+	}
+
+	if streamInc > 0 {
+		sc.sendWindowIncrement(strm.ID(), streamInc, func(inc int) {
+			atomic.AddInt64(&strm.window, int64(inc))
+		})
+	}
+}
+
+func (sc *serverConn) windowIncrement(limit, current int64, n int) int {
+	if n <= 0 || current >= limit {
+		return 0
+	}
+
+	remaining := limit - current
+	if remaining <= 0 {
+		return 0
+	}
+
+	if int64(n) > remaining {
+		return int(remaining)
+	}
+
+	return n
+}
+
+func (sc *serverConn) sendWindowIncrement(streamID uint32, n int, apply func(int)) {
+	for remaining := n; remaining > 0; {
+		inc := min(remaining, maxWindowIncrement)
+
+		apply(inc)
+
+		fr := AcquireFrameHeader()
+		wu := AcquireFrame(FrameWindowUpdate).(*WindowUpdate)
+		wu.SetIncrement(inc)
+
+		fr.SetStream(streamID)
+		fr.SetBody(wu)
+
+		sc.writer <- fr
+
+		remaining -= inc
+	}
 }
 
 func fasthttpResponseHeaders(dst *Headers, hp *HPACK, res *fasthttp.Response) {

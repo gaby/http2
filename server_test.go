@@ -134,11 +134,15 @@ func testIssue52(t *testing.T) {
 	}
 
 	for len(expect) != 0 {
-		next := expect[0]
-
 		fr, err := c.readNext()
 		require.NoError(t, err)
 
+		if fr.Type() == FrameWindowUpdate {
+			ReleaseFrameHeader(fr)
+			continue
+		}
+
+		next := expect[0]
 		require.Equal(t, next, fr.Type(), "unexpected frame type")
 
 		if fr.Type() == FrameResetStream {
@@ -147,11 +151,21 @@ func testIssue52(t *testing.T) {
 		}
 
 		expect = expect[1:]
+		ReleaseFrameHeader(fr)
 	}
 
-	_, err = c.readNext()
-	require.Error(t, err, "Expecting error")
-	require.ErrorIs(t, err, io.EOF)
+	for {
+		fr, err := c.readNext()
+		if err != nil {
+			require.ErrorIs(t, err, io.EOF)
+			break
+		}
+
+		if fr.Type() != FrameWindowUpdate {
+			t.Fatalf("unexpected frame type %d", fr.Type())
+		}
+		ReleaseFrameHeader(fr)
+	}
 }
 
 func TestIssue27(t *testing.T) {
