@@ -131,7 +131,7 @@ func TestConnWritePing(t *testing.T) {
 
 	require.NoError(t, conn.writePing())
 	require.Greater(t, buf.Len(), 0)
-	require.Equal(t, 1, conn.unacks)
+	require.Equal(t, int32(1), atomic.LoadInt32(&conn.unacks))
 }
 
 func TestConnFinishResolves(t *testing.T) {

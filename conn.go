@@ -106,7 +106,7 @@ type Conn struct {
 
 	pingInterval time.Duration
 
-	unacks      int
+	unacks      int32
 	disableAcks bool
 
 	lastErr      error
@@ -458,7 +458,7 @@ loop:
 			}
 		}
 
-		if !c.disableAcks && c.unacks >= 3 {
+		if !c.disableAcks && atomic.LoadInt32(&c.unacks) >= 3 {
 			lastErr = ErrTimeout
 			break loop
 		}
@@ -654,7 +654,7 @@ loop:
 			if !ping.IsAck() {
 				c.handlePing(ping)
 			} else {
-				c.unacks--
+				atomic.AddInt32(&c.unacks, -1)
 			}
 		case FrameGoAway:
 			ga := fr.Body().(*GoAway)
@@ -691,7 +691,7 @@ func (c *Conn) writePing() error {
 	if err == nil {
 		err = c.bw.Flush()
 		if err == nil {
-			c.unacks++
+			atomic.AddInt32(&c.unacks, 1)
 		}
 	}
 
