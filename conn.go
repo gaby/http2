@@ -301,7 +301,7 @@ func (c *Conn) doHandshake() error {
 func (c *Conn) updateServerSettings(st *Settings) {
 	c.serverSMu.Lock()
 	st.CopyTo(&c.serverS)
-	c.serverStreamWindow += int32(c.serverS.MaxWindowSize())
+	c.serverStreamWindow = int32(c.serverS.MaxWindowSize())
 	c.serverSMu.Unlock()
 }
 
