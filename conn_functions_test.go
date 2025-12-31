@@ -246,6 +246,40 @@ func TestWriteLoopPreservesExistingLastErr(t *testing.T) {
 	require.ErrorIs(t, conn.LastErr(), readErr)
 }
 
+type errWriteConn struct {
+	stubConn
+}
+
+func (c *errWriteConn) Write([]byte) (int, error) { return 0, net.ErrClosed }
+
+func TestWriteLoopPrefersStoredErrorOverClosedWrite(t *testing.T) {
+	raw := &errWriteConn{}
+	conn := &Conn{
+		c:            raw,
+		bw:           bufio.NewWriter(raw),
+		in:           make(chan *Ctx),
+		out:          make(chan *FrameHeader, 1),
+		pingInterval: time.Hour,
+	}
+
+	readErr := errors.New("read loop failure")
+	conn.setLastErr(readErr)
+
+	done := make(chan struct{})
+	go func() {
+		conn.writeLoop()
+		close(done)
+	}()
+
+	fr := AcquireFrameHeader()
+	fr.SetBody(AcquireFrame(FrameSettings))
+	conn.out <- fr
+
+	<-done
+
+	require.ErrorIs(t, conn.LastErr(), readErr)
+}
+
 func TestConnSettingsUpdateLimitsStreamsDuringRequests(t *testing.T) {
 	var buf bytes.Buffer
 	conn := &Conn{

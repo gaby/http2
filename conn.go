@@ -423,8 +423,9 @@ func (c *Conn) writeLoop() {
 			}
 		}
 
-		if lastErr == nil {
-			lastErr = c.loadLastErr()
+		storedErr := c.loadLastErr()
+		if lastErr == nil || (storedErr != nil && errors.Is(lastErr, net.ErrClosed)) {
+			lastErr = storedErr
 		}
 
 		if lastErr == nil {
