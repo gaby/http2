@@ -162,36 +162,6 @@ func TestHandleStreamsConcurrentSettings(t *testing.T) {
 	<-writerDone
 }
 
-func TestServerConnFrameTooLargeSendsGoAway(t *testing.T) {
-	const maxSize = 16
-	const oversized = maxSize + 1
-
-	header := []byte{
-		0x0, 0x0, byte(oversized),
-		byte(FrameData), 0x0,
-		0x0, 0x0, 0x0, 0x1,
-	}
-	payload := bytes.Repeat([]byte{0}, oversized)
-	data := append(header, payload...)
-
-	sc := &serverConn{
-		br:     bufio.NewReader(bytes.NewReader(data)),
-		st:     Settings{},
-		writer: make(chan *FrameHeader, 1),
-		logger: log.New(io.Discard, "", 0),
-	}
-	sc.st.Reset()
-	sc.st.SetMaxFrameSize(maxSize)
-
-	err := sc.readLoop()
-	require.ErrorIs(t, err, ErrPayloadExceeds)
-
-	fr := <-sc.writer
-	require.Equal(t, FrameGoAway, fr.Type())
-	require.Equal(t, FrameSizeError, fr.Body().(*GoAway).Code())
-	ReleaseFrameHeader(fr)
-}
-
 func TestServerConnFrameSizeUsesServerSettings(t *testing.T) {
 	const maxSize = 32
 
@@ -221,5 +191,65 @@ func TestServerConnFrameSizeUsesServerSettings(t *testing.T) {
 
 	fr := <-sc.reader
 	require.Equal(t, FrameData, fr.Type())
+	ReleaseFrameHeader(fr)
+}
+
+func TestServerConnOversizedDataSendsReset(t *testing.T) {
+	const maxSize = 16
+	const oversized = maxSize + 1
+
+	header := []byte{
+		0x0, 0x0, byte(oversized),
+		byte(FrameData), 0x0,
+		0x0, 0x0, 0x0, 0x1,
+	}
+	payload := bytes.Repeat([]byte{0}, oversized)
+	data := append(header, payload...)
+
+	sc := &serverConn{
+		br:     bufio.NewReader(bytes.NewReader(data)),
+		st:     Settings{},
+		writer: make(chan *FrameHeader, 1),
+		logger: log.New(io.Discard, "", 0),
+	}
+	sc.st.Reset()
+	sc.st.SetMaxFrameSize(maxSize)
+
+	err := sc.readLoop()
+	require.True(t, err == nil || errors.Is(err, io.EOF))
+
+	fr := <-sc.writer
+	require.Equal(t, FrameResetStream, fr.Type())
+	require.Equal(t, FrameSizeError, fr.Body().(*RstStream).Code())
+	ReleaseFrameHeader(fr)
+}
+
+func TestServerConnOversizedConnectionFrameSendsGoAway(t *testing.T) {
+	const maxSize = 16
+	const oversized = maxSize + 1
+
+	header := []byte{
+		0x0, 0x0, byte(oversized),
+		byte(FrameSettings), 0x0,
+		0x0, 0x0, 0x0, 0x0,
+	}
+	payload := bytes.Repeat([]byte{0}, oversized)
+	data := append(header, payload...)
+
+	sc := &serverConn{
+		br:     bufio.NewReader(bytes.NewReader(data)),
+		st:     Settings{},
+		writer: make(chan *FrameHeader, 1),
+		logger: log.New(io.Discard, "", 0),
+	}
+	sc.st.Reset()
+	sc.st.SetMaxFrameSize(maxSize)
+
+	err := sc.readLoop()
+	require.ErrorIs(t, err, ErrPayloadExceeds)
+
+	fr := <-sc.writer
+	require.Equal(t, FrameGoAway, fr.Type())
+	require.Equal(t, FrameSizeError, fr.Body().(*GoAway).Code())
 	ReleaseFrameHeader(fr)
 }

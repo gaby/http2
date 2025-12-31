@@ -260,7 +260,25 @@ func (f *FrameHeader) setPayload(payload []byte) {
 
 func (f *FrameHeader) checkLen() error {
 	if f.maxLen != 0 && f.length > int(f.maxLen) {
-		return ErrPayloadExceeds
+		return frameSizeError{
+			frameType:  f.kind,
+			streamID:   f.stream,
+			payloadLen: f.length,
+		}
 	}
 	return nil
+}
+
+type frameSizeError struct {
+	frameType  FrameType
+	streamID   uint32
+	payloadLen int
+}
+
+func (fse frameSizeError) Error() string {
+	return ErrPayloadExceeds.Error()
+}
+
+func (fse frameSizeError) Unwrap() error {
+	return ErrPayloadExceeds
 }

@@ -259,7 +259,23 @@ func (sc *serverConn) readLoop() (err error) {
 				continue
 			}
 
-			if errors.Is(err, ErrPayloadExceeds) {
+			var fse frameSizeError
+			if errors.As(err, &fse) {
+				if fse.streamID != 0 &&
+					fse.frameType != FrameHeaders &&
+					fse.frameType != FramePushPromise &&
+					fse.frameType != FrameContinuation &&
+					fse.frameType != FrameSettings {
+					if _, derr := io.CopyN(io.Discard, sc.br, int64(fse.payloadLen)); derr != nil {
+						err = derr
+						break
+					}
+
+					sc.writeReset(fse.streamID, FrameSizeError)
+					err = nil
+					continue
+				}
+
 				sc.writeGoAway(0, FrameSizeError, "frame size exceeds maximum")
 			}
 
