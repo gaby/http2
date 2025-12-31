@@ -72,6 +72,7 @@ type serverConn struct {
 	maxRequestTimer *time.Timer
 	maxIdleTimer    *time.Timer
 	pingTimerMu     sync.Mutex
+	timerMu         sync.Mutex
 
 	closer chan struct{}
 
@@ -93,12 +94,14 @@ func (sc *serverConn) Handshake() error {
 
 func (sc *serverConn) Serve() error {
 	sc.closer = make(chan struct{}, 1)
+	sc.timerMu.Lock()
 	sc.maxRequestTimer = time.NewTimer(0)
 	atomic.StoreInt64(&sc.clientWindow, int64(sc.clientS.MaxWindowSize()))
 
 	if sc.maxIdleTime > 0 {
 		sc.maxIdleTimer = time.AfterFunc(sc.maxIdleTime, sc.closeIdleConn)
 	}
+	sc.timerMu.Unlock()
 
 	defer func() {
 		if err := recover(); err != nil {
@@ -162,11 +165,31 @@ func (sc *serverConn) close() {
 
 	atomic.StoreInt32((*int32)(&sc.state), int32(connStateClosed))
 
+	sc.timerMu.Lock()
 	if sc.maxIdleTimer != nil {
 		sc.maxIdleTimer.Stop()
 	}
 
-	sc.maxRequestTimer.Stop()
+	if sc.maxRequestTimer != nil {
+		sc.maxRequestTimer.Stop()
+	}
+	sc.timerMu.Unlock()
+}
+
+func (sc *serverConn) resetMaxRequestTimer(d time.Duration) {
+	sc.timerMu.Lock()
+	if sc.maxRequestTimer != nil {
+		sc.maxRequestTimer.Reset(d)
+	}
+	sc.timerMu.Unlock()
+}
+
+func (sc *serverConn) resetMaxIdleTimer() {
+	sc.timerMu.Lock()
+	if sc.maxIdleTimer != nil {
+		sc.maxIdleTimer.Reset(sc.maxIdleTime)
+	}
+	sc.timerMu.Unlock()
 }
 
 func (sc *serverConn) handlePing(ping *Ping) {
@@ -365,7 +388,7 @@ loop:
 					// try to arm the timer
 					when := strm.startedAt.Add(sc.maxRequestTime).Sub(time.Now())
 					// if the time is negative or zero it triggers imm
-					sc.maxRequestTimer.Reset(when)
+					sc.resetMaxRequestTimer(when)
 
 					if sc.debug {
 						sc.logger.Printf("Next request will timeout in %f seconds\n", when.Seconds())
@@ -448,7 +471,7 @@ loop:
 
 				if !reqTimerArmed && sc.maxRequestTime > 0 {
 					reqTimerArmed = true
-					sc.maxRequestTimer.Reset(sc.maxRequestTime)
+					sc.resetMaxRequestTimer(sc.maxRequestTime)
 
 					if sc.debug {
 						sc.logger.Printf("Next request will timeout in %f seconds\n", sc.maxRequestTime.Seconds())
@@ -491,7 +514,7 @@ loop:
 				}
 
 				if sc.maxIdleTimer != nil {
-					sc.maxIdleTimer.Reset(sc.maxIdleTime)
+					sc.resetMaxIdleTimer()
 				}
 			}
 
