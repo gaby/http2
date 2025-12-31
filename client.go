@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/valyala/fasthttp"
@@ -49,15 +50,23 @@ type Ctx struct {
 	Response *fasthttp.Response
 	Err      chan error
 
-	streamID uint32
+	streamID    uint32
+	resolveOnce sync.Once
+	onResolve   func(error)
 }
 
 // resolve will resolve the context, meaning that provided an error,
 func (ctx *Ctx) resolve(err error) {
-	select {
-	case ctx.Err <- err:
-	default:
-	}
+	ctx.resolveOnce.Do(func() {
+		if ctx.onResolve != nil {
+			ctx.onResolve(err)
+		}
+
+		select {
+		case ctx.Err <- err:
+		default:
+		}
+	})
 }
 
 type Client struct {
@@ -144,7 +153,7 @@ func (cl *Client) RoundTrip(_ *fasthttp.HostClient, req *fasthttp.Request, res *
 
 	ch := make(chan error, 1)
 
-	var cancelTimer *time.Timer
+	var cancelTimer atomic.Pointer[time.Timer]
 
 	ctx := &Ctx{
 		Request:  req,
@@ -152,14 +161,17 @@ func (cl *Client) RoundTrip(_ *fasthttp.HostClient, req *fasthttp.Request, res *
 		Err:      ch,
 	}
 
-	if cl.opts.MaxResponseTime > 0 {
-		cancelTimer = time.AfterFunc(cl.opts.MaxResponseTime, func() {
-			select {
-			case ch <- ErrRequestCanceled:
-			}
+	ctx.onResolve = func(error) {
+		if timer := cancelTimer.Load(); timer != nil {
+			timer.Stop()
+		}
+	}
 
+	if cl.opts.MaxResponseTime > 0 {
+		cancelTimer.Store(time.AfterFunc(cl.opts.MaxResponseTime, func() {
+			ctx.resolve(ErrRequestCanceled)
 			c.cancel(ctx)
-		})
+		}))
 	}
 
 	c.Write(ctx)
@@ -167,12 +179,6 @@ func (cl *Client) RoundTrip(_ *fasthttp.HostClient, req *fasthttp.Request, res *
 	select {
 	case err = <-ch:
 	}
-
-	if cancelTimer != nil {
-		cancelTimer.Stop()
-	}
-
-	close(ch)
 
 	return false, err
 }
