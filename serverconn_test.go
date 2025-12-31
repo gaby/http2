@@ -1,6 +1,7 @@
 package http2
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"io"
@@ -93,4 +94,58 @@ func TestStreamsAndWindowUpdateHelpers(t *testing.T) {
 	var copied WindowUpdate
 	wu.CopyTo(&copied)
 	require.Equal(t, wu.Increment(), copied.Increment())
+}
+
+func TestServerConnOversizedDataFrameResetsStream(t *testing.T) {
+	var buf bytes.Buffer
+	bw := bufio.NewWriter(&buf)
+
+	hdrFrame := AcquireFrameHeader()
+	hdr := AcquireFrame(FrameHeaders).(*Headers)
+	hdr.SetEndHeaders(true)
+	hdr.SetEndStream(false)
+	hdrFrame.SetBody(hdr)
+	hdrFrame.SetStream(1)
+	_, err := hdrFrame.WriteTo(bw)
+	require.NoError(t, err)
+	ReleaseFrameHeader(hdrFrame)
+
+	dataFrame := AcquireFrameHeader()
+	data := AcquireFrame(FrameData).(*Data)
+	data.SetEndStream(true)
+	data.SetData(make([]byte, int(defaultDataFrameSize)+1))
+	dataFrame.SetBody(data)
+	dataFrame.SetStream(1)
+	_, err = dataFrame.WriteTo(bw)
+	require.NoError(t, err)
+	ReleaseFrameHeader(dataFrame)
+
+	require.NoError(t, bw.Flush())
+
+	sc := &serverConn{
+		br:     bufio.NewReader(bytes.NewReader(buf.Bytes())),
+		writer: make(chan *FrameHeader, 1),
+		reader: make(chan *FrameHeader, 1),
+		logger: logger,
+	}
+	sc.clientS.Reset()
+
+	err = sc.readLoop()
+	require.ErrorIs(t, err, io.EOF)
+
+	select {
+	case fr := <-sc.writer:
+		require.Equal(t, FrameResetStream, fr.Type())
+		require.Equal(t, uint32(1), fr.Stream())
+		ReleaseFrameHeader(fr)
+	default:
+		t.Fatal("expected reset frame")
+	}
+
+	select {
+	case fr := <-sc.writer:
+		require.NotEqual(t, FrameGoAway, fr.Type())
+		ReleaseFrameHeader(fr)
+	default:
+	}
 }

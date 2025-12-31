@@ -35,6 +35,19 @@ var frameHeaderPool = sync.Pool{
 	},
 }
 
+type PayloadExceedsError struct {
+	StreamID  uint32
+	FrameType FrameType
+}
+
+func (PayloadExceedsError) Error() string {
+	return ErrPayloadExceeds.Error()
+}
+
+func (PayloadExceedsError) Unwrap() error {
+	return ErrPayloadExceeds
+}
+
 // FrameHeader is frame representation of HTTP2 protocol
 //
 // Use AcquireFrameHeader instead of creating FrameHeader every time
@@ -190,7 +203,16 @@ func (f *FrameHeader) readFrom(br *bufio.Reader) (int64, error) {
 	// Parsing FrameHeader's Header field.
 	f.parseValues(header)
 	if err = f.checkLen(); err != nil {
-		return 0, err
+		if discarded, discErr := br.Discard(f.length); discErr != nil {
+			return rn + int64(discarded), discErr
+		}
+
+		rn += int64(f.length)
+
+		return rn, PayloadExceedsError{
+			StreamID:  f.stream,
+			FrameType: f.kind,
+		}
 	}
 
 	if f.kind > FrameContinuation {
