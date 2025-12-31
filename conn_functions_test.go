@@ -387,6 +387,64 @@ func TestConnWriteRequest(t *testing.T) {
 	require.True(t, ok)
 }
 
+func TestConnWriteRequestWithConcurrentSettingsTableSize(t *testing.T) {
+	const settingsIterations = 64
+
+	conn := &Conn{
+		bw:     bufio.NewWriter(io.Discard),
+		enc:    AcquireHPACK(),
+		out:    make(chan *FrameHeader, settingsIterations),
+		nextID: 1,
+	}
+	defer ReleaseHPACK(conn.enc)
+
+	conn.serverS.Reset()
+	conn.serverS.SetMaxConcurrentStreams(settingsIterations * 2)
+
+	start := make(chan struct{})
+	settingsDone := make(chan struct{})
+	go func() {
+		<-start
+		st := &Settings{}
+		st.Reset()
+		for i := 0; i < settingsIterations; i++ {
+			st.SetHeaderTableSize(defaultHeaderTableSize + uint32(i+1))
+			conn.handleSettings(st)
+		}
+		close(settingsDone)
+	}()
+
+	close(start)
+
+	for i := 0; i < settingsIterations; i++ {
+		req := fasthttp.AcquireRequest()
+		res := fasthttp.AcquireResponse()
+
+		req.SetRequestURI("https://example.com/test")
+		req.Header.SetMethod("GET")
+		req.Header.SetUserAgent("race-test")
+		req.Header.Set("X-Test", "value")
+
+		ctx := &Ctx{
+			Request:  req,
+			Response: res,
+			Err:      make(chan error, 1),
+		}
+
+		require.NoError(t, conn.writeRequest(ctx))
+
+		fasthttp.ReleaseRequest(req)
+		fasthttp.ReleaseResponse(res)
+	}
+
+	<-settingsDone
+
+	for len(conn.out) > 0 {
+		fr := <-conn.out
+		ReleaseFrameHeader(fr)
+	}
+}
+
 type stubConn struct {
 	bytes.Buffer
 }

@@ -93,6 +93,8 @@ type Conn struct {
 
 	openStreams int32
 
+	encMu sync.Mutex
+
 	current   Settings
 	serverS   Settings
 	serverSMu sync.RWMutex
@@ -270,7 +272,9 @@ func (c *Conn) doHandshake() error {
 		if !st.IsAck() {
 			c.updateServerSettings(st)
 			if st.HeaderTableSize() <= defaultHeaderTableSize {
+				c.encMu.Lock()
 				c.enc.SetMaxTableSize(st.HeaderTableSize())
+				c.encMu.Unlock()
 			}
 
 			// reply back
@@ -578,6 +582,7 @@ func (c *Conn) writeRequest(ctx *Ctx) error {
 
 	hf := AcquireHeaderField()
 
+	c.encMu.Lock()
 	hf.SetBytes(StringAuthority, req.URI().Host())
 	enc.AppendHeaderField(h, hf, true)
 
@@ -601,6 +606,7 @@ func (c *Conn) writeRequest(ctx *Ctx) error {
 		hf.SetBytes(ToLower(k), v)
 		enc.AppendHeaderField(h, hf, false)
 	})
+	c.encMu.Unlock()
 
 	h.SetPadding(false)
 	h.SetEndStream(!hasBody)
@@ -730,7 +736,10 @@ func (c *Conn) writePing() error {
 
 func (c *Conn) handleSettings(st *Settings) {
 	c.updateServerSettings(st)
+
+	c.encMu.Lock()
 	c.enc.SetMaxTableSize(st.HeaderTableSize())
+	c.encMu.Unlock()
 
 	// reply back
 	fr := AcquireFrameHeader()
