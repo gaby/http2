@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -169,7 +170,7 @@ func TestConnSetOnDisconnectAndLastErr(t *testing.T) {
 		bw: bufio.NewWriter(io.Discard),
 		in: make(chan *Ctx),
 	}
-	conn.lastErr = io.ErrUnexpectedEOF
+	conn.setLastErr(io.ErrUnexpectedEOF)
 	require.ErrorIs(t, conn.LastErr(), io.ErrUnexpectedEOF)
 
 	closed := make(chan struct{})
@@ -186,6 +187,97 @@ func TestWriteErrorWrapping(t *testing.T) {
 
 	var target customErr
 	require.True(t, errors.As(we, &target))
+}
+
+func TestConnLastErrConcurrentAccess(t *testing.T) {
+	conn := &Conn{}
+	lastErr := errors.New("writer error")
+
+	var wg sync.WaitGroup
+	writers := 8
+	readers := 8
+	iterations := 1_000
+
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				conn.setLastErr(lastErr)
+			}
+		}()
+	}
+
+	for i := 0; i < readers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				_ = conn.LastErr()
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	require.ErrorIs(t, conn.LastErr(), lastErr)
+}
+
+func TestWriteLoopPreservesExistingLastErr(t *testing.T) {
+	conn := &Conn{
+		in: make(chan *Ctx),
+		bw: bufio.NewWriter(io.Discard),
+	}
+
+	readErr := errors.New("read failure")
+	conn.setLastErr(readErr)
+	atomic.StoreUint64(&conn.closed, 1)
+
+	done := make(chan struct{})
+	go func() {
+		conn.writeLoop()
+		close(done)
+	}()
+
+	close(conn.in)
+
+	<-done
+
+	require.ErrorIs(t, conn.LastErr(), readErr)
+}
+
+type errWriteConn struct {
+	stubConn
+}
+
+func (c *errWriteConn) Write([]byte) (int, error) { return 0, net.ErrClosed }
+
+func TestWriteLoopPrefersStoredErrorOverClosedWrite(t *testing.T) {
+	raw := &errWriteConn{}
+	conn := &Conn{
+		c:            raw,
+		bw:           bufio.NewWriter(raw),
+		in:           make(chan *Ctx),
+		out:          make(chan *FrameHeader, 1),
+		pingInterval: time.Hour,
+	}
+
+	readErr := errors.New("read loop failure")
+	conn.setLastErr(readErr)
+
+	done := make(chan struct{})
+	go func() {
+		conn.writeLoop()
+		close(done)
+	}()
+
+	fr := AcquireFrameHeader()
+	fr.SetBody(AcquireFrame(FrameSettings))
+	conn.out <- fr
+
+	<-done
+
+	require.ErrorIs(t, conn.LastErr(), readErr)
 }
 
 func TestConnSettingsUpdateLimitsStreamsDuringRequests(t *testing.T) {
