@@ -32,8 +32,9 @@ type serverConn struct {
 	br *bufio.Reader
 	bw *bufio.Writer
 
-	enc HPACK
-	dec HPACK
+	encMu sync.Mutex // guards enc
+	enc   HPACK
+	dec   HPACK
 
 	// last valid ID used as a reference for new IDs
 	lastID uint32
@@ -863,7 +864,9 @@ func (sc *serverConn) handleEndRequest(strm *Stream) {
 
 	fr.SetBody(h)
 
+	sc.encMu.Lock()
 	fasthttpResponseHeaders(h, &sc.enc, &ctx.Response)
+	sc.encMu.Unlock()
 
 	sc.writer <- fr
 
@@ -1075,7 +1078,10 @@ func (sc *serverConn) writeLoop() {
 
 func (sc *serverConn) handleSettings(st *Settings) {
 	st.CopyTo(&sc.clientS)
+
+	sc.encMu.Lock()
 	sc.enc.SetMaxTableSize(sc.clientS.HeaderTableSize())
+	sc.encMu.Unlock()
 
 	// atomically update the new window
 	atomic.StoreInt64(&sc.clientWindow, int64(sc.clientS.MaxWindowSize()))
