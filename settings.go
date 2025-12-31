@@ -35,6 +35,7 @@ type Settings struct {
 	enablePush  bool
 	maxStreams  uint32
 	windowSize  uint32
+	windowSet   bool
 	frameSize   uint32
 	headerSize  uint32
 }
@@ -49,6 +50,7 @@ func (st *Settings) Reset() {
 	st.tableSize = defaultHeaderTableSize
 	st.maxStreams = defaultConcurrentStreams
 	st.windowSize = defaultWindowSize
+	st.windowSet = false
 	st.frameSize = defaultDataFrameSize
 	st.enablePush = false
 	st.headerSize = 0
@@ -64,6 +66,7 @@ func (st *Settings) CopyTo(st2 *Settings) {
 	st2.enablePush = st.enablePush
 	st2.maxStreams = st.maxStreams
 	st2.windowSize = st.windowSize
+	st2.windowSet = st.windowSet
 	st2.frameSize = st.frameSize
 	st2.headerSize = st.headerSize
 }
@@ -119,6 +122,7 @@ func (st *Settings) MaxConcurrentStreams() uint32 {
 // Maximum value is 1 << 31 - 1.
 func (st *Settings) SetMaxWindowSize(size uint32) {
 	st.windowSize = size
+	st.windowSet = true
 }
 
 // MaxWindowSize returns the sender's initial window size
@@ -128,6 +132,11 @@ func (st *Settings) SetMaxWindowSize(size uint32) {
 // Maximum value is 1 << 31 - 1.
 func (st *Settings) MaxWindowSize() uint32 {
 	return st.windowSize
+}
+
+// HasMaxWindowSize reports whether SETTINGS_INITIAL_WINDOW_SIZE was explicitly set.
+func (st *Settings) HasMaxWindowSize() bool {
+	return st.windowSet
 }
 
 // SetMaxFrameSize sets the size of the largest frame
@@ -190,6 +199,7 @@ func (st *Settings) Read(d []byte) error {
 				return NewGoAwayError(FlowControlError, "SETTINGS_INITIAL_WINDOW_SIZE above maximum")
 			}
 			st.windowSize = value
+			st.windowSet = true
 		case MaxFrameSize:
 			if value < 1<<14 || value > 1<<24-1 {
 				return NewGoAwayError(ProtocolError, "wrong value for SETTINGS_MAX_FRAME_SIZE")
