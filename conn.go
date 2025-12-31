@@ -93,8 +93,9 @@ type Conn struct {
 
 	openStreams int32
 
-	current Settings
-	serverS Settings
+	current   Settings
+	serverS   Settings
+	serverSMu sync.RWMutex
 
 	state    connState
 	closeRef uint32
@@ -254,9 +255,7 @@ func (c *Conn) doHandshake() error {
 	} else if err == nil {
 		st := fr.Body().(*Settings)
 		if !st.IsAck() {
-			st.CopyTo(&c.serverS)
-
-			c.serverStreamWindow += int32(c.serverS.MaxWindowSize())
+			c.updateServerSettings(st)
 			if st.HeaderTableSize() <= defaultHeaderTableSize {
 				c.enc.SetMaxTableSize(st.HeaderTableSize())
 			}
@@ -286,9 +285,20 @@ func (c *Conn) doHandshake() error {
 	return err
 }
 
+func (c *Conn) updateServerSettings(st *Settings) {
+	c.serverSMu.Lock()
+	st.CopyTo(&c.serverS)
+	c.serverStreamWindow += int32(c.serverS.MaxWindowSize())
+	c.serverSMu.Unlock()
+}
+
 // CanOpenStream returns whether the client will be able to open a new stream or not.
 func (c *Conn) CanOpenStream() bool {
-	return atomic.LoadInt32(&c.openStreams) < int32(c.serverS.maxStreams)
+	c.serverSMu.RLock()
+	maxStreams := c.serverS.maxStreams
+	c.serverSMu.RUnlock()
+
+	return atomic.LoadInt32(&c.openStreams) < int32(maxStreams)
 }
 
 // Closed indicates whether the connection is closed or not.
@@ -699,9 +709,7 @@ func (c *Conn) writePing() error {
 }
 
 func (c *Conn) handleSettings(st *Settings) {
-	st.CopyTo(&c.serverS)
-
-	c.serverStreamWindow += int32(c.serverS.MaxWindowSize())
+	c.updateServerSettings(st)
 	c.enc.SetMaxTableSize(st.HeaderTableSize())
 
 	// reply back
