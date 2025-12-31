@@ -94,7 +94,7 @@ func (sc *serverConn) Handshake() error {
 func (sc *serverConn) Serve() error {
 	sc.closer = make(chan struct{}, 1)
 	sc.maxRequestTimer = time.NewTimer(0)
-	sc.clientWindow = int64(sc.clientS.MaxWindowSize())
+	atomic.StoreInt64(&sc.clientWindow, int64(sc.clientS.MaxWindowSize()))
 
 	if sc.maxIdleTime > 0 {
 		sc.maxIdleTimer = time.AfterFunc(sc.maxIdleTime, sc.closeIdleConn)
@@ -427,7 +427,7 @@ loop:
 					continue
 				}
 
-				strm = NewStream(fr.Stream(), int32(sc.clientWindow))
+				strm = NewStream(fr.Stream(), int32(atomic.LoadInt64(&sc.clientWindow)))
 				strms = append(strms, strm)
 
 				// RFC(5.1.1):

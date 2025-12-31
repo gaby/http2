@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -93,4 +96,66 @@ func TestStreamsAndWindowUpdateHelpers(t *testing.T) {
 	var copied WindowUpdate
 	wu.CopyTo(&copied)
 	require.Equal(t, wu.Increment(), copied.Increment())
+}
+
+func TestHandleStreamsConcurrentSettings(t *testing.T) {
+	sc := &serverConn{
+		reader:          make(chan *FrameHeader, 64),
+		writer:          make(chan *FrameHeader, 64),
+		maxRequestTimer: time.NewTimer(time.Hour),
+		maxRequestTime:  time.Hour,
+		closer:          make(chan struct{}),
+	}
+
+	sc.st.Reset()
+	sc.clientS.Reset()
+	atomic.StoreInt64(&sc.clientWindow, int64(sc.clientS.MaxWindowSize()))
+
+	writerDone := make(chan struct{})
+	go func() {
+		for fr := range sc.writer {
+			ReleaseFrameHeader(fr)
+		}
+		close(writerDone)
+	}()
+
+	streamsDone := make(chan struct{})
+	go func() {
+		sc.handleStreams()
+		close(streamsDone)
+	}()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 20; i++ {
+			st := &Settings{}
+			st.Reset()
+			st.SetMaxWindowSize(defaultWindowSize + uint32(i))
+			sc.handleSettings(st)
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 20; i++ {
+			fr := AcquireFrameHeader()
+			fr.SetStream(uint32(i*2 + 1))
+
+			priority := AcquireFrame(FramePriority).(*Priority)
+			priority.SetStream(0)
+			fr.SetBody(priority)
+
+			sc.reader <- fr
+		}
+	}()
+
+	wg.Wait()
+	close(sc.closer)
+	<-streamsDone
+
+	close(sc.writer)
+	<-writerDone
 }
