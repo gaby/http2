@@ -424,6 +424,10 @@ func (c *Conn) writeLoop() {
 		}
 
 		if lastErr == nil {
+			lastErr = c.loadLastErr()
+		}
+
+		if lastErr == nil {
 			lastErr = io.ErrUnexpectedEOF
 		}
 

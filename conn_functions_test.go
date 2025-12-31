@@ -223,6 +223,29 @@ func TestConnLastErrConcurrentAccess(t *testing.T) {
 	require.ErrorIs(t, conn.LastErr(), lastErr)
 }
 
+func TestWriteLoopPreservesExistingLastErr(t *testing.T) {
+	conn := &Conn{
+		in: make(chan *Ctx),
+		bw: bufio.NewWriter(io.Discard),
+	}
+
+	readErr := errors.New("read failure")
+	conn.setLastErr(readErr)
+	atomic.StoreUint64(&conn.closed, 1)
+
+	done := make(chan struct{})
+	go func() {
+		conn.writeLoop()
+		close(done)
+	}()
+
+	close(conn.in)
+
+	<-done
+
+	require.ErrorIs(t, conn.LastErr(), readErr)
+}
+
 func TestConnSettingsUpdateLimitsStreamsDuringRequests(t *testing.T) {
 	var buf bytes.Buffer
 	conn := &Conn{
