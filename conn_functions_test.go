@@ -100,6 +100,22 @@ func TestConnHandleSettingsRetainsStreamWindowWhenOmitted(t *testing.T) {
 	}
 }
 
+func TestUpdateServerSettingsRetainsZeroStreamWindow(t *testing.T) {
+	conn := &Conn{}
+	conn.serverS.SetMaxWindowSize(0)
+
+	st := &Settings{}
+	st.Reset()
+
+	conn.updateServerSettings(st)
+
+	conn.serverSMu.RLock()
+	defer conn.serverSMu.RUnlock()
+
+	require.Zero(t, conn.serverS.MaxWindowSize())
+	require.Zero(t, conn.serverStreamWindow)
+}
+
 func TestConnReadHeaderAndStream(t *testing.T) {
 	conn := &Conn{
 		dec:           AcquireHPACK(),

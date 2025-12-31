@@ -301,7 +301,8 @@ func (c *Conn) doHandshake() error {
 func (c *Conn) updateServerSettings(st *Settings) {
 	c.serverSMu.Lock()
 	prevStreamWindow := c.serverS.MaxWindowSize()
-	if prevStreamWindow == 0 {
+	prevStreamWindowSet := c.serverS.HasMaxWindowSize()
+	if !prevStreamWindowSet && prevStreamWindow == 0 {
 		prevStreamWindow = defaultWindowSize
 	}
 	st.CopyTo(&c.serverS)
