@@ -4,7 +4,6 @@ import (
 	"container/list"
 	"errors"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/valyala/fasthttp"
@@ -32,6 +31,9 @@ type ClientOpts struct {
 	// OnRTT is assigned to every client after creation, and the handler
 	// will be called after every RTT measurement (after receiving a PONG message).
 	OnRTT func(time.Duration)
+
+	// Clock controls time-related operations. If nil, a real clock is used.
+	Clock Clock
 }
 
 func (opts *ClientOpts) sanitize() {
@@ -41,6 +43,10 @@ func (opts *ClientOpts) sanitize() {
 
 	if opts.PingInterval <= 0 {
 		opts.PingInterval = DefaultPingInterval
+	}
+
+	if opts.Clock == nil {
+		opts.Clock = realClock{}
 	}
 }
 
@@ -74,6 +80,8 @@ type Client struct {
 
 	opts ClientOpts
 
+	clock Clock
+
 	lck   sync.Mutex
 	conns list.List
 }
@@ -82,8 +90,9 @@ func createClient(d *Dialer, opts ClientOpts) *Client {
 	opts.sanitize()
 
 	cl := &Client{
-		d:    d,
-		opts: opts,
+		d:     d,
+		opts:  opts,
+		clock: opts.Clock,
 	}
 
 	return cl
@@ -153,7 +162,8 @@ func (cl *Client) RoundTrip(_ *fasthttp.HostClient, req *fasthttp.Request, res *
 
 	ch := make(chan error, 1)
 
-	var cancelTimer atomic.Pointer[time.Timer]
+	var cancelMu sync.Mutex
+	var cancelTimer Timer
 
 	ctx := &Ctx{
 		Request:  req,
@@ -162,16 +172,20 @@ func (cl *Client) RoundTrip(_ *fasthttp.HostClient, req *fasthttp.Request, res *
 	}
 
 	ctx.onResolve = func(error) {
-		if timer := cancelTimer.Load(); timer != nil {
-			timer.Stop()
+		cancelMu.Lock()
+		defer cancelMu.Unlock()
+
+		if cancelTimer != nil {
+			cancelTimer.Stop()
+			cancelTimer = nil
 		}
 	}
 
 	if cl.opts.MaxResponseTime > 0 {
-		cancelTimer.Store(time.AfterFunc(cl.opts.MaxResponseTime, func() {
+		cancelTimer = cl.clock.AfterFunc(cl.opts.MaxResponseTime, func() {
 			ctx.resolve(ErrRequestCanceled)
 			c.cancel(ctx)
-		}))
+		})
 	}
 
 	c.Write(ctx)

@@ -22,6 +22,9 @@ type ServerConfig struct {
 
 	// Debug is a flag that will allow the library to print debugging information.
 	Debug bool
+
+	// Clock controls time-related operations. If nil, a real clock is used.
+	Clock Clock
 }
 
 func (sc *ServerConfig) defaults() {
@@ -31,6 +34,10 @@ func (sc *ServerConfig) defaults() {
 
 	if sc.MaxConcurrentStreams <= 0 {
 		sc.MaxConcurrentStreams = 1024
+	}
+
+	if sc.Clock == nil {
+		sc.Clock = realClock{}
 	}
 }
 
@@ -51,9 +58,15 @@ func (s *Server) ServeConn(c net.Conn) error {
 		return errors.New("wrong preface")
 	}
 
+	clock := s.cnf.Clock
+	if clock == nil {
+		clock = realClock{}
+	}
+
 	sc := &serverConn{
 		c:              c,
 		h:              s.s.Handler,
+		clock:          clock,
 		br:             bufio.NewReader(c),
 		bw:             bufio.NewWriterSize(c, 1<<14*10),
 		lastID:         0,

@@ -29,6 +29,8 @@ type serverConn struct {
 	c net.Conn
 	h fasthttp.RequestHandler
 
+	clock Clock
+
 	br *bufio.Reader
 	bw *bufio.Writer
 
@@ -68,9 +70,9 @@ type serverConn struct {
 	clientS Settings
 
 	// pingTimer
-	pingTimer       *time.Timer
-	maxRequestTimer *time.Timer
-	maxIdleTimer    *time.Timer
+	pingTimer       Timer
+	maxRequestTimer Timer
+	maxIdleTimer    Timer
 	pingTimerMu     sync.Mutex
 	timerMu         sync.Mutex
 
@@ -93,13 +95,17 @@ func (sc *serverConn) Handshake() error {
 }
 
 func (sc *serverConn) Serve() error {
+	if sc.clock == nil {
+		sc.clock = realClock{}
+	}
+
 	sc.closer = make(chan struct{}, 1)
 	sc.timerMu.Lock()
-	sc.maxRequestTimer = time.NewTimer(0)
+	sc.maxRequestTimer = sc.clock.NewTimer(0)
 	atomic.StoreInt64(&sc.clientWindow, int64(sc.clientS.MaxWindowSize()))
 
 	if sc.maxIdleTime > 0 {
-		sc.maxIdleTimer = time.AfterFunc(sc.maxIdleTime, sc.closeIdleConn)
+		sc.maxIdleTimer = sc.clock.AfterFunc(sc.maxIdleTime, sc.closeIdleConn)
 	}
 	sc.timerMu.Unlock()
 
@@ -160,10 +166,12 @@ func (sc *serverConn) close() {
 	sc.timerMu.Lock()
 	if sc.maxIdleTimer != nil {
 		sc.maxIdleTimer.Stop()
+		sc.maxIdleTimer = nil
 	}
 
 	if sc.maxRequestTimer != nil {
 		sc.maxRequestTimer.Stop()
+		sc.maxRequestTimer = nil
 	}
 	sc.timerMu.Unlock()
 }
@@ -182,6 +190,17 @@ func (sc *serverConn) resetMaxIdleTimer() {
 		sc.maxIdleTimer.Reset(sc.maxIdleTime)
 	}
 	sc.timerMu.Unlock()
+}
+
+func (sc *serverConn) maxRequestTimerC() <-chan time.Time {
+	sc.timerMu.Lock()
+	defer sc.timerMu.Unlock()
+
+	if sc.maxRequestTimer == nil {
+		return nil
+	}
+
+	return sc.maxRequestTimer.C()
 }
 
 func (sc *serverConn) stopPingTimer() {
@@ -355,13 +374,13 @@ loop:
 		select {
 		case <-sc.closer:
 			break loop
-		case <-sc.maxRequestTimer.C:
+		case <-sc.maxRequestTimerC():
 			reqTimerArmed = false
 
 			deleteUntil := 0
 			for _, strm := range strms {
 				// the request is due if the startedAt time + maxRequestTime is in the past
-				isDue := time.Now().After(
+				isDue := sc.clock.Now().After(
 					strm.startedAt.Add(sc.maxRequestTime))
 				if !isDue {
 					break
@@ -391,7 +410,7 @@ loop:
 				if strm != nil {
 					reqTimerArmed = true
 					// try to arm the timer
-					when := strm.startedAt.Add(sc.maxRequestTime).Sub(time.Now())
+					when := strm.startedAt.Add(sc.maxRequestTime).Sub(sc.clock.Now())
 					// if the time is negative or zero it triggers imm
 					sc.resetMaxRequestTimer(when)
 
@@ -678,7 +697,7 @@ func (sc *serverConn) createStream(c net.Conn, frameType FrameType, strm *Stream
 	ctx.Init2(c, sc.logger, false)
 
 	strm.origType = frameType
-	strm.startedAt = time.Now()
+	strm.startedAt = sc.clock.Now()
 	strm.SetData(ctx)
 }
 
@@ -1047,7 +1066,7 @@ func (sc *serverConn) writeLoop() {
 	if sc.pingInterval > 0 {
 		sc.pingTimerMu.Lock()
 		if !sc.isClosed() {
-			sc.pingTimer = time.AfterFunc(sc.pingInterval, sc.sendPingAndSchedule)
+			sc.pingTimer = sc.clock.AfterFunc(sc.pingInterval, sc.sendPingAndSchedule)
 		}
 		sc.pingTimerMu.Unlock()
 	}

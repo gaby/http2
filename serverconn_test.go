@@ -5,9 +5,9 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"log"
 	"sync"
 	"sync/atomic"
-	"log"
 	"testing"
 	"time"
 
@@ -18,6 +18,7 @@ func TestServerConnPingAndErrors(t *testing.T) {
 	writer := make(chan *FrameHeader, 4)
 	sc := &serverConn{
 		writer: writer,
+		clock:  realClock{},
 	}
 
 	ping := &Ping{}
@@ -104,7 +105,8 @@ func TestHandleStreamsConcurrentSettings(t *testing.T) {
 	sc := &serverConn{
 		reader:          make(chan *FrameHeader, 64),
 		writer:          make(chan *FrameHeader, 64),
-		maxRequestTimer: time.NewTimer(time.Hour),
+		clock:           realClock{},
+		maxRequestTimer: (realClock{}).NewTimer(time.Hour),
 		maxRequestTime:  time.Hour,
 		closer:          make(chan struct{}),
 	}
@@ -162,6 +164,66 @@ func TestHandleStreamsConcurrentSettings(t *testing.T) {
 	<-writerDone
 }
 
+func TestServerConnRequestTimerUsesClock(t *testing.T) {
+	clock := NewFakeClock(time.Unix(0, 0))
+	sc := &serverConn{
+		clock:           clock,
+		maxRequestTimer: clock.NewTimer(time.Hour),
+		maxRequestTime:  time.Second,
+		logger:          log.New(io.Discard, "", 0),
+	}
+
+	sc.resetMaxRequestTimer(sc.maxRequestTime)
+	require.LessOrEqual(t, clock.NextFireIn(), time.Second)
+
+	clock.Advance(time.Second)
+
+	select {
+	case <-sc.maxRequestTimer.C():
+	default:
+		require.Fail(t, "maxRequestTimer did not fire after advancing")
+	}
+
+	sc.close()
+	require.Equal(t, 0, clock.PendingTimers())
+}
+
+func TestServerConnIdleTimeoutWithFakeClock(t *testing.T) {
+	clock := NewFakeClock(time.Unix(0, 0))
+	sc := &serverConn{
+		writer:      make(chan *FrameHeader, 1),
+		clock:       clock,
+		maxIdleTime: time.Second,
+		closer:      make(chan struct{}),
+		logger:      log.New(io.Discard, "", 0),
+	}
+
+	sc.maxIdleTimer = clock.AfterFunc(sc.maxIdleTime, sc.closeIdleConn)
+
+	clock.Advance(time.Second)
+
+	var goaway *FrameHeader
+	require.Eventually(t, func() bool {
+		select {
+		case goaway = <-sc.writer:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, time.Millisecond*10)
+	require.Equal(t, FrameGoAway, goaway.Type())
+	ReleaseFrameHeader(goaway)
+
+	require.Eventually(t, func() bool {
+		select {
+		case <-sc.closer:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, time.Millisecond*10, "closer channel not closed")
+}
+
 func TestServerConnFrameTooLargeSendsGoAway(t *testing.T) {
 	const maxSize = 16
 	const oversized = maxSize + 1
@@ -179,6 +241,7 @@ func TestServerConnFrameTooLargeSendsGoAway(t *testing.T) {
 		clientS: Settings{},
 		writer:  make(chan *FrameHeader, 1),
 		logger:  log.New(io.Discard, "", 0),
+		clock:   realClock{},
 	}
 	sc.clientS.Reset()
 	sc.clientS.SetMaxFrameSize(maxSize)

@@ -50,7 +50,11 @@ func TestClientRoundTripTimeoutCancelsStream(t *testing.T) {
 	}
 	conn.serverS.maxStreams = 1
 
-	client := createClient(&Dialer{}, ClientOpts{MaxResponseTime: time.Millisecond * 10})
+	clock := NewFakeClock(time.Unix(0, 0))
+	client := createClient(&Dialer{}, ClientOpts{
+		MaxResponseTime: time.Second,
+		Clock:           clock,
+	})
 	client.conns.PushBack(conn)
 
 	req := fasthttp.AcquireRequest()
@@ -58,22 +62,25 @@ func TestClientRoundTripTimeoutCancelsStream(t *testing.T) {
 	defer fasthttp.ReleaseRequest(req)
 	defer fasthttp.ReleaseResponse(res)
 
-	retry, err := client.RoundTrip(nil, req, res)
-	require.False(t, retry)
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := client.RoundTrip(nil, req, res)
+		errCh <- err
+	}()
+
+	<-conn.in
+	clock.Advance(time.Second)
+	err := <-errCh
 	require.ErrorIs(t, err, ErrRequestCanceled)
 
 	var resetReceived bool
-	require.Eventually(t, func() bool {
-		select {
-		case fr := <-conn.out:
-			resetReceived = true
-			require.Equal(t, FrameResetStream, fr.Type())
-			ReleaseFrameHeader(fr)
-			return true
-		default:
-			return false
-		}
-	}, time.Second, time.Millisecond*10, "cancel frame not enqueued")
+	select {
+	case fr := <-conn.out:
+		resetReceived = true
+		require.Equal(t, FrameResetStream, fr.Type())
+		ReleaseFrameHeader(fr)
+	default:
+	}
 	require.True(t, resetReceived, "cancel frame not enqueued")
 }
 
@@ -84,7 +91,11 @@ func TestClientRoundTripTimeoutIgnoresLateResponse(t *testing.T) {
 	}
 	conn.serverS.maxStreams = 1
 
-	client := createClient(&Dialer{}, ClientOpts{MaxResponseTime: time.Millisecond * 10})
+	clock := NewFakeClock(time.Unix(0, 0))
+	client := createClient(&Dialer{}, ClientOpts{
+		MaxResponseTime: time.Second,
+		Clock:           clock,
+	})
 	client.conns.PushBack(conn)
 
 	req := fasthttp.AcquireRequest()
@@ -94,6 +105,7 @@ func TestClientRoundTripTimeoutIgnoresLateResponse(t *testing.T) {
 
 	panicCh := make(chan any, 1)
 	timeoutDone := make(chan struct{})
+	ctxReceived := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -105,12 +117,23 @@ func TestClientRoundTripTimeoutIgnoresLateResponse(t *testing.T) {
 		}()
 
 		ctx := <-conn.in
+		close(ctxReceived)
 		<-timeoutDone
 
 		ctx.resolve(nil)
 	}()
 
-	retry, err := client.RoundTrip(nil, req, res)
+	var retry bool
+	var err error
+	done := make(chan struct{})
+	go func() {
+		retry, err = client.RoundTrip(nil, req, res)
+		close(done)
+	}()
+
+	<-ctxReceived
+	clock.Advance(time.Second)
+	<-done
 	require.False(t, retry)
 	require.ErrorIs(t, err, ErrRequestCanceled)
 
