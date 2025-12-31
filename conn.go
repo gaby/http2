@@ -110,6 +110,7 @@ type Conn struct {
 	unacks      int32
 	disableAcks bool
 
+	lastErrMu    sync.RWMutex
 	lastErr      error
 	onDisconnect func(*Conn)
 
@@ -222,9 +223,21 @@ func (c *Conn) SetOnDisconnect(cb func(*Conn)) {
 	c.onDisconnect = cb
 }
 
+func (c *Conn) setLastErr(err error) {
+	c.lastErrMu.Lock()
+	c.lastErr = err
+	c.lastErrMu.Unlock()
+}
+
+func (c *Conn) loadLastErr() error {
+	c.lastErrMu.RLock()
+	defer c.lastErrMu.RUnlock()
+	return c.lastErr
+}
+
 // LastErr returns the last registered error in case the connection was closed by the server.
 func (c *Conn) LastErr() error {
-	return c.lastErr
+	return c.loadLastErr()
 }
 
 // Handshake will perform the necessary handshake to establish the connection
@@ -414,6 +427,8 @@ func (c *Conn) writeLoop() {
 			lastErr = io.ErrUnexpectedEOF
 		}
 
+		c.setLastErr(lastErr)
+
 		c.reqQueued.Range(func(_, v any) bool {
 			r := v.(*Ctx)
 			r.resolve(lastErr)
@@ -500,7 +515,7 @@ func (c *Conn) readLoop() {
 	for {
 		fr, err := c.readNext()
 		if err != nil {
-			c.lastErr = err
+			c.setLastErr(err)
 			break
 		}
 
@@ -606,7 +621,7 @@ func (c *Conn) writeRequest(ctx *Ctx) error {
 	}
 
 	if err != nil {
-		c.lastErr = err
+		c.setLastErr(err)
 		// if we had any error, remove it from the reqQueued.
 		c.reqQueued.Delete(id)
 	}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -169,7 +170,7 @@ func TestConnSetOnDisconnectAndLastErr(t *testing.T) {
 		bw: bufio.NewWriter(io.Discard),
 		in: make(chan *Ctx),
 	}
-	conn.lastErr = io.ErrUnexpectedEOF
+	conn.setLastErr(io.ErrUnexpectedEOF)
 	require.ErrorIs(t, conn.LastErr(), io.ErrUnexpectedEOF)
 
 	closed := make(chan struct{})
@@ -186,6 +187,40 @@ func TestWriteErrorWrapping(t *testing.T) {
 
 	var target customErr
 	require.True(t, errors.As(we, &target))
+}
+
+func TestConnLastErrConcurrentAccess(t *testing.T) {
+	conn := &Conn{}
+	lastErr := errors.New("writer error")
+
+	var wg sync.WaitGroup
+	writers := 8
+	readers := 8
+	iterations := 1_000
+
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				conn.setLastErr(lastErr)
+			}
+		}()
+	}
+
+	for i := 0; i < readers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				_ = conn.LastErr()
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	require.ErrorIs(t, conn.LastErr(), lastErr)
 }
 
 func TestConnSettingsUpdateLimitsStreamsDuringRequests(t *testing.T) {
