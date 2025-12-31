@@ -302,7 +302,6 @@ func TestConnSettingsUpdateLimitsStreamsDuringRequests(t *testing.T) {
 	settingsDone := make(chan struct{})
 	go func() {
 		<-start
-		time.Sleep(time.Millisecond * 10)
 		conn.handleSettings(st)
 		close(settingsDone)
 	}()
@@ -310,16 +309,26 @@ func TestConnSettingsUpdateLimitsStreamsDuringRequests(t *testing.T) {
 	checksDone := make(chan struct{})
 	go func() {
 		<-start
-		for i := 0; i < 100; i++ {
-			conn.CanOpenStream()
-			time.Sleep(time.Millisecond)
+		for {
+			if !conn.CanOpenStream() {
+				close(checksDone)
+				return
+			}
 		}
-		close(checksDone)
 	}()
 
 	close(start)
-	<-settingsDone
-	<-checksDone
+	select {
+	case <-settingsDone:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for settings handling to finish")
+	}
+
+	select {
+	case <-checksDone:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for stream limit enforcement")
+	}
 
 	select {
 	case fr := <-conn.out:
