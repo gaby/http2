@@ -1,11 +1,13 @@
 package http2
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"io"
 	"sync"
 	"sync/atomic"
+	"log"
 	"testing"
 	"time"
 
@@ -158,4 +160,34 @@ func TestHandleStreamsConcurrentSettings(t *testing.T) {
 
 	close(sc.writer)
 	<-writerDone
+}
+
+func TestServerConnFrameTooLargeSendsGoAway(t *testing.T) {
+	const maxSize = 16
+	const oversized = maxSize + 1
+
+	header := []byte{
+		0x0, 0x0, byte(oversized),
+		byte(FrameData), 0x0,
+		0x0, 0x0, 0x0, 0x1,
+	}
+	payload := bytes.Repeat([]byte{0}, oversized)
+	data := append(header, payload...)
+
+	sc := &serverConn{
+		br:      bufio.NewReader(bytes.NewReader(data)),
+		clientS: Settings{},
+		writer:  make(chan *FrameHeader, 1),
+		logger:  log.New(io.Discard, "", 0),
+	}
+	sc.clientS.Reset()
+	sc.clientS.SetMaxFrameSize(maxSize)
+
+	err := sc.readLoop()
+	require.ErrorIs(t, err, ErrPayloadExceeds)
+
+	fr := <-sc.writer
+	require.Equal(t, FrameGoAway, fr.Type())
+	require.Equal(t, FrameSizeError, fr.Body().(*GoAway).Code())
+	ReleaseFrameHeader(fr)
 }
