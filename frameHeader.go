@@ -142,7 +142,6 @@ func ReadFrameFrom(br *bufio.Reader) (*FrameHeader, error) {
 		} else {
 			frameHeaderPool.Put(fr)
 		}
-
 		fr = nil
 	}
 
@@ -155,13 +154,14 @@ func ReadFrameFromWithSize(br *bufio.Reader, max uint32) (*FrameHeader, error) {
 
 	_, err := fr.ReadFrom(br)
 	if err != nil {
-		if fr.Body() != nil {
-			ReleaseFrameHeader(fr)
-		} else {
-			frameHeaderPool.Put(fr)
+		if err != ErrPayloadExceeds {
+			if fr.Body() != nil {
+				ReleaseFrameHeader(fr)
+			} else {
+				frameHeaderPool.Put(fr)
+			}
+			fr = nil
 		}
-
-		fr = nil
 	}
 
 	return fr, err
@@ -190,7 +190,14 @@ func (f *FrameHeader) readFrom(br *bufio.Reader) (int64, error) {
 	// Parsing FrameHeader's Header field.
 	f.parseValues(header)
 	if err = f.checkLen(); err != nil {
-		return 0, err
+		if f.length > 0 {
+			discarded, errDiscard := br.Discard(f.length)
+			rn += int64(discarded)
+			if errDiscard != nil {
+				return rn, errDiscard
+			}
+		}
+		return rn, err
 	}
 
 	if f.kind > FrameContinuation {
