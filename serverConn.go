@@ -35,6 +35,8 @@ type serverConn struct {
 	enc HPACK
 	dec HPACK
 
+	encMu sync.Mutex
+
 	// last valid ID used as a reference for new IDs
 	lastID uint32
 
@@ -863,7 +865,7 @@ func (sc *serverConn) handleEndRequest(strm *Stream) {
 
 	fr.SetBody(h)
 
-	fasthttpResponseHeaders(h, &sc.enc, &ctx.Response)
+	sc.appendResponseHeaders(h, &ctx.Response)
 
 	sc.writer <- fr
 
@@ -1075,7 +1077,10 @@ func (sc *serverConn) writeLoop() {
 
 func (sc *serverConn) handleSettings(st *Settings) {
 	st.CopyTo(&sc.clientS)
+
+	sc.encMu.Lock()
 	sc.enc.SetMaxTableSize(sc.clientS.HeaderTableSize())
+	sc.encMu.Unlock()
 
 	// atomically update the new window
 	atomic.StoreInt64(&sc.clientWindow, int64(sc.clientS.MaxWindowSize()))
@@ -1088,6 +1093,13 @@ func (sc *serverConn) handleSettings(st *Settings) {
 	fr.SetBody(stRes)
 
 	sc.writer <- fr
+}
+
+func (sc *serverConn) appendResponseHeaders(dst *Headers, res *fasthttp.Response) {
+	sc.encMu.Lock()
+	defer sc.encMu.Unlock()
+
+	fasthttpResponseHeaders(dst, &sc.enc, res)
 }
 
 func fasthttpResponseHeaders(dst *Headers, hp *HPACK, res *fasthttp.Response) {

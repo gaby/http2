@@ -5,13 +5,14 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"log"
 	"sync"
 	"sync/atomic"
-	"log"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/valyala/fasthttp"
 )
 
 func TestServerConnPingAndErrors(t *testing.T) {
@@ -190,4 +191,54 @@ func TestServerConnFrameTooLargeSendsGoAway(t *testing.T) {
 	require.Equal(t, FrameGoAway, fr.Type())
 	require.Equal(t, FrameSizeError, fr.Body().(*GoAway).Code())
 	ReleaseFrameHeader(fr)
+}
+
+func TestServerConnResponseHeadersConcurrentSettings(t *testing.T) {
+	const iterations = 64
+
+	sc := &serverConn{
+		writer: make(chan *FrameHeader, iterations),
+		logger: log.New(io.Discard, "", 0),
+	}
+
+	sc.clientS.Reset()
+	sc.enc.Reset()
+
+	res := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseResponse(res)
+	res.Header.SetStatusCode(200)
+	res.Header.Set("X-Test", "value")
+
+	writerDone := make(chan struct{})
+	go func() {
+		for fr := range sc.writer {
+			ReleaseFrameHeader(fr)
+		}
+		close(writerDone)
+	}()
+
+	start := make(chan struct{})
+	settingsDone := make(chan struct{})
+
+	go func() {
+		<-start
+		st := &Settings{}
+		st.Reset()
+		for i := 0; i < iterations; i++ {
+			st.SetHeaderTableSize(defaultHeaderTableSize + uint32(i))
+			sc.handleSettings(st)
+		}
+		close(sc.writer)
+		close(settingsDone)
+	}()
+
+	close(start)
+	for i := 0; i < iterations; i++ {
+		h := AcquireFrame(FrameHeaders).(*Headers)
+		sc.appendResponseHeaders(h, res)
+		ReleaseFrame(h)
+	}
+
+	<-settingsDone
+	<-writerDone
 }
