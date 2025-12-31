@@ -121,11 +121,7 @@ func (sc *serverConn) Serve() error {
 	go func() {
 		sc.handleStreams()
 		// Fix #55: The pingTimer fired while we were closing the connection.
-		sc.pingTimerMu.Lock()
-		if sc.pingTimer != nil {
-			sc.pingTimer.Stop()
-		}
-		sc.pingTimerMu.Unlock()
+		sc.stopPingTimer()
 		// close the writer here to ensure that no pending requests
 		// are writing to a closed channel
 		close(sc.writer)
@@ -157,13 +153,9 @@ func (sc *serverConn) Serve() error {
 }
 
 func (sc *serverConn) close() {
-	sc.pingTimerMu.Lock()
-	if sc.pingTimer != nil {
-		sc.pingTimer.Stop()
-	}
-	sc.pingTimerMu.Unlock()
-
 	atomic.StoreInt32((*int32)(&sc.state), int32(connStateClosed))
+
+	sc.stopPingTimer()
 
 	sc.timerMu.Lock()
 	if sc.maxIdleTimer != nil {
@@ -190,6 +182,19 @@ func (sc *serverConn) resetMaxIdleTimer() {
 		sc.maxIdleTimer.Reset(sc.maxIdleTime)
 	}
 	sc.timerMu.Unlock()
+}
+
+func (sc *serverConn) stopPingTimer() {
+	sc.pingTimerMu.Lock()
+	if sc.pingTimer != nil {
+		sc.pingTimer.Stop()
+		sc.pingTimer = nil
+	}
+	sc.pingTimerMu.Unlock()
+}
+
+func (sc *serverConn) isClosed() bool {
+	return atomic.LoadInt32((*int32)(&sc.state)) == int32(connStateClosed)
 }
 
 func (sc *serverConn) handlePing(ping *Ping) {
@@ -1020,23 +1025,30 @@ func (sc *serverConn) writeData(strm *Stream, body []byte) {
 }
 
 func (sc *serverConn) sendPingAndSchedule() {
-	if atomic.LoadInt32((*int32)(&sc.state)) == int32(connStateClosed) {
+	sc.pingTimerMu.Lock()
+	if sc.pingTimer == nil || sc.isClosed() {
+		sc.pingTimerMu.Unlock()
 		return
 	}
+	sc.pingTimerMu.Unlock()
 
 	sc.writePing()
 
 	sc.pingTimerMu.Lock()
-	if sc.pingTimer != nil && atomic.LoadInt32((*int32)(&sc.state)) != int32(connStateClosed) {
+	if sc.pingTimer != nil && !sc.isClosed() {
 		sc.pingTimer.Reset(sc.pingInterval)
 	}
 	sc.pingTimerMu.Unlock()
 }
 
 func (sc *serverConn) writeLoop() {
+	defer sc.stopPingTimer()
+
 	if sc.pingInterval > 0 {
 		sc.pingTimerMu.Lock()
-		sc.pingTimer = time.AfterFunc(sc.pingInterval, sc.sendPingAndSchedule)
+		if !sc.isClosed() {
+			sc.pingTimer = time.AfterFunc(sc.pingInterval, sc.sendPingAndSchedule)
+		}
 		sc.pingTimerMu.Unlock()
 	}
 
