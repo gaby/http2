@@ -100,6 +100,32 @@ func TestConnHandleSettingsRetainsStreamWindowWhenOmitted(t *testing.T) {
 	}
 }
 
+func TestConnHandleSettingsRetainsZeroStreamWindowWhenOmitted(t *testing.T) {
+	conn := &Conn{
+		enc: AcquireHPACK(),
+		out: make(chan *FrameHeader, 2),
+	}
+	defer ReleaseHPACK(conn.enc)
+
+	first := &Settings{}
+	first.SetHeaderTableSize(512)
+	first.SetMaxWindowSize(0)
+	conn.handleSettings(first)
+
+	omitted := &Settings{}
+	omitted.SetHeaderTableSize(256)
+	conn.handleSettings(omitted)
+
+	require.Equal(t, int32(0), conn.serverStreamWindow)
+	require.Equal(t, uint32(0), conn.serverS.MaxWindowSize())
+	require.True(t, conn.serverS.HasMaxWindowSize())
+
+	for i := 0; i < 2; i++ {
+		fr := <-conn.out
+		ReleaseFrameHeader(fr)
+	}
+}
+
 func TestConnReadHeaderAndStream(t *testing.T) {
 	conn := &Conn{
 		dec:           AcquireHPACK(),
