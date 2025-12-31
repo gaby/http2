@@ -32,8 +32,9 @@ type serverConn struct {
 	br *bufio.Reader
 	bw *bufio.Writer
 
-	enc HPACK
-	dec HPACK
+	encMu sync.Mutex // guards enc
+	enc   HPACK
+	dec   HPACK
 
 	encMu sync.Mutex
 
@@ -253,7 +254,7 @@ func (sc *serverConn) readLoop() (err error) {
 	var fr *FrameHeader
 
 	for err == nil {
-		fr, err = ReadFrameFromWithSize(sc.br, sc.clientS.frameSize)
+		fr, err = ReadFrameFromWithSize(sc.br, sc.st.MaxFrameSize())
 		if err != nil {
 			if errors.Is(err, ErrUnknownFrameType) {
 				sc.writeGoAway(0, ProtocolError, "unknown frame type")
@@ -865,7 +866,9 @@ func (sc *serverConn) handleEndRequest(strm *Stream) {
 
 	fr.SetBody(h)
 
-	sc.appendResponseHeaders(h, &ctx.Response)
+	sc.encMu.Lock()
+	fasthttpResponseHeaders(h, &sc.enc, &ctx.Response)
+	sc.encMu.Unlock()
 
 	sc.writer <- fr
 

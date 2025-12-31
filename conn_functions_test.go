@@ -48,6 +48,58 @@ func TestConnHandleSettingsAndPing(t *testing.T) {
 	ReleaseFrameHeader(fr)
 }
 
+func TestConnHandleSettingsReplacesStreamWindow(t *testing.T) {
+	conn := &Conn{
+		enc: AcquireHPACK(),
+		out: make(chan *FrameHeader, 2),
+	}
+	defer ReleaseHPACK(conn.enc)
+
+	first := &Settings{}
+	first.SetHeaderTableSize(512)
+	first.SetMaxWindowSize(1024)
+
+	conn.handleSettings(first)
+	require.Equal(t, int32(first.MaxWindowSize()), conn.serverStreamWindow)
+
+	second := &Settings{}
+	second.SetHeaderTableSize(256)
+	second.SetMaxWindowSize(2048)
+
+	conn.handleSettings(second)
+	require.Equal(t, int32(second.MaxWindowSize()), conn.serverStreamWindow)
+
+	for i := 0; i < 2; i++ {
+		fr := <-conn.out
+		ReleaseFrameHeader(fr)
+	}
+}
+
+func TestConnHandleSettingsRetainsStreamWindowWhenOmitted(t *testing.T) {
+	conn := &Conn{
+		enc: AcquireHPACK(),
+		out: make(chan *FrameHeader, 2),
+	}
+	defer ReleaseHPACK(conn.enc)
+
+	first := &Settings{}
+	first.SetHeaderTableSize(512)
+	first.SetMaxWindowSize(4096)
+	conn.handleSettings(first)
+
+	omitted := &Settings{}
+	omitted.SetHeaderTableSize(256)
+	conn.handleSettings(omitted)
+
+	require.Equal(t, int32(first.MaxWindowSize()), conn.serverStreamWindow)
+	require.Equal(t, first.MaxWindowSize(), conn.serverS.MaxWindowSize())
+
+	for i := 0; i < 2; i++ {
+		fr := <-conn.out
+		ReleaseFrameHeader(fr)
+	}
+}
+
 func TestConnReadHeaderAndStream(t *testing.T) {
 	conn := &Conn{
 		dec:           AcquireHPACK(),
