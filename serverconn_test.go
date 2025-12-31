@@ -240,13 +240,13 @@ func TestServerConnFrameTooLargeSendsGoAway(t *testing.T) {
 	data := append(header, payload...)
 
 	sc := &serverConn{
-		br:      bufio.NewReader(bytes.NewReader(data)),
-		clientS: Settings{},
-		writer:  make(chan *FrameHeader, 1),
-		logger:  log.New(io.Discard, "", 0),
+		br:     bufio.NewReader(bytes.NewReader(data)),
+		st:     Settings{},
+		writer: make(chan *FrameHeader, 1),
+		logger: log.New(io.Discard, "", 0),
 	}
-	sc.clientS.Reset()
-	sc.clientS.SetMaxFrameSize(maxSize)
+	sc.st.Reset()
+	sc.st.SetMaxFrameSize(maxSize)
 
 	err := sc.readLoop()
 	require.ErrorIs(t, err, ErrPayloadExceeds)
@@ -254,5 +254,37 @@ func TestServerConnFrameTooLargeSendsGoAway(t *testing.T) {
 	fr := <-sc.writer
 	require.Equal(t, FrameGoAway, fr.Type())
 	require.Equal(t, FrameSizeError, fr.Body().(*GoAway).Code())
+	ReleaseFrameHeader(fr)
+}
+
+func TestServerConnFrameSizeUsesServerSettings(t *testing.T) {
+	const maxSize = 32
+
+	header := []byte{
+		0x0, 0x0, byte(maxSize),
+		byte(FrameData), 0x1,
+		0x0, 0x0, 0x0, 0x1,
+	}
+	payload := bytes.Repeat([]byte{0}, maxSize)
+	data := append(header, payload...)
+
+	sc := &serverConn{
+		br:      bufio.NewReader(bytes.NewReader(data)),
+		st:      Settings{},
+		clientS: Settings{},
+		writer:  make(chan *FrameHeader, 1),
+		reader:  make(chan *FrameHeader, 1),
+		logger:  log.New(io.Discard, "", 0),
+	}
+	sc.st.Reset()
+	sc.st.SetMaxFrameSize(maxSize)
+	sc.clientS.Reset()
+	sc.clientS.SetMaxFrameSize(maxSize / 2)
+
+	err := sc.readLoop()
+	require.True(t, err == nil || errors.Is(err, io.EOF))
+
+	fr := <-sc.reader
+	require.Equal(t, FrameData, fr.Type())
 	ReleaseFrameHeader(fr)
 }

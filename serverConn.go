@@ -252,7 +252,7 @@ func (sc *serverConn) readLoop() (err error) {
 	var fr *FrameHeader
 
 	for err == nil {
-		fr, err = ReadFrameFromWithSize(sc.br, sc.clientS.frameSize)
+		fr, err = ReadFrameFromWithSize(sc.br, sc.st.MaxFrameSize())
 		if err != nil {
 			if errors.Is(err, ErrUnknownFrameType) {
 				sc.writeGoAway(0, ProtocolError, "unknown frame type")
