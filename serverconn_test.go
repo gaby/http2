@@ -6,12 +6,15 @@ import (
 	"errors"
 	"io"
 	"log"
+	"net"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/valyala/fasthttp"
 )
 
 func TestServerConnPingAndErrors(t *testing.T) {
@@ -158,6 +161,68 @@ func TestHandleStreamsConcurrentSettings(t *testing.T) {
 	close(sc.closer)
 	<-streamsDone
 
+	close(sc.writer)
+	<-writerDone
+}
+
+func TestServerConnSettingsWhileEncoding(t *testing.T) {
+	sc := &serverConn{
+		writer: make(chan *FrameHeader, 256),
+		logger: log.New(io.Discard, "", 0),
+	}
+	sc.st.Reset()
+	sc.clientS.Reset()
+	sc.enc.Reset()
+
+	var respCounter uint32
+	sc.h = func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Reset()
+		current := atomic.AddUint32(&respCounter, 1)
+		ctx.Response.Header.Set("X-Test", strconv.Itoa(int(current)))
+		ctx.Response.SetStatusCode(200)
+		ctx.Response.SetBodyString("hello")
+	}
+
+	srvConn, cliConn := net.Pipe()
+	defer srvConn.Close()
+	defer cliConn.Close()
+
+	strm := NewStream(1, int32(defaultWindowSize))
+	sc.createStream(srvConn, FrameHeaders, strm)
+
+	writerDone := make(chan struct{})
+	go func() {
+		for fr := range sc.writer {
+			ReleaseFrameHeader(fr)
+		}
+		close(writerDone)
+	}()
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < 100; i++ {
+			st := &Settings{}
+			st.Reset()
+			st.SetHeaderTableSize(defaultHeaderTableSize + uint32(i))
+			sc.handleSettings(st)
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < 100; i++ {
+			sc.handleEndRequest(strm)
+		}
+	}()
+
+	close(start)
+	wg.Wait()
 	close(sc.writer)
 	<-writerDone
 }
