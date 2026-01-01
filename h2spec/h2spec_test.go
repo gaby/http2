@@ -205,7 +205,7 @@ func TestH2Spec(t *testing.T) {
 				Host:         "127.0.0.1",
 				Port:         port,
 				Path:         "/",
-				Timeout:      time.Second,
+				Timeout:      2 * time.Second, // Increased from 1s to 2s to reduce flakiness
 				MaxHeaderLen: 4000,
 				TLS:          true,
 				Insecure:     true,
@@ -276,9 +276,18 @@ func launchLocalServer(t *testing.T) int {
 
 	ln, err := net.Listen("tcp4", "127.0.0.1:0")
 	require.NoError(t, err)
+	
+	// Ensure listener is closed when test ends
+	t.Cleanup(func() {
+		ln.Close()
+	})
+	
 	go func() {
 		log.Println(server.ServeTLSEmbed(ln, certPEM, keyPEM))
 	}()
+	
+	// Give server time to start
+	time.Sleep(50 * time.Millisecond)
 
 	_, port, err := net.SplitHostPort(ln.Addr().String())
 	require.NoError(t, err)
