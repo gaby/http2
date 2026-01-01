@@ -15,14 +15,17 @@ func TestStreamHelpers(t *testing.T) {
 	require.Equal(t, "Closed", StreamStateClosed.String())
 	require.Equal(t, "IDK", StreamState(99).String())
 
-	stream := NewStream(1, 10)
+	stream := NewStream(1, 10, 10)
 	require.Equal(t, uint32(1), stream.ID())
 	require.Equal(t, int32(10), stream.Window())
+	require.Equal(t, int32(10), stream.SendWindow())
 
 	stream.SetID(2)
 	stream.SetState(StreamStateHalfClosed)
 	stream.SetWindow(20)
 	stream.IncrWindow(5)
+	stream.SetSendWindow(15)
+	stream.IncrSendWindow(5)
 
 	ctx := &fasthttp.RequestCtx{}
 	stream.SetData(ctx)
@@ -30,5 +33,6 @@ func TestStreamHelpers(t *testing.T) {
 	require.Equal(t, uint32(2), stream.ID())
 	require.Equal(t, StreamStateHalfClosed, stream.State())
 	require.Equal(t, int32(25), stream.Window())
+	require.Equal(t, int32(20), stream.SendWindow())
 	require.Same(t, ctx, stream.Ctx())
 }

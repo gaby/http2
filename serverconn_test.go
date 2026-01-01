@@ -36,7 +36,7 @@ func TestServerConnPingAndErrors(t *testing.T) {
 	require.Equal(t, FramePing, fr.Type())
 	ReleaseFrameHeader(fr)
 
-	strm := NewStream(1, 10)
+	strm := NewStream(1, 10, 10)
 	sc.writeError(strm, errors.New("boom"))
 	fr = <-writer
 	require.Equal(t, FrameResetStream, fr.Type())
@@ -49,9 +49,153 @@ func TestServerConnPingAndErrors(t *testing.T) {
 	ReleaseFrameHeader(fr)
 }
 
+func TestHandleFrameDataStreamFlowControl(t *testing.T) {
+	sc := &serverConn{
+		writer: make(chan *FrameHeader, 1),
+		logger: log.New(io.Discard, "", 0),
+	}
+	sc.maxWindow = 10
+	sc.currentWindow = sc.maxWindow
+
+	strm := NewStream(1, 3, 3)
+	strm.SetState(StreamStateOpen)
+	strm.headersFinished = true
+	strm.ctx = &fasthttp.RequestCtx{}
+	strm.ctx.Request.Reset()
+
+	data := AcquireFrame(FrameData).(*Data)
+	data.SetData([]byte("hello"))
+
+	fr := AcquireFrameHeader()
+	fr.SetStream(strm.ID())
+	fr.SetBody(data)
+	fr.length = len(data.Data())
+
+	require.NoError(t, sc.consumeConnectionWindow(data.Len()))
+	err := sc.handleFrame(strm, fr)
+	require.Error(t, err)
+	var h2Err Error
+	require.ErrorAs(t, err, &h2Err)
+	require.Equal(t, FlowControlError, h2Err.Code())
+	require.Equal(t, FrameResetStream, h2Err.frameType)
+
+	sc.writeError(strm, err)
+	out := <-sc.writer
+	require.Equal(t, FrameResetStream, out.Type())
+	require.Equal(t, FlowControlError, out.Body().(*RstStream).Code())
+	ReleaseFrameHeader(out)
+	ReleaseFrameHeader(fr)
+}
+
+func TestConnectionWindowUnderflowSendsGoAway(t *testing.T) {
+	sc := &serverConn{
+		writer: make(chan *FrameHeader, 1),
+		logger: log.New(io.Discard, "", 0),
+	}
+	sc.maxWindow = 4
+	sc.currentWindow = sc.maxWindow
+
+	err := sc.consumeConnectionWindow(8)
+	require.Error(t, err)
+	var h2Err Error
+	require.ErrorAs(t, err, &h2Err)
+	require.Equal(t, FlowControlError, h2Err.Code())
+	require.Equal(t, FrameGoAway, h2Err.frameType)
+
+	sc.writeError(nil, err)
+	fr := <-sc.writer
+	require.Equal(t, FrameGoAway, fr.Type())
+	require.Equal(t, FlowControlError, fr.Body().(*GoAway).Code())
+	ReleaseFrameHeader(fr)
+}
+
+func TestHandleFrameSendsWindowUpdatesAfterReading(t *testing.T) {
+	sc := &serverConn{
+		writer: make(chan *FrameHeader, 4),
+		logger: log.New(io.Discard, "", 0),
+	}
+	sc.maxWindow = 20
+	sc.currentWindow = sc.maxWindow
+
+	strm := NewStream(1, 10, 10)
+	strm.SetState(StreamStateOpen)
+	strm.headersFinished = true
+	strm.ctx = &fasthttp.RequestCtx{}
+	strm.ctx.Request.Reset()
+
+	payload := []byte("data")
+	data := AcquireFrame(FrameData).(*Data)
+	data.SetData(payload)
+
+	fr := AcquireFrameHeader()
+	fr.SetStream(strm.ID())
+	fr.SetBody(data)
+	fr.length = len(payload)
+
+	require.NoError(t, sc.consumeConnectionWindow(len(payload)))
+	err := sc.handleFrame(strm, fr)
+	require.NoError(t, err)
+
+	connWU := <-sc.writer
+	streamWU := <-sc.writer
+
+	require.Equal(t, FrameWindowUpdate, connWU.Type())
+	require.EqualValues(t, 0, connWU.Stream())
+	require.Equal(t, len(payload), connWU.Body().(*WindowUpdate).Increment())
+
+	require.Equal(t, FrameWindowUpdate, streamWU.Type())
+	require.Equal(t, strm.ID(), streamWU.Stream())
+	require.Equal(t, len(payload), streamWU.Body().(*WindowUpdate).Increment())
+
+	require.Equal(t, int32(20), sc.currentWindow)
+	require.Equal(t, int32(10), strm.Window())
+
+	ReleaseFrameHeader(connWU)
+	ReleaseFrameHeader(streamWU)
+	ReleaseFrameHeader(fr)
+}
+
+func TestPaddedDataCountsAgainstWindow(t *testing.T) {
+	sc := &serverConn{
+		writer: make(chan *FrameHeader, 1),
+		logger: log.New(io.Discard, "", 0),
+	}
+	sc.maxWindow = 15
+	sc.currentWindow = sc.maxWindow
+
+	strm := NewStream(1, 10, 10)
+	strm.SetState(StreamStateOpen)
+	strm.headersFinished = true
+	strm.ctx = &fasthttp.RequestCtx{}
+	strm.ctx.Request.Reset()
+
+	data := AcquireFrame(FrameData).(*Data)
+	data.SetPadding(true)
+	data.SetData([]byte("data"))
+
+	fr := AcquireFrameHeader()
+	fr.SetStream(strm.ID())
+	fr.SetBody(data)
+	fr.length = len(data.Data()) + 1 + 10 // pad length field + padding bytes
+
+	require.NoError(t, sc.consumeConnectionWindow(fr.Len()))
+	err := sc.handleFrame(strm, fr)
+	require.Error(t, err)
+	var h2Err Error
+	require.ErrorAs(t, err, &h2Err)
+	require.Equal(t, FlowControlError, h2Err.Code())
+	require.Equal(t, FrameResetStream, h2Err.frameType)
+
+	sc.writeError(strm, err)
+	out := <-sc.writer
+	require.Equal(t, FrameResetStream, out.Type())
+	ReleaseFrameHeader(out)
+	ReleaseFrameHeader(fr)
+}
+
 func TestStreamWriteHelpers(t *testing.T) {
 	writer := make(chan *FrameHeader, 4)
-	strm := NewStream(3, 100)
+	strm := NewStream(3, 100, 100)
 
 	sw := acquireStreamWrite()
 	sw.size = int64(len("hello"))
@@ -87,9 +231,9 @@ func TestStreamWriteHelpers(t *testing.T) {
 }
 
 func TestStreamsAndWindowUpdateHelpers(t *testing.T) {
-	s1 := NewStream(1, 0)
+	s1 := NewStream(1, 0, 0)
 	s1.origType = FrameHeaders
-	s2 := NewStream(2, 0)
+	s2 := NewStream(2, 0, 0)
 	s2.origType = FrameData
 
 	strms := Streams{s1, s2}
@@ -187,7 +331,7 @@ func TestServerConnSettingsWhileEncoding(t *testing.T) {
 	defer srvConn.Close()
 	defer cliConn.Close()
 
-	strm := NewStream(1, int32(defaultWindowSize))
+	strm := NewStream(1, int32(defaultWindowSize), int32(defaultWindowSize))
 	sc.createStream(srvConn, FrameHeaders, strm)
 
 	writerDone := make(chan struct{})
