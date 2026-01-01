@@ -97,6 +97,10 @@ type Conn struct {
 	serverS   Settings
 	serverSMu sync.RWMutex
 
+	windowMu       sync.Mutex
+	windowCond     *sync.Cond
+	windowCondOnce sync.Once
+
 	state    connState
 	closeRef uint32
 
@@ -136,6 +140,7 @@ func NewConn(c net.Conn, opts ConnOpts) *Conn {
 		disableAcks:   opts.DisablePingChecking,
 		onDisconnect:  opts.OnDisconnect,
 	}
+	nc.windowCond = sync.NewCond(&nc.windowMu)
 
 	nc.current.SetMaxWindowSize(1 << 20)
 	nc.current.SetPush(false)
@@ -326,6 +331,28 @@ func (c *Conn) updateServerSettings(st *Settings) {
 
 	c.serverStreamWindow = newStreamWindow
 	c.serverSMu.Unlock()
+
+	if delta != 0 {
+		c.notifyWindowAvailable()
+	}
+}
+
+func (c *Conn) windowCondition() *sync.Cond {
+	c.windowCondOnce.Do(func() {
+		if c.windowCond == nil {
+			c.windowCond = sync.NewCond(&c.windowMu)
+		}
+	})
+
+	return c.windowCond
+}
+
+func (c *Conn) notifyWindowAvailable() {
+	cond := c.windowCondition()
+
+	c.windowMu.Lock()
+	cond.Broadcast()
+	c.windowMu.Unlock()
 }
 
 // CanOpenStream returns whether the client will be able to open a new stream or not.
@@ -671,35 +698,34 @@ func (c *Conn) writeRequest(ctx *Ctx) error {
 func (c *Conn) writeData(fh *FrameHeader, ctx *Ctx, body []byte) (err error) {
 	maxFrame := 1 << 14
 
+	cond := c.windowCondition()
 	data := AcquireFrame(FrameData).(*Data)
 	fh.SetBody(data)
 
 	for i := 0; err == nil && i < len(body); {
-		// Check both connection and stream windows before sending
+		remaining := len(body) - i
+
+		c.windowMu.Lock()
+		for {
+			connWin := atomic.LoadInt32(&c.serverWindow)
+			streamWin := atomic.LoadInt32(&ctx.sendWindow)
+			if connWin > 0 && streamWin > 0 {
+				break
+			}
+
+			cond.Wait()
+		}
+
 		connWin := atomic.LoadInt32(&c.serverWindow)
 		streamWin := atomic.LoadInt32(&ctx.sendWindow)
 
-		if connWin <= 0 || streamWin <= 0 {
-			// Wait briefly for window update
-			// In practice, WINDOW_UPDATE frames should arrive through readLoop
-			time.Sleep(10 * time.Millisecond)
-
-			// Re-check windows after waiting
-			connWin = atomic.LoadInt32(&c.serverWindow)
-			streamWin = atomic.LoadInt32(&ctx.sendWindow)
-
-			if connWin <= 0 || streamWin <= 0 {
-				return errors.New("flow control: send window exhausted")
-			}
-		}
-
 		// Calculate chunk size respecting both windows and max frame size
-		remaining := len(body) - i
 		toSend := min(min(min(remaining, maxFrame), int(connWin)), int(streamWin))
 
 		// Deduct from both windows
 		atomic.AddInt32(&c.serverWindow, -int32(toSend))
 		atomic.AddInt32(&ctx.sendWindow, -int32(toSend))
+		c.windowMu.Unlock()
 
 		data.SetEndStream(i+toSend == len(body))
 		data.SetPadding(false)
@@ -735,6 +761,7 @@ loop:
 			win := int32(fr.Body().(*WindowUpdate).Increment())
 
 			atomic.AddInt32(&c.serverWindow, win)
+			c.notifyWindowAvailable()
 		case FramePing:
 			ping := fr.Body().(*Ping)
 			if !ping.IsAck() {
@@ -846,6 +873,7 @@ func (c *Conn) readStream(fr *FrameHeader, res *fasthttp.Response) (err error) {
 		if ri, ok := c.reqQueued.Load(fr.Stream()); ok {
 			ctx := ri.(*Ctx)
 			atomic.AddInt32(&ctx.sendWindow, win)
+			c.notifyWindowAvailable()
 		}
 	}
 
