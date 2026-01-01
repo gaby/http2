@@ -191,7 +191,9 @@ func TestH2Spec(t *testing.T) {
 
 	// Disable logs from h2spec
 	oldout := os.Stdout
-	os.Stdout = nil
+	if !testing.Verbose() {
+		os.Stdout = nil
+	}
 	t.Cleanup(func() {
 		os.Stdout = oldout
 	})
