@@ -312,18 +312,18 @@ func (c *Conn) updateServerSettings(st *Settings) {
 		c.serverS.windowSet = prevWindowExplicit
 	}
 	newStreamWindow := int32(c.serverS.MaxWindowSize())
-	
+
 	// RFC 7540 Section 6.9.2: When SETTINGS_INITIAL_WINDOW_SIZE changes,
 	// adjust all existing stream flow-control windows by the difference
 	delta := newStreamWindow - int32(prevStreamWindow)
 	if delta != 0 {
-		c.reqQueued.Range(func(_, value interface{}) bool {
+		c.reqQueued.Range(func(_, value any) bool {
 			ctx := value.(*Ctx)
 			atomic.AddInt32(&ctx.sendWindow, delta)
 			return true
 		})
 	}
-	
+
 	c.serverStreamWindow = newStreamWindow
 	c.serverSMu.Unlock()
 }
@@ -683,11 +683,11 @@ func (c *Conn) writeData(fh *FrameHeader, ctx *Ctx, body []byte) (err error) {
 			// Wait briefly for window update
 			// In practice, WINDOW_UPDATE frames should arrive through readLoop
 			time.Sleep(10 * time.Millisecond)
-			
+
 			// Re-check windows after waiting
 			connWin = atomic.LoadInt32(&c.serverWindow)
 			streamWin = atomic.LoadInt32(&ctx.sendWindow)
-			
+
 			if connWin <= 0 || streamWin <= 0 {
 				return errors.New("flow control: send window exhausted")
 			}
@@ -695,10 +695,7 @@ func (c *Conn) writeData(fh *FrameHeader, ctx *Ctx, body []byte) (err error) {
 
 		// Calculate chunk size respecting both windows and max frame size
 		remaining := len(body) - i
-		toSend := min(remaining, maxFrame)
-		if toSend > int(connWin) {
-			toSend = int(connWin)
-		}
+		toSend := min(min(remaining, maxFrame), int(connWin))
 		if toSend > int(streamWin) {
 			toSend = int(streamWin)
 		}
