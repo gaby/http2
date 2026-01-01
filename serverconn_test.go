@@ -69,6 +69,7 @@ func TestHandleFrameDataStreamFlowControl(t *testing.T) {
 	fr := AcquireFrameHeader()
 	fr.SetStream(strm.ID())
 	fr.SetBody(data)
+	fr.length = len(data.Data())
 
 	require.NoError(t, sc.consumeConnectionWindow(data.Len()))
 	err := sc.handleFrame(strm, fr)
@@ -129,6 +130,7 @@ func TestHandleFrameSendsWindowUpdatesAfterReading(t *testing.T) {
 	fr := AcquireFrameHeader()
 	fr.SetStream(strm.ID())
 	fr.SetBody(data)
+	fr.length = len(payload)
 
 	require.NoError(t, sc.consumeConnectionWindow(len(payload)))
 	err := sc.handleFrame(strm, fr)
@@ -150,6 +152,44 @@ func TestHandleFrameSendsWindowUpdatesAfterReading(t *testing.T) {
 
 	ReleaseFrameHeader(connWU)
 	ReleaseFrameHeader(streamWU)
+	ReleaseFrameHeader(fr)
+}
+
+func TestPaddedDataCountsAgainstWindow(t *testing.T) {
+	sc := &serverConn{
+		writer: make(chan *FrameHeader, 1),
+		logger: log.New(io.Discard, "", 0),
+	}
+	sc.maxWindow = 15
+	sc.currentWindow = sc.maxWindow
+
+	strm := NewStream(1, 10, 10)
+	strm.SetState(StreamStateOpen)
+	strm.headersFinished = true
+	strm.ctx = &fasthttp.RequestCtx{}
+	strm.ctx.Request.Reset()
+
+	data := AcquireFrame(FrameData).(*Data)
+	data.SetPadding(true)
+	data.SetData([]byte("data"))
+
+	fr := AcquireFrameHeader()
+	fr.SetStream(strm.ID())
+	fr.SetBody(data)
+	fr.length = len(data.Data()) + 1 + 10 // pad length field + padding bytes
+
+	require.NoError(t, sc.consumeConnectionWindow(fr.Len()))
+	err := sc.handleFrame(strm, fr)
+	require.Error(t, err)
+	var h2Err Error
+	require.ErrorAs(t, err, &h2Err)
+	require.Equal(t, FlowControlError, h2Err.Code())
+	require.Equal(t, FrameResetStream, h2Err.frameType)
+
+	sc.writeError(strm, err)
+	out := <-sc.writer
+	require.Equal(t, FrameResetStream, out.Type())
+	ReleaseFrameHeader(out)
 	ReleaseFrameHeader(fr)
 }
 

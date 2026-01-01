@@ -541,7 +541,7 @@ loop:
 			}
 
 			if fr.Type() == FrameData {
-				payloadLen := fr.Body().(*Data).Len()
+				payloadLen := fr.Len()
 				if err := sc.consumeConnectionWindow(payloadLen); err != nil {
 					sc.writeError(nil, err)
 					if strm != nil {
@@ -747,7 +747,7 @@ func (sc *serverConn) handleFrame(strm *Stream, fr *FrameHeader) error {
 		}
 
 		data := fr.Body().(*Data)
-		payloadLen := data.Len()
+		payloadLen := fr.Len()
 
 		if err := sc.consumeStreamWindow(strm, payloadLen); err != nil {
 			return err
