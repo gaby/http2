@@ -42,12 +42,17 @@ type serverConn struct {
 	// client's window
 	// should be int64 because the user can try to overflow it
 	clientWindow int64
+	// client's max frame size
+	clientMaxFrameSize int64
 
 	// our values
 	maxWindow     int32
 	currentWindow int32
 	writer        chan *FrameHeader
 	reader        chan *FrameHeader
+
+	streamsMu sync.Mutex
+	streams   map[uint32]*Stream
 
 	state connState
 	// connErr signals that a connection-level error has been triggered and the
@@ -121,6 +126,7 @@ func (sc *serverConn) Serve() error {
 	sc.timerMu.Lock()
 	sc.maxRequestTimer = time.NewTimer(0)
 	atomic.StoreInt64(&sc.clientWindow, int64(sc.clientS.MaxWindowSize()))
+	atomic.StoreInt64(&sc.clientMaxFrameSize, int64(defaultDataFrameSize))
 
 	if sc.maxIdleTime > 0 {
 		sc.maxIdleTimer = time.AfterFunc(sc.maxIdleTime, sc.closeIdleConn)
@@ -365,14 +371,19 @@ func (sc *serverConn) readLoop() (err error) {
 			}
 		case FrameWindowUpdate:
 			win := int64(fr.Body().(*WindowUpdate).Increment())
-			if win == 0 {
-				sc.writeGoAway(0, ProtocolError, "window increment of 0")
-				frameErr = NewGoAwayError(ProtocolError, "window increment of 0")
-			}
+			if incErr := validateWindowIncrement(win); incErr != nil {
+				code := FlowControlError
+				if errors.Is(incErr, errWindowIncrementZero) {
+					code = ProtocolError
+				}
 
-			if frameErr == nil && atomic.AddInt64(&sc.clientWindow, win) >= 1<<31-1 {
-				sc.writeGoAway(0, FlowControlError, "window is above limits")
-				frameErr = NewGoAwayError(FlowControlError, "window is above limits")
+				msg := windowUpdateErrorMessage(incErr)
+				sc.writeGoAway(0, code, msg)
+				frameErr = NewGoAwayError(code, msg)
+			} else if _, winErr := addAndClampWindow(&sc.clientWindow, win); winErr != nil {
+				msg := windowUpdateErrorMessage(winErr)
+				sc.writeGoAway(0, FlowControlError, msg)
+				frameErr = NewGoAwayError(FlowControlError, msg)
 			}
 		case FramePing:
 			ping := fr.Body().(*Ping)
@@ -437,6 +448,7 @@ func (sc *serverConn) handleStreams() {
 		}
 
 		strmID := strm.ID()
+		sc.deleteActiveStream(strmID)
 
 		closedStrms[strm.ID()] = struct{}{}
 		strms.Del(strm.ID())
@@ -580,6 +592,7 @@ loop:
 				sendWindow := int32(atomic.LoadInt64(&sc.clientWindow))
 				strm = NewStream(fr.Stream(), recvWindow, sendWindow)
 				strms = append(strms, strm)
+				sc.addActiveStream(strm)
 
 				// RFC(5.1.1):
 				//
@@ -674,11 +687,17 @@ loop:
 
 			switch strm.State() {
 			case StreamStateHalfClosed:
-				sc.handleEndRequest(strm)
-				// we fallthrough because once we send the response
-				// the stream is already consumed and thus finished
-				fallthrough
-			case StreamStateClosed:
+				if !strm.responseStarted {
+					strm.responseStarted = true
+					sc.handleEndRequest(strm)
+				}
+
+				if sc.responseComplete(strm) {
+					strm.SetState(StreamStateClosed)
+				}
+			}
+
+			if strm.State() == StreamStateClosed {
 				closeStream(strm)
 			}
 
@@ -909,13 +928,19 @@ func (sc *serverConn) handleFrame(strm *Stream, fr *FrameHeader) error {
 		}
 
 		win := int64(fr.Body().(*WindowUpdate).Increment())
-		if win == 0 {
-			return NewGoAwayError(ProtocolError, "window increment of 0")
+		if incErr := validateWindowIncrement(win); incErr != nil {
+			code := FlowControlError
+			if errors.Is(incErr, errWindowIncrementZero) {
+				code = ProtocolError
+			}
+			return NewResetStreamError(code, windowUpdateErrorMessage(incErr))
 		}
 
-		if atomic.AddInt64(&strm.sendWindow, win) >= 1<<31-1 {
-			return NewResetStreamError(FlowControlError, "window is above limits")
+		if _, winErr := addAndClampWindow(&strm.sendWindow, win); winErr != nil {
+			return NewResetStreamError(FlowControlError, windowUpdateErrorMessage(winErr))
 		}
+
+		sc.flushPendingData(strm)
 	default:
 		return NewGoAwayError(ProtocolError, "invalid frame")
 	}
@@ -1111,17 +1136,21 @@ func (sc *serverConn) handleEndRequest(strm *Stream) {
 	sc.encMu.Unlock()
 
 	sc.writer <- fr
+	if !hasBody {
+		sc.markResponseEnded(strm)
+	}
 
 	if hasBody {
 		if ctx.Response.IsBodyStream() {
 			streamWriter := acquireStreamWrite()
 			streamWriter.strm = strm
+			streamWriter.sc = sc
 			streamWriter.writer = sc.writer
 			streamWriter.size = int64(ctx.Response.Header.ContentLength())
 			_ = ctx.Response.BodyWriteTo(streamWriter)
 			releaseStreamWrite(streamWriter)
 		} else {
-			sc.writeData(strm, ctx.Response.Body())
+			sc.queueData(strm, ctx.Response.Body(), true)
 		}
 	}
 }
@@ -1143,6 +1172,7 @@ type streamWrite struct {
 	size    int64
 	written int64
 	strm    *Stream
+	sc      *serverConn
 	writer  chan<- *FrameHeader
 }
 
@@ -1163,6 +1193,7 @@ func (s *streamWrite) Reset() {
 	s.size = 0
 	s.written = 0
 	s.strm = nil
+	s.sc = nil
 	s.writer = nil
 }
 
@@ -1171,29 +1202,38 @@ func (s *streamWrite) Write(body []byte) (n int, err error) {
 		return 0, errors.New("writer closed")
 	}
 
-	step := 1 << 14 // max frame size 16384
+	if s.sc == nil {
+		step := 1 << 14 // max frame size 16384
+		n = len(body)
+		s.written += int64(n)
+
+		end := s.size < 0 || s.written >= s.size
+		for i := 0; i < n; i += step {
+			if i+step >= n {
+				step = n - i
+			}
+
+			fr := AcquireFrameHeader()
+			fr.SetStream(s.strm.ID())
+
+			data := AcquireFrame(FrameData).(*Data)
+			data.SetEndStream(end && i+step == n)
+			data.SetPadding(false)
+			data.SetData(body[i : step+i])
+
+			fr.SetBody(data)
+
+			s.writer <- fr
+		}
+
+		return len(body), nil
+	}
 
 	n = len(body)
 	s.written += int64(n)
 
 	end := s.size < 0 || s.written >= s.size
-	for i := 0; i < n; i += step {
-		if i+step >= n {
-			step = n - i
-		}
-
-		fr := AcquireFrameHeader()
-		fr.SetStream(s.strm.ID())
-
-		data := AcquireFrame(FrameData).(*Data)
-		data.SetEndStream(end && i+step == n)
-		data.SetPadding(false)
-		data.SetData(body[i : step+i])
-
-		fr.SetBody(data)
-
-		s.writer <- fr
-	}
+	s.sc.queueData(s.strm, body, end)
 
 	return len(body), nil
 }
@@ -1219,16 +1259,24 @@ func (s *streamWrite) ReadFrom(r io.Reader) (num int64, err error) {
 			break
 		}
 
-		fr := AcquireFrameHeader()
-		fr.SetStream(s.strm.ID())
+		if s.sc == nil {
+			fr := AcquireFrameHeader()
+			fr.SetStream(s.strm.ID())
 
-		data := AcquireFrame(FrameData).(*Data)
-		data.SetEndStream(err != nil || (s.size >= 0 && num+int64(n) >= s.size))
-		data.SetPadding(false)
-		data.SetData(buf[:n])
-		fr.SetBody(data)
+			data := AcquireFrame(FrameData).(*Data)
+			data.SetEndStream(err != nil || (s.size >= 0 && num+int64(n) >= s.size))
+			data.SetPadding(false)
+			data.SetData(buf[:n])
+			fr.SetBody(data)
 
-		s.writer <- fr
+			s.writer <- fr
+		} else {
+			s.sc.queueData(
+				s.strm,
+				buf[:n],
+				err != nil || (s.size >= 0 && num+int64(n) >= s.size),
+			)
+		}
 
 		num += int64(n)
 		if s.size >= 0 && num >= s.size {
@@ -1242,31 +1290,6 @@ func (s *streamWrite) ReadFrom(r io.Reader) (num int64, err error) {
 	}
 
 	return num, err
-}
-
-func (sc *serverConn) writeData(strm *Stream, body []byte) {
-	step := 1 << 14 // max frame size 16384
-	if strm.sendWindow > 0 && step > int(strm.sendWindow) {
-		step = int(strm.sendWindow)
-	}
-
-	for i := 0; i < len(body); i += step {
-		if i+step >= len(body) {
-			step = len(body) - i
-		}
-
-		fr := AcquireFrameHeader()
-		fr.SetStream(strm.ID())
-
-		data := AcquireFrame(FrameData).(*Data)
-		data.SetEndStream(i+step == len(body))
-		data.SetPadding(false)
-		data.SetData(body[i : step+i])
-
-		fr.SetBody(data)
-
-		sc.writer <- fr
-	}
 }
 
 func (sc *serverConn) sendPingAndSchedule() {
@@ -1319,6 +1342,7 @@ func (sc *serverConn) writeLoop() {
 }
 
 func (sc *serverConn) handleSettings(st *Settings) {
+	prevWindow := sc.clientS.MaxWindowSize()
 	st.CopyTo(&sc.clientS)
 
 	sc.encMu.Lock()
@@ -1327,6 +1351,21 @@ func (sc *serverConn) handleSettings(st *Settings) {
 
 	// atomically update the new window
 	atomic.StoreInt64(&sc.clientWindow, int64(sc.clientS.MaxWindowSize()))
+	atomic.StoreInt64(&sc.clientMaxFrameSize, int64(sc.clientS.MaxFrameSize()))
+	if st.HasMaxWindowSize() {
+		delta := int64(sc.clientS.MaxWindowSize()) - int64(prevWindow)
+		if delta != 0 {
+			sc.forEachActiveStream(func(strm *Stream) {
+				newWin := atomic.AddInt64(&strm.sendWindow, delta)
+				if newWin > maxWindowSize {
+					atomic.StoreInt64(&strm.sendWindow, maxWindowSize)
+				}
+				if delta > 0 {
+					sc.flushPendingData(strm)
+				}
+			})
+		}
+	}
 
 	fr := AcquireFrameHeader()
 
@@ -1339,6 +1378,179 @@ func (sc *serverConn) handleSettings(st *Settings) {
 }
 
 const maxWindowIncrement = 1<<31 - 1
+const maxWindowSize = maxWindowIncrement
+
+var (
+	errInvalidWindowSizeIncrement = errors.New("invalid window size increment")
+	errWindowSizeOverflow         = errors.New("window size overflow")
+	errWindowIncrementZero        = errors.New("window size increment is 0")
+)
+
+func validateWindowIncrement(inc int64) error {
+	if inc == 0 {
+		return errWindowIncrementZero
+	}
+
+	if inc < 0 || inc > maxWindowSize {
+		return errInvalidWindowSizeIncrement
+	}
+
+	return nil
+}
+
+func (sc *serverConn) addActiveStream(strm *Stream) {
+	sc.streamsMu.Lock()
+	if sc.streams == nil {
+		sc.streams = make(map[uint32]*Stream)
+	}
+	sc.streams[strm.ID()] = strm
+	sc.streamsMu.Unlock()
+}
+
+func (sc *serverConn) deleteActiveStream(id uint32) {
+	sc.streamsMu.Lock()
+	delete(sc.streams, id)
+	sc.streamsMu.Unlock()
+}
+
+func (sc *serverConn) forEachActiveStream(fn func(*Stream)) {
+	sc.streamsMu.Lock()
+	streams := make([]*Stream, 0, len(sc.streams))
+	for _, strm := range sc.streams {
+		streams = append(streams, strm)
+	}
+	sc.streamsMu.Unlock()
+
+	for _, strm := range streams {
+		fn(strm)
+	}
+}
+
+func addAndClampWindow(window *int64, inc int64) (int64, error) {
+	if inc <= 0 || inc > maxWindowSize {
+		return atomic.LoadInt64(window), errInvalidWindowSizeIncrement
+	}
+
+	for {
+		current := atomic.LoadInt64(window)
+		if current >= maxWindowSize {
+			return maxWindowSize, nil
+		}
+
+		if current > maxWindowSize-inc {
+			atomic.StoreInt64(window, maxWindowSize)
+			return maxWindowSize, errWindowSizeOverflow
+		}
+
+		next := current + inc
+		if atomic.CompareAndSwapInt64(window, current, next) {
+			return next, nil
+		}
+	}
+}
+
+func windowUpdateErrorMessage(err error) string {
+	switch err {
+	case errInvalidWindowSizeIncrement:
+		return "invalid window size increment"
+	case errWindowSizeOverflow:
+		return "window is above limits"
+	case errWindowIncrementZero:
+		return "window size increment is 0"
+	default:
+		return err.Error()
+	}
+}
+
+func (sc *serverConn) queueDataFrame(strm *Stream, data []byte, endStream bool) {
+	fr := AcquireFrameHeader()
+	fr.SetStream(strm.ID())
+
+	payload := AcquireFrame(FrameData).(*Data)
+	payload.SetEndStream(endStream)
+	payload.SetPadding(false)
+	payload.SetData(data)
+
+	fr.SetBody(payload)
+
+	sc.writer <- fr
+}
+
+func (sc *serverConn) appendPendingData(strm *Stream, data []byte, endStream bool) {
+	strm.pendingMu.Lock()
+	strm.pendingData = append(strm.pendingData, data...)
+	if endStream {
+		strm.pendingDataEndStream = true
+	}
+	strm.pendingMu.Unlock()
+}
+
+func (sc *serverConn) markResponseEnded(strm *Stream) {
+	strm.pendingMu.Lock()
+	strm.responseEnded = true
+	strm.pendingMu.Unlock()
+}
+
+func (sc *serverConn) responseComplete(strm *Stream) bool {
+	strm.pendingMu.Lock()
+	defer strm.pendingMu.Unlock()
+	return strm.responseEnded && len(strm.pendingData) == 0 && !strm.pendingDataEndStream
+}
+
+func (sc *serverConn) queueData(strm *Stream, data []byte, endStream bool) {
+	if len(data) == 0 {
+		if endStream {
+			sc.markResponseEnded(strm)
+			sc.queueDataFrame(strm, nil, true)
+		}
+		return
+	}
+
+	maxFrame := int(atomic.LoadInt64(&sc.clientMaxFrameSize))
+	if maxFrame <= 0 {
+		maxFrame = 1 << 14
+	}
+
+	for len(data) > 0 {
+		streamWin := atomic.LoadInt64(&strm.sendWindow)
+		if streamWin <= 0 {
+			sc.appendPendingData(strm, data, endStream)
+			return
+		}
+
+		toSend := min(len(data), maxFrame, int(streamWin))
+		if toSend <= 0 {
+			sc.appendPendingData(strm, data, endStream)
+			return
+		}
+
+		atomic.AddInt64(&strm.sendWindow, -int64(toSend))
+
+		chunk := data[:toSend]
+		data = data[toSend:]
+		isLastChunk := endStream && len(data) == 0
+		if isLastChunk {
+			sc.markResponseEnded(strm)
+		}
+		sc.queueDataFrame(strm, chunk, isLastChunk)
+	}
+}
+
+func (sc *serverConn) flushPendingData(strm *Stream) {
+	strm.pendingMu.Lock()
+	hasPending := len(strm.pendingData) > 0 || strm.pendingDataEndStream
+	data := append([]byte(nil), strm.pendingData...)
+	endStream := strm.pendingDataEndStream
+	strm.pendingData = strm.pendingData[:0]
+	strm.pendingDataEndStream = false
+	strm.pendingMu.Unlock()
+
+	if !hasPending {
+		return
+	}
+
+	sc.queueData(strm, data, endStream)
+}
 
 func (sc *serverConn) consumeConnectionWindow(n int) error {
 	if n == 0 {

@@ -35,14 +35,19 @@ func (ss StreamState) String() string {
 }
 
 type Stream struct {
-	id                  uint32
-	window              int64
-	recvWindowSize      int32
-	sendWindow          int64
-	state               StreamState
-	ctx                 *fasthttp.RequestCtx
-	scheme              []byte
-	previousHeaderBytes []byte
+	id                   uint32
+	window               int64
+	recvWindowSize       int32
+	sendWindow           int64
+	pendingData          []byte
+	pendingDataEndStream bool
+	pendingMu            sync.Mutex
+	responseStarted      bool
+	responseEnded        bool
+	state                StreamState
+	ctx                  *fasthttp.RequestCtx
+	scheme               []byte
+	previousHeaderBytes  []byte
 
 	// keeps track of the number of header blocks received
 	headerBlockNum int
@@ -74,6 +79,10 @@ func NewStream(id uint32, recvWin, sendWin int32) *Stream {
 	strm.window = int64(recvWin)
 	strm.recvWindowSize = recvWin
 	strm.sendWindow = int64(sendWin)
+	strm.pendingData = strm.pendingData[:0]
+	strm.pendingDataEndStream = false
+	strm.responseStarted = false
+	strm.responseEnded = false
 	strm.state = StreamStateIdle
 	strm.headersFinished = false
 	strm.pendingEndStream = false

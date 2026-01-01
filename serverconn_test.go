@@ -3,6 +3,7 @@ package http2
 import (
 	"bufio"
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"io"
 	"log"
@@ -71,6 +72,18 @@ func buildHeadersFrameWithOptions(t *testing.T, streamID uint32, headers [][2]st
 	fr.SetBody(h)
 	fr.length = len(h.Headers())
 	return fr
+}
+
+func buildWindowUpdateFrame(_ *testing.T, streamID uint32, increment uint32) []byte {
+	header := []byte{
+		0x0, 0x0, 0x4,
+		byte(FrameWindowUpdate), 0x0,
+		byte(streamID >> 24), byte(streamID >> 16), byte(streamID >> 8), byte(streamID),
+	}
+	payload := make([]byte, 4)
+	binary.BigEndian.PutUint32(payload, increment)
+
+	return append(header, payload...)
 }
 
 func TestServerConnPingAndErrors(t *testing.T) {
@@ -165,6 +178,59 @@ func TestConnectionWindowUnderflowSendsGoAway(t *testing.T) {
 	ReleaseFrameHeader(fr)
 }
 
+func TestConnectionWindowUpdateOverflowSendsFlowControlGoAway(t *testing.T) {
+	frame := buildWindowUpdateFrame(t, 0, uint32(maxWindowIncrement))
+	sc := &serverConn{
+		br:      bufio.NewReader(bytes.NewReader(frame)),
+		st:      Settings{},
+		clientS: Settings{},
+		writer:  make(chan *FrameHeader, 1),
+		logger:  log.New(io.Discard, "", 0),
+	}
+	sc.st.Reset()
+	sc.clientS.Reset()
+	atomic.StoreInt64(&sc.clientWindow, int64(sc.clientS.MaxWindowSize()))
+
+	err := sc.readLoop()
+	require.Error(t, err)
+	var h2Err Error
+	require.ErrorAs(t, err, &h2Err)
+	require.Equal(t, FlowControlError, h2Err.Code())
+	require.Equal(t, FrameGoAway, h2Err.frameType)
+	require.EqualValues(t, maxWindowIncrement, atomic.LoadInt64(&sc.clientWindow))
+
+	fr := <-sc.writer
+	require.Equal(t, FrameGoAway, fr.Type())
+	require.Equal(t, FlowControlError, fr.Body().(*GoAway).Code())
+	ReleaseFrameHeader(fr)
+}
+
+func TestConnectionWindowUpdateZeroSendsProtocolGoAway(t *testing.T) {
+	frame := buildWindowUpdateFrame(t, 0, 0)
+	sc := &serverConn{
+		br:      bufio.NewReader(bytes.NewReader(frame)),
+		st:      Settings{},
+		clientS: Settings{},
+		writer:  make(chan *FrameHeader, 1),
+		logger:  log.New(io.Discard, "", 0),
+	}
+	sc.st.Reset()
+	sc.clientS.Reset()
+	atomic.StoreInt64(&sc.clientWindow, int64(sc.clientS.MaxWindowSize()))
+
+	err := sc.readLoop()
+	require.Error(t, err)
+	var h2Err Error
+	require.ErrorAs(t, err, &h2Err)
+	require.Equal(t, ProtocolError, h2Err.Code())
+	require.Equal(t, FrameGoAway, h2Err.frameType)
+
+	fr := <-sc.writer
+	require.Equal(t, FrameGoAway, fr.Type())
+	require.Equal(t, ProtocolError, fr.Body().(*GoAway).Code())
+	ReleaseFrameHeader(fr)
+}
+
 func TestHandleFrameSendsWindowUpdatesAfterReading(t *testing.T) {
 	sc := &serverConn{
 		writer: make(chan *FrameHeader, 4),
@@ -247,6 +313,110 @@ func TestPaddedDataCountsAgainstWindow(t *testing.T) {
 	require.Equal(t, FrameResetStream, out.Type())
 	ReleaseFrameHeader(out)
 	ReleaseFrameHeader(fr)
+}
+
+func TestStreamWindowUpdateOverflowResetsStream(t *testing.T) {
+	sc := &serverConn{
+		writer: make(chan *FrameHeader, 1),
+		logger: log.New(io.Discard, "", 0),
+	}
+
+	strm := NewStream(1, int32(defaultWindowSize), int32(defaultWindowSize))
+	strm.SetState(StreamStateOpen)
+
+	wu := AcquireFrame(FrameWindowUpdate).(*WindowUpdate)
+	wu.SetIncrement(maxWindowIncrement)
+
+	fr := AcquireFrameHeader()
+	fr.SetStream(strm.ID())
+	fr.SetBody(wu)
+	fr.length = 4
+
+	err := sc.handleFrame(strm, fr)
+	require.Error(t, err)
+	var h2Err Error
+	require.ErrorAs(t, err, &h2Err)
+	require.Equal(t, FlowControlError, h2Err.Code())
+	require.Equal(t, FrameResetStream, h2Err.frameType)
+	require.EqualValues(t, maxWindowIncrement, atomic.LoadInt64(&strm.sendWindow))
+
+	sc.writeError(strm, err)
+	out := <-sc.writer
+	require.Equal(t, FrameResetStream, out.Type())
+	require.Equal(t, FlowControlError, out.Body().(*RstStream).Code())
+
+	ReleaseFrameHeader(out)
+	ReleaseFrameHeader(fr)
+}
+
+func TestStreamWindowUpdateZeroSendsProtocolReset(t *testing.T) {
+	sc := &serverConn{
+		writer: make(chan *FrameHeader, 1),
+		logger: log.New(io.Discard, "", 0),
+	}
+
+	strm := NewStream(1, int32(defaultWindowSize), int32(defaultWindowSize))
+	strm.SetState(StreamStateOpen)
+
+	wu := AcquireFrame(FrameWindowUpdate).(*WindowUpdate)
+	wu.increment = 0
+
+	fr := AcquireFrameHeader()
+	fr.SetStream(strm.ID())
+	fr.SetBody(wu)
+	fr.length = 4
+
+	err := sc.handleFrame(strm, fr)
+	require.Error(t, err)
+	var h2Err Error
+	require.ErrorAs(t, err, &h2Err)
+	require.Equal(t, ProtocolError, h2Err.Code())
+	require.Equal(t, FrameResetStream, h2Err.frameType)
+
+	sc.writeError(strm, err)
+	out := <-sc.writer
+	require.Equal(t, FrameResetStream, out.Type())
+	require.Equal(t, ProtocolError, out.Body().(*RstStream).Code())
+
+	ReleaseFrameHeader(out)
+	ReleaseFrameHeader(fr)
+}
+
+func TestQueueDataRespectsInitialWindowChanges(t *testing.T) {
+	sc := &serverConn{
+		writer: make(chan *FrameHeader, 4),
+		logger: log.New(io.Discard, "", 0),
+	}
+	sc.clientS.Reset()
+
+	strm := NewStream(1, int32(defaultWindowSize), 3)
+	strm.SetState(StreamStateOpen)
+
+	body := []byte("hello world")
+	sc.queueData(strm, body, true)
+
+	first := <-sc.writer
+	data := first.Body().(*Data)
+	require.Equal(t, 3, len(data.Data()))
+	require.False(t, data.EndStream())
+	ReleaseFrameHeader(first)
+	require.EqualValues(t, 0, atomic.LoadInt64(&strm.sendWindow))
+
+	atomic.AddInt64(&strm.sendWindow, -1)
+
+	_, err := addAndClampWindow(&strm.sendWindow, 2)
+	require.NoError(t, err)
+	sc.flushPendingData(strm)
+
+	next := <-sc.writer
+	nextData := next.Body().(*Data)
+	require.Equal(t, 1, len(nextData.Data()))
+	ReleaseFrameHeader(next)
+
+	strm.pendingMu.Lock()
+	pendingLen := len(strm.pendingData)
+	strm.pendingMu.Unlock()
+	require.Equal(t, len(body)-4, pendingLen)
 }
 
 func TestStreamWriteHelpers(t *testing.T) {
