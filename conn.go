@@ -311,7 +311,20 @@ func (c *Conn) updateServerSettings(st *Settings) {
 		c.serverS.windowSize = prevStreamWindow
 		c.serverS.windowSet = prevWindowExplicit
 	}
-	c.serverStreamWindow = int32(c.serverS.MaxWindowSize())
+	newStreamWindow := int32(c.serverS.MaxWindowSize())
+	
+	// RFC 7540 Section 6.9.2: When SETTINGS_INITIAL_WINDOW_SIZE changes,
+	// adjust all existing stream flow-control windows by the difference
+	delta := newStreamWindow - int32(prevStreamWindow)
+	if delta != 0 {
+		c.reqQueued.Range(func(_, value interface{}) bool {
+			ctx := value.(*Ctx)
+			atomic.AddInt32(&ctx.sendWindow, delta)
+			return true
+		})
+	}
+	
+	c.serverStreamWindow = newStreamWindow
 	c.serverSMu.Unlock()
 }
 
@@ -618,15 +631,16 @@ func (c *Conn) writeRequest(ctx *Ctx) error {
 
 	// store the ctx before sending the request
 	atomic.StoreUint32(&ctx.streamID, id)
-	// Initialize stream send window
-	c.serverSMu.RLock()
+	// Initialize stream send window and store in map atomically to avoid races with updateServerSettings
+	// We need write lock here to ensure we see consistent state with updateServerSettings
+	c.serverSMu.Lock()
 	streamWin := c.serverStreamWindow
 	if streamWin == 0 {
 		streamWin = 65535 // RFC 7540 default
 	}
-	c.serverSMu.RUnlock()
 	atomic.StoreInt32(&ctx.sendWindow, streamWin)
 	c.reqQueued.Store(id, ctx)
+	c.serverSMu.Unlock()
 
 	_, err := fr.WriteTo(c.bw)
 	if err == nil && hasBody {
