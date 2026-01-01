@@ -20,7 +20,9 @@ import (
 	"github.com/summerwind/h2spec/config"
 	"github.com/summerwind/h2spec/generic"
 	h2spec "github.com/summerwind/h2spec/http2"
+	spec "github.com/summerwind/h2spec/spec"
 	"github.com/valyala/fasthttp"
+	xhttp2 "golang.org/x/net/http2"
 )
 
 func TestH2Spec(t *testing.T) {
@@ -106,7 +108,7 @@ func TestH2Spec(t *testing.T) {
 		// About(dario): In this one we send a GOAWAY,
 		//               but the spec is expecting a connection close.
 		//
-		// {desc: "http2/5.4.1/1"},
+		{desc: "http2/5.4.1/1"},
 		{desc: "http2/5.4.1/2"},
 		{desc: "http2/5.5/1"},
 		{desc: "http2/5.5/2"},
@@ -205,6 +207,7 @@ func TestH2Spec(t *testing.T) {
 				MaxHeaderLen: 4000,
 				TLS:          true,
 				Insecure:     true,
+				Verbose:      testing.Verbose(),
 				Sections:     []string{test.desc},
 			}
 
@@ -217,6 +220,41 @@ func TestH2Spec(t *testing.T) {
 			require.Equal(t, 0, tg.FailedCount)
 		})
 	}
+}
+
+func TestUnknownExtensionFrameDuringHeaders(t *testing.T) {
+	port := launchLocalServer(t)
+
+	conf := &config.Config{
+		Host:         "127.0.0.1",
+		Port:         port,
+		Path:         "/",
+		Timeout:      time.Second,
+		MaxHeaderLen: 4000,
+		TLS:          true,
+		Insecure:     true,
+	}
+
+	conn, err := spec.Dial(conf)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	require.NoError(t, conn.Handshake())
+
+	headers := spec.CommonHeaders(conf)
+	hp := xhttp2.HeadersFrameParam{
+		StreamID:      1,
+		EndStream:     true,
+		EndHeaders:    false,
+		BlockFragment: conn.EncodeHeaders(headers),
+	}
+	require.NoError(t, conn.WriteHeaders(hp))
+
+	require.NoError(t, conn.Send([]byte("\x00\x00\x08\x16\x00\x00\x00\x00\x00")))
+	require.NoError(t, conn.Send([]byte("\x00\x00\x00\x00\x00\x00\x00\x00")))
+
+	err = spec.VerifyConnectionError(conn, xhttp2.ErrCodeProtocol)
+	require.NoError(t, err)
 }
 
 func launchLocalServer(t *testing.T) int {
