@@ -1590,6 +1590,7 @@ func (sc *serverConn) queueData(strm *Stream, data []byte, endStream bool) {
 	for len(data) > 0 {
 		streamWin := atomic.LoadInt64(&strm.sendWindow)
 		connWin := atomic.LoadInt64(&sc.clientWindow)
+		
 		if streamWin <= 0 || connWin <= 0 {
 			sc.appendPendingData(strm, data, endStream)
 			return
