@@ -136,7 +136,8 @@ func (sc *serverConn) Serve() error {
 		initWin = defaultWindowSize
 	}
 	atomic.StoreInt64(&sc.clientWindow, int64(initWin))
-	atomic.StoreInt64(&sc.initialClientWindow, int64(initWin))
+	// Do NOT pre-initialize initialClientWindow - let client's SETTINGS frame set it
+	// atomic.StoreInt64(&sc.initialClientWindow, int64(initWin))
 	atomic.StoreInt64(&sc.clientMaxFrameSize, int64(defaultDataFrameSize))
 
 	if sc.maxIdleTime > 0 {
