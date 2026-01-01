@@ -1,6 +1,7 @@
 package http2
 
 import (
+	"bufio"
 	"io"
 	"net"
 	"sort"
@@ -13,6 +14,28 @@ import (
 	"github.com/valyala/fasthttp"
 	"github.com/valyala/fasthttp/fasthttputil"
 )
+
+// writeDataNoFlowControl is a test helper that writes DATA frames without flow control
+func writeDataNoFlowControl(bw *bufio.Writer, fh *FrameHeader, body []byte) (err error) {
+	step := 1 << 14
+
+	data := AcquireFrame(FrameData).(*Data)
+	fh.SetBody(data)
+
+	for i := 0; err == nil && i < len(body); i += step {
+		if i+step >= len(body) {
+			step = len(body) - i
+		}
+
+		data.SetEndStream(i+step == len(body))
+		data.SetPadding(false)
+		data.SetData(body[i : step+i])
+
+		_, err = fh.WriteTo(bw)
+	}
+
+	return err
+}
 
 func serve(s *Server, ln net.Listener) {
 	for {
@@ -153,7 +176,7 @@ func testIssue52(t *testing.T) {
 	c.writeFrame(h4)
 
 	for _, h := range []*FrameHeader{h1, h2} {
-		err = writeData(c.bw, h, msg)
+		err = writeDataNoFlowControl(c.bw, h, msg)
 		require.NoError(t, err)
 
 		c.bw.Flush()

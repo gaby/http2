@@ -51,6 +51,7 @@ type Ctx struct {
 	Err      chan error
 
 	streamID    uint32
+	sendWindow  int32 // tracked send window for this stream
 	resolveOnce sync.Once
 	onResolve   func(error)
 }
