@@ -46,9 +46,8 @@ type serverConn struct {
 	// our values
 	maxWindow     int32
 	currentWindow int32
-
-	writer chan *FrameHeader
-	reader chan *FrameHeader
+	writer        chan *FrameHeader
+	reader        chan *FrameHeader
 
 	state connState
 	// connErr signals that a connection-level error has been triggered and the
@@ -273,6 +272,7 @@ func (sc *serverConn) readLoop() (err error) {
 	}()
 
 	var fr *FrameHeader
+	openHeaderBlocks := make(map[uint32]struct{})
 
 	for err == nil {
 		if sc.connErr.Load() || sc.closing.Load() {
@@ -282,12 +282,16 @@ func (sc *serverConn) readLoop() (err error) {
 		fr, err = ReadFrameFromWithSize(sc.br, sc.st.MaxFrameSize())
 		if err != nil {
 			if errors.Is(err, ErrUnknownFrameType) {
-				if fr == nil {
-					err = nil
-					continue
+				if fr != nil {
+					if len(openHeaderBlocks) > 0 {
+						sc.writeGoAway(0, ProtocolError, "invalid frame")
+						sc.signalConnError()
+						ReleaseFrameHeader(fr)
+						err = NewGoAwayError(ProtocolError, "invalid frame")
+						break
+					}
+					ReleaseFrameHeader(fr)
 				}
-
-				sc.reader <- fr
 				err = nil
 				continue
 			}
@@ -315,6 +319,17 @@ func (sc *serverConn) readLoop() (err error) {
 			}
 
 			break
+		}
+
+		switch fr.Type() {
+		case FrameHeaders, FrameContinuation:
+			if fr.Flags().Has(FlagEndHeaders) {
+				delete(openHeaderBlocks, fr.Stream())
+			} else {
+				openHeaderBlocks[fr.Stream()] = struct{}{}
+			}
+		case FrameResetStream:
+			delete(openHeaderBlocks, fr.Stream())
 		}
 
 		if fr.Stream() != 0 {
