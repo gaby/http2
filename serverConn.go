@@ -731,7 +731,7 @@ func (sc *serverConn) handleFrame(strm *Stream, fr *FrameHeader) error {
 			// headers are only finished if there's no previousHeaderBytes
 			strm.headersFinished = len(strm.previousHeaderBytes) == 0
 			if !strm.headersFinished {
-				return NewGoAwayError(ProtocolError, "END_HEADERS received on an incomplete stream")
+				return NewGoAwayError(CompressionError, "END_HEADERS received on an incomplete stream")
 			}
 
 			// calling req.URI() triggers a URL parsing, so because of that we need to delay the URL parsing.
@@ -822,38 +822,71 @@ func (sc *serverConn) handleHeaderFrame(strm *Stream, fr *FrameHeader) error {
 		}
 
 		k, v := hf.KeyBytes(), hf.ValueBytes()
-		if !hf.IsPseudo() &&
-			!bytes.Equal(k, StringUserAgent) &&
-			!bytes.Equal(k, StringContentType) {
-
-			req.Header.AddBytesKV(k, v)
-			continue
-		}
-
 		if hf.IsPseudo() {
-			k = k[1:]
-		}
-
-		switch k[0] {
-		case 'm': // method
-			req.Header.SetMethodBytes(v)
-		case 'p': // path
-			req.Header.SetRequestURIBytes(v)
-		case 's': // scheme
-			if !bytes.Equal(k, StringScheme[1:]) {
-				return NewGoAwayError(ProtocolError, "invalid pseudoheader")
+			if strm.regularHeaderSeen {
+				return NewResetStreamError(ProtocolError, "pseudo-header after regular header")
 			}
 
-			strm.scheme = append(strm.scheme[:0], v...)
-		case 'a': // authority
-			req.Header.SetHostBytes(v)
-			req.Header.AddBytesV("Host", v)
-		case 'u': // user-agent
-			req.Header.SetUserAgentBytes(v)
-		case 'c': // content-type
-			req.Header.SetContentTypeBytes(v)
-		default:
-			return NewGoAwayError(ProtocolError, fmt.Sprintf("unknown header field %s", k))
+			switch {
+			case bytes.Equal(k, StringMethod):
+				if strm.seenMethod {
+					return NewResetStreamError(ProtocolError, "duplicate pseudo-header :method")
+				}
+
+				strm.seenMethod = true
+				strm.isConnect = bytes.Equal(v, StringCONNECT)
+				if strm.isConnect && (strm.seenPath || strm.seenScheme) {
+					return NewResetStreamError(ProtocolError, "CONNECT must not include :path or :scheme")
+				}
+				req.Header.SetMethodBytes(v)
+			case bytes.Equal(k, StringPath):
+				if strm.seenPath {
+					return NewResetStreamError(ProtocolError, "duplicate pseudo-header :path")
+				}
+
+				if strm.isConnect {
+					return NewResetStreamError(ProtocolError, "CONNECT must not include :path or :scheme")
+				}
+
+				strm.seenPath = true
+				req.Header.SetRequestURIBytes(v)
+			case bytes.Equal(k, StringScheme):
+				if strm.seenScheme {
+					return NewResetStreamError(ProtocolError, "duplicate pseudo-header :scheme")
+				}
+
+				if strm.isConnect {
+					return NewResetStreamError(ProtocolError, "CONNECT must not include :path or :scheme")
+				}
+
+				strm.seenScheme = true
+				strm.scheme = append(strm.scheme[:0], v...)
+			case bytes.Equal(k, StringAuthority):
+				if strm.seenAuthority {
+					return NewResetStreamError(ProtocolError, "duplicate pseudo-header :authority")
+				}
+
+				strm.seenAuthority = true
+				req.Header.SetHostBytes(v)
+				req.Header.AddBytesV("Host", v)
+			default:
+				return NewResetStreamError(ProtocolError, fmt.Sprintf("unknown pseudo-header %s", k))
+			}
+		} else {
+			if forbidden, name := isForbiddenHeader(k, v); forbidden {
+				return NewGoAwayError(ProtocolError, fmt.Sprintf("forbidden header field %s", name))
+			}
+
+			strm.regularHeaderSeen = true
+
+			switch {
+			case bytes.Equal(k, StringUserAgent):
+				req.Header.SetUserAgentBytes(v)
+			case bytes.Equal(k, StringContentType):
+				req.Header.SetContentTypeBytes(v)
+			default:
+				req.Header.AddBytesKV(k, v)
+			}
 		}
 
 		fieldsProcessed++
@@ -861,7 +894,46 @@ func (sc *serverConn) handleHeaderFrame(strm *Stream, fr *FrameHeader) error {
 
 	strm.headerBlockNum++
 
+	if err == nil && fr.Flags().Has(FlagEndHeaders) && len(strm.previousHeaderBytes) == 0 {
+		if !strm.seenMethod {
+			return NewResetStreamError(ProtocolError, "missing required pseudo-header")
+		}
+
+		if strm.isConnect {
+			if !strm.seenAuthority {
+				return NewResetStreamError(ProtocolError, "missing required pseudo-header")
+			}
+
+			if strm.seenPath || strm.seenScheme {
+				return NewResetStreamError(ProtocolError, "CONNECT must not include :path or :scheme")
+			}
+		} else if !strm.seenScheme || !strm.seenPath {
+			return NewResetStreamError(ProtocolError, "missing required pseudo-header")
+		}
+	}
+
 	return err
+}
+
+func isForbiddenHeader(key, value []byte) (bool, string) {
+	switch {
+	case bytes.EqualFold(key, []byte("connection")):
+		return true, "connection"
+	case bytes.EqualFold(key, []byte("proxy-connection")):
+		return true, "proxy-connection"
+	case bytes.EqualFold(key, []byte("transfer-encoding")):
+		return true, "transfer-encoding"
+	case bytes.EqualFold(key, []byte("upgrade")):
+		return true, "upgrade"
+	case bytes.EqualFold(key, []byte("keep-alive")):
+		return true, "keep-alive"
+	case bytes.EqualFold(key, []byte("te")):
+		if !bytes.EqualFold(bytes.TrimSpace(value), []byte("trailers")) {
+			return true, "te"
+		}
+	}
+
+	return false, ""
 }
 
 func (sc *serverConn) verifyState(strm *Stream, fr *FrameHeader) error {

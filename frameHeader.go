@@ -67,7 +67,13 @@ func AcquireFrameHeader() *FrameHeader {
 
 // ReleaseFrameHeader reset and puts fr to the pool.
 func ReleaseFrameHeader(fr *FrameHeader) {
-	ReleaseFrame(fr.Body())
+	if fr == nil {
+		return
+	}
+
+	if body := fr.Body(); body != nil {
+		ReleaseFrame(body)
+	}
 	frameHeaderPool.Put(fr)
 }
 

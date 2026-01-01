@@ -17,6 +17,57 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
+func newTestServerConn() *serverConn {
+	sc := &serverConn{
+		logger: log.New(io.Discard, "", 0),
+	}
+	sc.dec.Reset()
+	return sc
+}
+
+func newTestStream(id uint32) *Stream {
+	strm := NewStream(id, 0, 0)
+	strm.ctx = &fasthttp.RequestCtx{}
+	strm.ctx.Request.Reset()
+	return strm
+}
+
+func buildHeadersFrame(t *testing.T, streamID uint32, headers [][2]string) *FrameHeader {
+	t.Helper()
+
+	var hp HPACK
+	hp.Reset()
+	hf := AcquireHeaderField()
+	defer ReleaseHeaderField(hf)
+
+	h := AcquireFrame(FrameHeaders).(*Headers)
+	for _, kv := range headers {
+		hf.Set(kv[0], kv[1])
+		h.AppendHeaderField(&hp, hf, true)
+	}
+	h.SetEndHeaders(true)
+
+	fr := AcquireFrameHeader()
+	fr.SetStream(streamID)
+	var flags FrameFlags
+	if h.EndStream() {
+		flags = flags.Add(FlagEndStream)
+	}
+	if h.EndHeaders() {
+		flags = flags.Add(FlagEndHeaders)
+	}
+	if h.Priority() {
+		flags = flags.Add(FlagPriority)
+	}
+	if h.Padding() {
+		flags = flags.Add(FlagPadded)
+	}
+	fr.SetFlags(flags)
+	fr.SetBody(h)
+	fr.length = len(h.Headers())
+	return fr
+}
+
 func TestServerConnPingAndErrors(t *testing.T) {
 	writer := make(chan *FrameHeader, 4)
 	sc := &serverConn{
@@ -431,4 +482,191 @@ func TestServerConnFrameSizeUsesServerSettings(t *testing.T) {
 	fr := <-sc.reader
 	require.Equal(t, FrameData, fr.Type())
 	ReleaseFrameHeader(fr)
+}
+
+func TestHandleHeaderFramePseudoAfterRegular(t *testing.T) {
+	sc := newTestServerConn()
+	strm := newTestStream(1)
+
+	fr := buildHeadersFrame(t, strm.ID(), [][2]string{
+		{":method", "GET"},
+		{":scheme", "https"},
+		{"foo", "bar"},
+		{":path", "/"},
+	})
+	defer ReleaseFrameHeader(fr)
+
+	err := sc.handleHeaderFrame(strm, fr)
+	require.Error(t, err)
+	var h2Err Error
+	require.ErrorAs(t, err, &h2Err)
+	require.Equal(t, ProtocolError, h2Err.Code())
+	require.Equal(t, FrameResetStream, h2Err.frameType)
+}
+
+func TestHandleHeaderFrameDuplicatePseudo(t *testing.T) {
+	sc := newTestServerConn()
+	strm := newTestStream(1)
+
+	fr := buildHeadersFrame(t, strm.ID(), [][2]string{
+		{":method", "GET"},
+		{":method", "POST"},
+		{":scheme", "https"},
+		{":path", "/"},
+	})
+	defer ReleaseFrameHeader(fr)
+
+	err := sc.handleHeaderFrame(strm, fr)
+	require.Error(t, err)
+	var h2Err Error
+	require.ErrorAs(t, err, &h2Err)
+	require.Equal(t, ProtocolError, h2Err.Code())
+	require.Equal(t, FrameResetStream, h2Err.frameType)
+}
+
+func TestHandleHeaderFrameForbiddenHeaders(t *testing.T) {
+	tests := []struct {
+		name   string
+		header [2]string
+	}{
+		{name: "connection", header: [2]string{"connection", "close"}},
+		{name: "upgrade", header: [2]string{"upgrade", "h2c"}},
+		{name: "proxy-connection", header: [2]string{"proxy-connection", "keep-alive"}},
+		{name: "transfer-encoding", header: [2]string{"transfer-encoding", "chunked"}},
+		{name: "te", header: [2]string{"te", "gzip"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sc := newTestServerConn()
+			strm := newTestStream(1)
+
+			fr := buildHeadersFrame(t, strm.ID(), [][2]string{
+				{":method", "GET"},
+				{":scheme", "https"},
+				{":path", "/"},
+				tt.header,
+			})
+			defer ReleaseFrameHeader(fr)
+
+			err := sc.handleHeaderFrame(strm, fr)
+			require.Error(t, err)
+			var h2Err Error
+			require.ErrorAs(t, err, &h2Err)
+			require.Equal(t, ProtocolError, h2Err.Code())
+			require.Equal(t, FrameGoAway, h2Err.frameType)
+		})
+	}
+}
+
+func TestHandleHeaderFrameMissingRequiredPseudo(t *testing.T) {
+	sc := newTestServerConn()
+	strm := newTestStream(1)
+
+	fr := buildHeadersFrame(t, strm.ID(), [][2]string{
+		{":method", "GET"},
+		{":scheme", "https"},
+	})
+	defer ReleaseFrameHeader(fr)
+
+	err := sc.handleHeaderFrame(strm, fr)
+	require.Error(t, err)
+	var h2Err Error
+	require.ErrorAs(t, err, &h2Err)
+	require.Equal(t, ProtocolError, h2Err.Code())
+	require.Equal(t, FrameResetStream, h2Err.frameType)
+}
+
+func TestHandleHeaderFrameUnknownPseudo(t *testing.T) {
+	sc := newTestServerConn()
+	strm := newTestStream(1)
+
+	fr := buildHeadersFrame(t, strm.ID(), [][2]string{
+		{":method", "GET"},
+		{":scheme", "https"},
+		{":path", "/"},
+		{":status", "200"},
+	})
+	defer ReleaseFrameHeader(fr)
+
+	err := sc.handleHeaderFrame(strm, fr)
+	require.Error(t, err)
+	var h2Err Error
+	require.ErrorAs(t, err, &h2Err)
+	require.Equal(t, ProtocolError, h2Err.Code())
+	require.Equal(t, FrameResetStream, h2Err.frameType)
+}
+
+func TestHandleHeaderFrameInvalidCompressionIsConnectionError(t *testing.T) {
+	sc := newTestServerConn()
+	strm := newTestStream(1)
+
+	h := AcquireFrame(FrameHeaders).(*Headers)
+	h.SetHeaders([]byte{0x40})
+	h.SetEndHeaders(true)
+
+	fr := AcquireFrameHeader()
+	fr.SetStream(strm.ID())
+	fr.SetFlags(FrameFlags(0).Add(FlagEndHeaders))
+	fr.SetBody(h)
+	fr.length = len(h.Headers())
+
+	err := sc.handleHeaderFrame(strm, fr)
+	require.Error(t, err)
+	var h2Err Error
+	require.ErrorAs(t, err, &h2Err)
+	require.Equal(t, CompressionError, h2Err.Code())
+	require.Equal(t, FrameGoAway, h2Err.frameType)
+
+	ReleaseFrameHeader(fr)
+}
+
+func TestHandleHeaderFrameConnectAllowsSchemeAndPathOmission(t *testing.T) {
+	sc := newTestServerConn()
+	strm := newTestStream(1)
+
+	fr := buildHeadersFrame(t, strm.ID(), [][2]string{
+		{":method", "CONNECT"},
+		{":authority", "example.com:443"},
+	})
+	defer ReleaseFrameHeader(fr)
+
+	err := sc.handleHeaderFrame(strm, fr)
+	require.NoError(t, err)
+}
+
+func TestHandleHeaderFrameConnectRequiresAuthority(t *testing.T) {
+	sc := newTestServerConn()
+	strm := newTestStream(1)
+
+	fr := buildHeadersFrame(t, strm.ID(), [][2]string{
+		{":method", "CONNECT"},
+	})
+	defer ReleaseFrameHeader(fr)
+
+	err := sc.handleHeaderFrame(strm, fr)
+	require.Error(t, err)
+	var h2Err Error
+	require.ErrorAs(t, err, &h2Err)
+	require.Equal(t, ProtocolError, h2Err.Code())
+	require.Equal(t, FrameResetStream, h2Err.frameType)
+}
+
+func TestHandleHeaderFrameConnectRejectsPathAndScheme(t *testing.T) {
+	sc := newTestServerConn()
+	strm := newTestStream(1)
+
+	fr := buildHeadersFrame(t, strm.ID(), [][2]string{
+		{":method", "CONNECT"},
+		{":authority", "example.com:443"},
+		{":path", "/"},
+	})
+	defer ReleaseFrameHeader(fr)
+
+	err := sc.handleHeaderFrame(strm, fr)
+	require.Error(t, err)
+	var h2Err Error
+	require.ErrorAs(t, err, &h2Err)
+	require.Equal(t, ProtocolError, h2Err.Code())
+	require.Equal(t, FrameResetStream, h2Err.frameType)
 }
