@@ -127,6 +127,7 @@ func NewConn(c net.Conn, opts ConnOpts) *Conn {
 		enc:           AcquireHPACK(),
 		dec:           AcquireHPACK(),
 		nextID:        1,
+		serverWindow:  65535, // RFC 7540 default initial window
 		maxWindow:     1 << 20,
 		currentWindow: 1 << 20,
 		in:            make(chan *Ctx, 128),
@@ -617,6 +618,14 @@ func (c *Conn) writeRequest(ctx *Ctx) error {
 
 	// store the ctx before sending the request
 	atomic.StoreUint32(&ctx.streamID, id)
+	// Initialize stream send window
+	c.serverSMu.RLock()
+	streamWin := c.serverStreamWindow
+	if streamWin == 0 {
+		streamWin = 65535 // RFC 7540 default
+	}
+	c.serverSMu.RUnlock()
+	atomic.StoreInt32(&ctx.sendWindow, streamWin)
 	c.reqQueued.Store(id, ctx)
 
 	_, err := fr.WriteTo(c.bw)
@@ -624,7 +633,7 @@ func (c *Conn) writeRequest(ctx *Ctx) error {
 		// release headers bc it's going to get replaced by the data frame
 		ReleaseFrame(h)
 
-		err = writeData(c.bw, fr, req.Body())
+		err = c.writeData(fr, ctx, req.Body())
 	}
 
 	if err == nil {
@@ -645,22 +654,45 @@ func (c *Conn) writeRequest(ctx *Ctx) error {
 	return err
 }
 
-func writeData(bw *bufio.Writer, fh *FrameHeader, body []byte) (err error) {
-	step := 1 << 14
+func (c *Conn) writeData(fh *FrameHeader, ctx *Ctx, body []byte) (err error) {
+	maxFrame := 1 << 14
 
 	data := AcquireFrame(FrameData).(*Data)
 	fh.SetBody(data)
 
-	for i := 0; err == nil && i < len(body); i += step {
-		if i+step >= len(body) {
-			step = len(body) - i
+	for i := 0; err == nil && i < len(body); {
+		// Check both connection and stream windows before sending
+		connWin := atomic.LoadInt32(&c.serverWindow)
+		streamWin := atomic.LoadInt32(&ctx.sendWindow)
+
+		if connWin <= 0 || streamWin <= 0 {
+			// Wait for window update - in a real implementation we'd need
+			// a condition variable or channel to wait efficiently.
+			// For now, return an error to avoid deadlock
+			return errors.New("flow control: send window exhausted")
 		}
 
-		data.SetEndStream(i+step == len(body))
-		data.SetPadding(false)
-		data.SetData(body[i : step+i])
+		// Calculate chunk size respecting both windows and max frame size
+		remaining := len(body) - i
+		toSend := min(remaining, maxFrame)
+		if toSend > int(connWin) {
+			toSend = int(connWin)
+		}
+		if toSend > int(streamWin) {
+			toSend = int(streamWin)
+		}
 
-		_, err = fh.WriteTo(bw)
+		// Deduct from both windows
+		atomic.AddInt32(&c.serverWindow, -int32(toSend))
+		atomic.AddInt32(&ctx.sendWindow, -int32(toSend))
+
+		data.SetEndStream(i+toSend == len(body))
+		data.SetPadding(false)
+		data.SetData(body[i : i+toSend])
+
+		_, err = fh.WriteTo(c.bw)
+
+		i += toSend
 	}
 
 	return err
@@ -788,6 +820,13 @@ func (c *Conn) readStream(fr *FrameHeader, res *fasthttp.Response) (err error) {
 			c.currentWindow = c.maxWindow
 
 			c.updateWindow(0, int(nValue))
+		}
+	case FrameWindowUpdate:
+		// Handle stream-specific window update
+		win := int32(fr.Body().(*WindowUpdate).Increment())
+		if ri, ok := c.reqQueued.Load(fr.Stream()); ok {
+			ctx := ri.(*Ctx)
+			atomic.AddInt32(&ctx.sendWindow, win)
 		}
 	}
 
