@@ -666,10 +666,17 @@ func (c *Conn) writeData(fh *FrameHeader, ctx *Ctx, body []byte) (err error) {
 		streamWin := atomic.LoadInt32(&ctx.sendWindow)
 
 		if connWin <= 0 || streamWin <= 0 {
-			// Wait for window update - in a real implementation we'd need
-			// a condition variable or channel to wait efficiently.
-			// For now, return an error to avoid deadlock
-			return errors.New("flow control: send window exhausted")
+			// Wait briefly for window update
+			// In practice, WINDOW_UPDATE frames should arrive through readLoop
+			time.Sleep(10 * time.Millisecond)
+			
+			// Re-check windows after waiting
+			connWin = atomic.LoadInt32(&c.serverWindow)
+			streamWin = atomic.LoadInt32(&ctx.sendWindow)
+			
+			if connWin <= 0 || streamWin <= 0 {
+				return errors.New("flow control: send window exhausted")
+			}
 		}
 
 		// Calculate chunk size respecting both windows and max frame size
