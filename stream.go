@@ -51,6 +51,13 @@ type Stream struct {
 	origType        FrameType
 	startedAt       time.Time
 	headersFinished bool
+
+	// Header validation tracking
+	regularHeaderSeen bool
+	seenMethod        bool
+	seenScheme        bool
+	seenPath          bool
+	seenAuthority     bool
 }
 
 var streamPool = sync.Pool{
@@ -73,6 +80,11 @@ func NewStream(id uint32, recvWin, sendWin int32) *Stream {
 	strm.scheme = []byte("https")
 	strm.origType = 0
 	strm.headerBlockNum = 0
+	strm.regularHeaderSeen = false
+	strm.seenMethod = false
+	strm.seenScheme = false
+	strm.seenPath = false
+	strm.seenAuthority = false
 
 	return strm
 }

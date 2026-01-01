@@ -3,7 +3,9 @@ package http2
 import (
 	"io"
 	"net"
+	"sort"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -50,14 +52,44 @@ func makeHeaders(id uint32, enc *HPACK, endHeaders, endStream bool, hs map[strin
 
 	hf := AcquireHeaderField()
 
-	for k, v := range hs {
-		hf.Set(k, v)
-		enc.AppendHeaderField(h, hf, k[0] == ':')
+	var pseudoKeys, regularKeys []string
+	for k := range hs {
+		if strings.HasPrefix(k, ":") {
+			pseudoKeys = append(pseudoKeys, k)
+			continue
+		}
+		regularKeys = append(regularKeys, k)
 	}
+	sort.Strings(pseudoKeys)
+	sort.Strings(regularKeys)
+
+	appendHeaders := func(keys []string) {
+		for _, k := range keys {
+			hf.Set(k, hs[k])
+			enc.AppendHeaderField(h, hf, strings.HasPrefix(k, ":"))
+		}
+	}
+	appendHeaders(pseudoKeys)
+	appendHeaders(regularKeys)
 
 	h.SetPadding(false)
 	h.SetEndStream(endStream)
 	h.SetEndHeaders(endHeaders)
+
+	var flags FrameFlags
+	if h.EndStream() {
+		flags = flags.Add(FlagEndStream)
+	}
+	if h.EndHeaders() {
+		flags = flags.Add(FlagEndHeaders)
+	}
+	if h.Priority() {
+		flags = flags.Add(FlagPriority)
+	}
+	if h.Padding() {
+		flags = flags.Add(FlagPadded)
+	}
+	fr.SetFlags(flags)
 
 	return fr
 }
