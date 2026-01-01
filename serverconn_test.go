@@ -419,6 +419,103 @@ func TestQueueDataRespectsInitialWindowChanges(t *testing.T) {
 	require.Equal(t, len(body)-4, pendingLen)
 }
 
+func TestConnectionWindowLimitsDataAcrossStreams(t *testing.T) {
+	sc := &serverConn{
+		writer: make(chan *FrameHeader, 8),
+		logger: log.New(io.Discard, "", 0),
+	}
+	atomic.StoreInt64(&sc.clientWindow, 5)
+
+	strm1 := NewStream(1, int32(defaultWindowSize), int32(defaultWindowSize))
+	strm1.SetState(StreamStateOpen)
+	strm2 := NewStream(3, int32(defaultWindowSize), int32(defaultWindowSize))
+	strm2.SetState(StreamStateOpen)
+
+	sc.addActiveStream(strm1)
+	sc.addActiveStream(strm2)
+
+	sc.queueData(strm1, []byte("abc"), false)
+	sc.queueData(strm2, []byte("def"), true)
+
+	require.EqualValues(t, 0, atomic.LoadInt64(&sc.clientWindow))
+
+	first := <-sc.writer
+	require.Equal(t, FrameData, first.Type())
+	require.Equal(t, strm1.ID(), first.Stream())
+	firstData := first.Body().(*Data)
+	require.Equal(t, "abc", string(firstData.Data()))
+	require.False(t, firstData.EndStream())
+	ReleaseFrameHeader(first)
+
+	second := <-sc.writer
+	require.Equal(t, FrameData, second.Type())
+	require.Equal(t, strm2.ID(), second.Stream())
+	secondData := second.Body().(*Data)
+	require.Equal(t, "de", string(secondData.Data()))
+	require.False(t, secondData.EndStream())
+	ReleaseFrameHeader(second)
+
+	strm2.pendingMu.Lock()
+	require.Equal(t, 1, len(strm2.pendingData))
+	require.True(t, strm2.pendingDataEndStream)
+	strm2.pendingMu.Unlock()
+
+	_, err := addAndClampWindow(&sc.clientWindow, 3)
+	require.NoError(t, err)
+
+	sc.forEachActiveStream(func(strm *Stream) {
+		sc.flushPendingData(strm)
+	})
+
+	third := <-sc.writer
+	require.Equal(t, FrameData, third.Type())
+	require.Equal(t, strm2.ID(), third.Stream())
+	thirdData := third.Body().(*Data)
+	require.Equal(t, "f", string(thirdData.Data()))
+	require.True(t, thirdData.EndStream())
+	ReleaseFrameHeader(third)
+
+	require.EqualValues(t, 2, atomic.LoadInt64(&sc.clientWindow))
+}
+
+func TestConnectionWindowQueuesUntilUpdate(t *testing.T) {
+	sc := &serverConn{
+		writer: make(chan *FrameHeader, 4),
+		logger: log.New(io.Discard, "", 0),
+	}
+	atomic.StoreInt64(&sc.clientWindow, 0)
+	atomic.StoreInt64(&sc.initialClientWindow, int64(defaultWindowSize))
+
+	strm := NewStream(1, int32(defaultWindowSize), int32(defaultWindowSize))
+	strm.SetState(StreamStateOpen)
+	sc.addActiveStream(strm)
+
+	sc.queueData(strm, []byte("hello"), true)
+
+	require.Equal(t, 0, len(sc.writer))
+
+	strm.pendingMu.Lock()
+	require.Equal(t, 5, len(strm.pendingData))
+	require.True(t, strm.pendingDataEndStream)
+	strm.pendingMu.Unlock()
+
+	_, err := addAndClampWindow(&sc.clientWindow, 5)
+	require.NoError(t, err)
+
+	sc.forEachActiveStream(func(s *Stream) {
+		sc.flushPendingData(s)
+	})
+
+	fr := <-sc.writer
+	require.Equal(t, FrameData, fr.Type())
+	data := fr.Body().(*Data)
+	require.Equal(t, "hello", string(data.Data()))
+	require.True(t, data.EndStream())
+	ReleaseFrameHeader(fr)
+
+	require.EqualValues(t, 0, atomic.LoadInt64(&sc.clientWindow))
+}
+
 func TestStreamWriteHelpers(t *testing.T) {
 	writer := make(chan *FrameHeader, 4)
 	strm := NewStream(3, 100, 100)

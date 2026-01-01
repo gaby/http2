@@ -42,6 +42,8 @@ type serverConn struct {
 	// client's window
 	// should be int64 because the user can try to overflow it
 	clientWindow int64
+	// initial window advertised by the client for new streams
+	initialClientWindow int64
 	// client's max frame size
 	clientMaxFrameSize int64
 
@@ -125,7 +127,12 @@ func (sc *serverConn) Serve() error {
 	sc.closer = make(chan struct{}, 1)
 	sc.timerMu.Lock()
 	sc.maxRequestTimer = time.NewTimer(0)
-	atomic.StoreInt64(&sc.clientWindow, int64(sc.clientS.MaxWindowSize()))
+	initWin := sc.clientS.MaxWindowSize()
+	if initWin == 0 {
+		initWin = defaultWindowSize
+	}
+	atomic.StoreInt64(&sc.clientWindow, int64(initWin))
+	atomic.StoreInt64(&sc.initialClientWindow, int64(initWin))
 	atomic.StoreInt64(&sc.clientMaxFrameSize, int64(defaultDataFrameSize))
 
 	if sc.maxIdleTime > 0 {
@@ -384,6 +391,10 @@ func (sc *serverConn) readLoop() (err error) {
 				msg := windowUpdateErrorMessage(winErr)
 				sc.writeGoAway(0, FlowControlError, msg)
 				frameErr = NewGoAwayError(FlowControlError, msg)
+			} else {
+				sc.forEachActiveStream(func(strm *Stream) {
+					sc.flushPendingData(strm)
+				})
 			}
 		case FramePing:
 			ping := fr.Body().(*Ping)
@@ -589,7 +600,10 @@ loop:
 				}
 
 				recvWindow := int32(sc.st.MaxWindowSize())
-				sendWindow := int32(atomic.LoadInt64(&sc.clientWindow))
+				sendWindow := int32(atomic.LoadInt64(&sc.initialClientWindow))
+				if sendWindow == 0 {
+					sendWindow = int32(sc.clientS.MaxWindowSize())
+				}
 				strm = NewStream(fr.Stream(), recvWindow, sendWindow)
 				strms = append(strms, strm)
 				sc.addActiveStream(strm)
@@ -1343,17 +1357,32 @@ func (sc *serverConn) writeLoop() {
 
 func (sc *serverConn) handleSettings(st *Settings) {
 	prevWindow := sc.clientS.MaxWindowSize()
+	if prevWindow == 0 {
+		prevWindow = defaultWindowSize
+	}
 	st.CopyTo(&sc.clientS)
 
 	sc.encMu.Lock()
 	sc.enc.SetMaxTableSize(sc.clientS.HeaderTableSize())
 	sc.encMu.Unlock()
 
-	// atomically update the new window
-	atomic.StoreInt64(&sc.clientWindow, int64(sc.clientS.MaxWindowSize()))
-	atomic.StoreInt64(&sc.clientMaxFrameSize, int64(sc.clientS.MaxFrameSize()))
+	// atomically update the new initial window for newly created streams
+	initWin := sc.clientS.MaxWindowSize()
+	if initWin == 0 {
+		initWin = defaultWindowSize
+	}
+	atomic.StoreInt64(&sc.initialClientWindow, int64(initWin))
+	if atomic.LoadInt64(&sc.clientWindow) == 0 {
+		atomic.StoreInt64(&sc.clientWindow, int64(defaultWindowSize))
+	}
+
+	maxFrameSize := sc.clientS.MaxFrameSize()
+	if maxFrameSize == 0 {
+		maxFrameSize = defaultDataFrameSize
+	}
+	atomic.StoreInt64(&sc.clientMaxFrameSize, int64(maxFrameSize))
 	if st.HasMaxWindowSize() {
-		delta := int64(sc.clientS.MaxWindowSize()) - int64(prevWindow)
+		delta := int64(initWin) - int64(prevWindow)
 		if delta != 0 {
 			sc.forEachActiveStream(func(strm *Stream) {
 				newWin := atomic.AddInt64(&strm.sendWindow, delta)
@@ -1511,20 +1540,31 @@ func (sc *serverConn) queueData(strm *Stream, data []byte, endStream bool) {
 		maxFrame = 1 << 14
 	}
 
+	if atomic.LoadInt64(&sc.initialClientWindow) == 0 && atomic.LoadInt64(&sc.clientWindow) == 0 {
+		initWin := int64(sc.clientS.MaxWindowSize())
+		if initWin == 0 {
+			initWin = int64(defaultWindowSize)
+		}
+		atomic.StoreInt64(&sc.initialClientWindow, initWin)
+		atomic.StoreInt64(&sc.clientWindow, initWin)
+	}
+
 	for len(data) > 0 {
 		streamWin := atomic.LoadInt64(&strm.sendWindow)
-		if streamWin <= 0 {
+		connWin := atomic.LoadInt64(&sc.clientWindow)
+		if streamWin <= 0 || connWin <= 0 {
 			sc.appendPendingData(strm, data, endStream)
 			return
 		}
 
-		toSend := min(len(data), maxFrame, int(streamWin))
+		toSend := min(len(data), maxFrame, int(streamWin), int(connWin))
 		if toSend <= 0 {
 			sc.appendPendingData(strm, data, endStream)
 			return
 		}
 
 		atomic.AddInt64(&strm.sendWindow, -int64(toSend))
+		atomic.AddInt64(&sc.clientWindow, -int64(toSend))
 
 		chunk := data[:toSend]
 		data = data[toSend:]
