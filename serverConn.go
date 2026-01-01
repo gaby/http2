@@ -54,6 +54,10 @@ type serverConn struct {
 	// connErr signals that a connection-level error has been triggered and the
 	// socket should be closed after sending the GOAWAY frame.
 	connErr atomic.Bool
+	// closing signals that the connection should be closed soon, either due to
+	// a connection-level error or because the server is shutting down the
+	// connection (for example, after an idle timeout).
+	closing atomic.Bool
 	// closeRef stores the last stream that was valid before sending a GOAWAY.
 	// Thus, the number stored in closeRef is used to complete all the requests that were sent before
 	// to gracefully close the connection with a GOAWAY.
@@ -90,11 +94,22 @@ func (sc *serverConn) closeIdleConn() {
 		sc.logger.Printf("Connection is idle. Closing\n")
 	}
 	close(sc.closer)
+	sc.signalConnClose()
 }
 
 func (sc *serverConn) signalConnError() {
-	if sc.connErr.CompareAndSwap(false, true) && sc.c != nil {
+	if sc.connErr.CompareAndSwap(false, true) {
+		sc.signalConnClose()
+	}
+}
+
+func (sc *serverConn) signalConnClose() {
+	if sc.closing.CompareAndSwap(false, true) && sc.c != nil {
 		_ = sc.c.SetReadDeadline(time.Now())
+		go func(c net.Conn) {
+			time.Sleep(10 * time.Millisecond)
+			_ = c.Close()
+		}(sc.c)
 	}
 }
 
@@ -260,7 +275,7 @@ func (sc *serverConn) readLoop() (err error) {
 	var fr *FrameHeader
 
 	for err == nil {
-		if sc.connErr.Load() {
+		if sc.connErr.Load() || sc.closing.Load() {
 			break
 		}
 
@@ -369,6 +384,10 @@ func (sc *serverConn) readLoop() (err error) {
 		}
 
 		ReleaseFrameHeader(fr)
+	}
+
+	if sc.closing.Load() && !sc.connErr.Load() {
+		err = nil
 	}
 
 	return
