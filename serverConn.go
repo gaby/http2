@@ -35,6 +35,8 @@ type serverConn struct {
 	encMu sync.Mutex // guards enc
 	enc   HPACK
 	dec   HPACK
+	// clientSMu guards access to clientS
+	clientSMu sync.Mutex
 
 	// last valid ID used as a reference for new IDs
 	lastID uint32
@@ -127,7 +129,9 @@ func (sc *serverConn) Serve() error {
 	sc.closer = make(chan struct{}, 1)
 	sc.timerMu.Lock()
 	sc.maxRequestTimer = time.NewTimer(0)
+	sc.clientSMu.Lock()
 	initWin := sc.clientS.MaxWindowSize()
+	sc.clientSMu.Unlock()
 	if initWin == 0 {
 		initWin = defaultWindowSize
 	}
@@ -602,7 +606,9 @@ loop:
 				recvWindow := int32(sc.st.MaxWindowSize())
 				sendWindow := int32(atomic.LoadInt64(&sc.initialClientWindow))
 				if sendWindow == 0 {
+					sc.clientSMu.Lock()
 					sendWindow = int32(sc.clientS.MaxWindowSize())
+					sc.clientSMu.Unlock()
 				}
 				strm = NewStream(fr.Stream(), recvWindow, sendWindow)
 				strms = append(strms, strm)
@@ -1356,30 +1362,36 @@ func (sc *serverConn) writeLoop() {
 }
 
 func (sc *serverConn) handleSettings(st *Settings) {
+	sc.clientSMu.Lock()
 	prevWindow := sc.clientS.MaxWindowSize()
 	if prevWindow == 0 {
 		prevWindow = defaultWindowSize
 	}
 	st.CopyTo(&sc.clientS)
 
-	sc.encMu.Lock()
-	sc.enc.SetMaxTableSize(sc.clientS.HeaderTableSize())
-	sc.encMu.Unlock()
-
-	// atomically update the new initial window for newly created streams
 	initWin := sc.clientS.MaxWindowSize()
 	if initWin == 0 {
 		initWin = defaultWindowSize
-	}
-	atomic.StoreInt64(&sc.initialClientWindow, int64(initWin))
-	if atomic.LoadInt64(&sc.clientWindow) == 0 {
-		atomic.StoreInt64(&sc.clientWindow, int64(defaultWindowSize))
 	}
 
 	maxFrameSize := sc.clientS.MaxFrameSize()
 	if maxFrameSize == 0 {
 		maxFrameSize = defaultDataFrameSize
 	}
+
+	headerTableSize := sc.clientS.HeaderTableSize()
+	sc.clientSMu.Unlock()
+
+	sc.encMu.Lock()
+	sc.enc.SetMaxTableSize(headerTableSize)
+	sc.encMu.Unlock()
+
+	// atomically update the new initial window for newly created streams
+	atomic.StoreInt64(&sc.initialClientWindow, int64(initWin))
+	if atomic.LoadInt64(&sc.clientWindow) == 0 {
+		atomic.StoreInt64(&sc.clientWindow, int64(defaultWindowSize))
+	}
+
 	atomic.StoreInt64(&sc.clientMaxFrameSize, int64(maxFrameSize))
 	if st.HasMaxWindowSize() {
 		delta := int64(initWin) - int64(prevWindow)
@@ -1541,7 +1553,9 @@ func (sc *serverConn) queueData(strm *Stream, data []byte, endStream bool) {
 	}
 
 	if atomic.LoadInt64(&sc.initialClientWindow) == 0 && atomic.LoadInt64(&sc.clientWindow) == 0 {
+		sc.clientSMu.Lock()
 		initWin := int64(sc.clientS.MaxWindowSize())
+		sc.clientSMu.Unlock()
 		if initWin == 0 {
 			initWin = int64(defaultWindowSize)
 		}
