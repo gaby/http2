@@ -1388,9 +1388,6 @@ func (sc *serverConn) handleSettings(st *Settings) {
 
 	// atomically update the new initial window for newly created streams
 	atomic.StoreInt64(&sc.initialClientWindow, int64(initWin))
-	if atomic.LoadInt64(&sc.clientWindow) == 0 {
-		atomic.StoreInt64(&sc.clientWindow, int64(defaultWindowSize))
-	}
 
 	atomic.StoreInt64(&sc.clientMaxFrameSize, int64(maxFrameSize))
 	if st.HasMaxWindowSize() {
