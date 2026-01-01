@@ -1423,8 +1423,8 @@ func (sc *serverConn) handleSettings(st *Settings) {
 	// to prevent race with stream creation and queueData
 	if st.HasMaxWindowSize() {
 		delta := int64(initWin) - int64(prevWindow)
+		sc.streamsMu.Lock()
 		if delta != 0 {
-			sc.streamsMu.Lock()
 			// Collect streams that need flushing
 			var streamsToFlush []*Stream
 			// Adjust existing streams
@@ -1447,12 +1447,15 @@ func (sc *serverConn) handleSettings(st *Settings) {
 				sc.flushPendingData(strm)
 			}
 		} else {
-			// No delta, just update initialClientWindow
+			// No delta, but still update initialClientWindow atomically
 			atomic.StoreInt64(&sc.initialClientWindow, int64(initWin))
+			sc.streamsMu.Unlock()
 		}
 	} else {
-		// No window size change, just update initialClientWindow
+		// No window size change, but still update initialClientWindow atomically
+		sc.streamsMu.Lock()
 		atomic.StoreInt64(&sc.initialClientWindow, int64(initWin))
+		sc.streamsMu.Unlock()
 	}
 
 	fr := AcquireFrameHeader()
