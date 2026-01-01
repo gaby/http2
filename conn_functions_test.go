@@ -202,6 +202,86 @@ func TestConnReadHeaderAndStream(t *testing.T) {
 	ReleaseFrameHeader(second)
 }
 
+func TestConnReadStreamSendsWindowUpdateForPaddingOnlyData(t *testing.T) {
+	conn := &Conn{
+		out:           make(chan *FrameHeader, 2),
+		maxWindow:     10,
+		currentWindow: 10,
+		serverWindow:  10,
+	}
+
+	res := fasthttp.AcquireResponse()
+	t.Cleanup(func() {
+		fasthttp.ReleaseResponse(res)
+	})
+
+	fr := AcquireFrameHeader()
+	data := &Data{}
+	fr.SetBody(data)
+	fr.SetStream(1)
+	fr.SetFlags(FlagPadded)
+	fr.length = 4 // one byte padding length + three padding bytes
+	t.Cleanup(func() {
+		ReleaseFrameHeader(fr)
+	})
+
+	require.NoError(t, conn.readStream(fr, res))
+	require.Empty(t, res.Body())
+	require.Equal(t, int32(6), conn.currentWindow)
+	require.Equal(t, int32(6), conn.serverWindow)
+
+	streamWU := <-conn.out
+	require.Equal(t, FrameWindowUpdate, streamWU.Type())
+	require.Equal(t, uint32(1), streamWU.Stream())
+	require.Equal(t, 4, streamWU.Body().(*WindowUpdate).Increment())
+	ReleaseFrameHeader(streamWU)
+
+	require.Zero(t, len(conn.out))
+}
+
+func TestConnReadStreamUpdatesConnectionWindowWithPaddingOnlyData(t *testing.T) {
+	conn := &Conn{
+		out:           make(chan *FrameHeader, 2),
+		maxWindow:     10,
+		currentWindow: 10,
+		serverWindow:  10,
+	}
+
+	res := fasthttp.AcquireResponse()
+	t.Cleanup(func() {
+		fasthttp.ReleaseResponse(res)
+	})
+
+	fr := AcquireFrameHeader()
+	data := &Data{}
+	fr.SetBody(data)
+	fr.SetStream(3)
+	fr.SetFlags(FlagPadded)
+	fr.length = 7 // one byte padding length + six padding bytes
+	t.Cleanup(func() {
+		ReleaseFrameHeader(fr)
+	})
+
+	require.NoError(t, conn.readStream(fr, res))
+	require.Empty(t, res.Body())
+	require.Equal(t, int32(10), conn.currentWindow)
+	require.Equal(t, int32(3), conn.serverWindow)
+
+	streamWU := <-conn.out
+	require.Equal(t, FrameWindowUpdate, streamWU.Type())
+	require.Equal(t, uint32(3), streamWU.Stream())
+	require.Equal(t, 7, streamWU.Body().(*WindowUpdate).Increment())
+	ReleaseFrameHeader(streamWU)
+
+	connWU := <-conn.out
+	require.Equal(t, FrameWindowUpdate, connWU.Type())
+	require.Equal(t, uint32(0), connWU.Stream())
+	require.Equal(t, 7, connWU.Body().(*WindowUpdate).Increment())
+	ReleaseFrameHeader(connWU)
+
+	require.Zero(t, len(conn.out))
+}
+
 func TestConnWritePing(t *testing.T) {
 	var buf bytes.Buffer
 	conn := &Conn{

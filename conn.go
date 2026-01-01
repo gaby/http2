@@ -695,10 +695,7 @@ func (c *Conn) writeData(fh *FrameHeader, ctx *Ctx, body []byte) (err error) {
 
 		// Calculate chunk size respecting both windows and max frame size
 		remaining := len(body) - i
-		toSend := min(min(remaining, maxFrame), int(connWin))
-		if toSend > int(streamWin) {
-			toSend = int(streamWin)
-		}
+		toSend := min(min(min(remaining, maxFrame), int(connWin)), int(streamWin))
 
 		// Deduct from both windows
 		atomic.AddInt32(&c.serverWindow, -int32(toSend))
@@ -819,17 +816,21 @@ func (c *Conn) readStream(fr *FrameHeader, res *fasthttp.Response) (err error) {
 		h := fr.Body().(FrameWithHeaders)
 		err = c.readHeader(h.Headers(), res)
 	case FrameData:
-		c.currentWindow -= int32(fr.Len())
+		data := fr.Body().(*Data)
+		bytesConsumed := fr.Len()
+
+		c.currentWindow -= int32(bytesConsumed)
 		currentWin := c.currentWindow
 
-		c.serverWindow -= int32(fr.Len())
+		c.serverWindow -= int32(bytesConsumed)
 
-		data := fr.Body().(*Data)
 		if data.Len() != 0 {
 			res.AppendBody(data.Data())
+		}
 
+		if bytesConsumed != 0 {
 			// let's send the window update
-			c.updateWindow(fr.Stream(), fr.Len())
+			c.updateWindow(fr.Stream(), bytesConsumed)
 		}
 
 		if currentWin < c.maxWindow/2 {
