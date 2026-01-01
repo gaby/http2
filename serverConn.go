@@ -371,7 +371,16 @@ func (sc *serverConn) readLoop() (err error) {
 			}
 		case FrameWindowUpdate:
 			win := int64(fr.Body().(*WindowUpdate).Increment())
-			if _, winErr := addAndClampWindow(&sc.clientWindow, win); winErr != nil {
+			if incErr := validateWindowIncrement(win); incErr != nil {
+				code := FlowControlError
+				if errors.Is(incErr, errWindowIncrementZero) {
+					code = ProtocolError
+				}
+
+				msg := windowUpdateErrorMessage(incErr)
+				sc.writeGoAway(0, code, msg)
+				frameErr = NewGoAwayError(code, msg)
+			} else if _, winErr := addAndClampWindow(&sc.clientWindow, win); winErr != nil {
 				msg := windowUpdateErrorMessage(winErr)
 				sc.writeGoAway(0, FlowControlError, msg)
 				frameErr = NewGoAwayError(FlowControlError, msg)
@@ -919,6 +928,14 @@ func (sc *serverConn) handleFrame(strm *Stream, fr *FrameHeader) error {
 		}
 
 		win := int64(fr.Body().(*WindowUpdate).Increment())
+		if incErr := validateWindowIncrement(win); incErr != nil {
+			code := FlowControlError
+			if errors.Is(incErr, errWindowIncrementZero) {
+				code = ProtocolError
+			}
+			return NewResetStreamError(code, windowUpdateErrorMessage(incErr))
+		}
+
 		if _, winErr := addAndClampWindow(&strm.sendWindow, win); winErr != nil {
 			return NewResetStreamError(FlowControlError, windowUpdateErrorMessage(winErr))
 		}
@@ -1366,7 +1383,20 @@ const maxWindowSize = maxWindowIncrement
 var (
 	errInvalidWindowSizeIncrement = errors.New("invalid window size increment")
 	errWindowSizeOverflow         = errors.New("window size overflow")
+	errWindowIncrementZero        = errors.New("window size increment is 0")
 )
+
+func validateWindowIncrement(inc int64) error {
+	if inc == 0 {
+		return errWindowIncrementZero
+	}
+
+	if inc < 0 || inc > maxWindowSize {
+		return errInvalidWindowSizeIncrement
+	}
+
+	return nil
+}
 
 func (sc *serverConn) addActiveStream(strm *Stream) {
 	sc.streamsMu.Lock()
@@ -1425,6 +1455,8 @@ func windowUpdateErrorMessage(err error) string {
 		return "invalid window size increment"
 	case errWindowSizeOverflow:
 		return "window is above limits"
+	case errWindowIncrementZero:
+		return "window size increment is 0"
 	default:
 		return err.Error()
 	}

@@ -302,10 +302,8 @@ func TestWindowUpdateRejectsZeroIncrement(t *testing.T) {
 	wu := &WindowUpdate{}
 	fr.SetBody(wu)
 	err := wu.Deserialize(fr)
-	require.Error(t, err)
-	httpErr, ok := err.(Error)
-	require.True(t, ok, "unexpected error type")
-	require.Equal(t, ProtocolError, httpErr.Code())
+	require.NoError(t, err)
+	require.Zero(t, wu.Increment())
 }
 
 func TestGoAwaySerializeAndDeserialize(t *testing.T) {

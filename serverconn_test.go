@@ -205,6 +205,32 @@ func TestConnectionWindowUpdateOverflowSendsFlowControlGoAway(t *testing.T) {
 	ReleaseFrameHeader(fr)
 }
 
+func TestConnectionWindowUpdateZeroSendsProtocolGoAway(t *testing.T) {
+	frame := buildWindowUpdateFrame(t, 0, 0)
+	sc := &serverConn{
+		br:      bufio.NewReader(bytes.NewReader(frame)),
+		st:      Settings{},
+		clientS: Settings{},
+		writer:  make(chan *FrameHeader, 1),
+		logger:  log.New(io.Discard, "", 0),
+	}
+	sc.st.Reset()
+	sc.clientS.Reset()
+	atomic.StoreInt64(&sc.clientWindow, int64(sc.clientS.MaxWindowSize()))
+
+	err := sc.readLoop()
+	require.Error(t, err)
+	var h2Err Error
+	require.ErrorAs(t, err, &h2Err)
+	require.Equal(t, ProtocolError, h2Err.Code())
+	require.Equal(t, FrameGoAway, h2Err.frameType)
+
+	fr := <-sc.writer
+	require.Equal(t, FrameGoAway, fr.Type())
+	require.Equal(t, ProtocolError, fr.Body().(*GoAway).Code())
+	ReleaseFrameHeader(fr)
+}
+
 func TestHandleFrameSendsWindowUpdatesAfterReading(t *testing.T) {
 	sc := &serverConn{
 		writer: make(chan *FrameHeader, 4),
@@ -318,6 +344,39 @@ func TestStreamWindowUpdateOverflowResetsStream(t *testing.T) {
 	out := <-sc.writer
 	require.Equal(t, FrameResetStream, out.Type())
 	require.Equal(t, FlowControlError, out.Body().(*RstStream).Code())
+
+	ReleaseFrameHeader(out)
+	ReleaseFrameHeader(fr)
+}
+
+func TestStreamWindowUpdateZeroSendsProtocolReset(t *testing.T) {
+	sc := &serverConn{
+		writer: make(chan *FrameHeader, 1),
+		logger: log.New(io.Discard, "", 0),
+	}
+
+	strm := NewStream(1, int32(defaultWindowSize), int32(defaultWindowSize))
+	strm.SetState(StreamStateOpen)
+
+	wu := AcquireFrame(FrameWindowUpdate).(*WindowUpdate)
+	wu.increment = 0
+
+	fr := AcquireFrameHeader()
+	fr.SetStream(strm.ID())
+	fr.SetBody(wu)
+	fr.length = 4
+
+	err := sc.handleFrame(strm, fr)
+	require.Error(t, err)
+	var h2Err Error
+	require.ErrorAs(t, err, &h2Err)
+	require.Equal(t, ProtocolError, h2Err.Code())
+	require.Equal(t, FrameResetStream, h2Err.frameType)
+
+	sc.writeError(strm, err)
+	out := <-sc.writer
+	require.Equal(t, FrameResetStream, out.Type())
+	require.Equal(t, ProtocolError, out.Body().(*RstStream).Code())
 
 	ReleaseFrameHeader(out)
 	ReleaseFrameHeader(fr)
