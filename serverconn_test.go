@@ -33,6 +33,10 @@ func newTestStream(id uint32) *Stream {
 }
 
 func buildHeadersFrame(t *testing.T, streamID uint32, headers [][2]string) *FrameHeader {
+	return buildHeadersFrameWithOptions(t, streamID, headers, true, false)
+}
+
+func buildHeadersFrameWithOptions(t *testing.T, streamID uint32, headers [][2]string, endHeaders, endStream bool) *FrameHeader {
 	t.Helper()
 
 	var hp HPACK
@@ -45,7 +49,8 @@ func buildHeadersFrame(t *testing.T, streamID uint32, headers [][2]string) *Fram
 		hf.Set(kv[0], kv[1])
 		h.AppendHeaderField(&hp, hf, true)
 	}
-	h.SetEndHeaders(true)
+	h.SetEndHeaders(endHeaders)
+	h.SetEndStream(endStream)
 
 	fr := AcquireFrameHeader()
 	fr.SetStream(streamID)
@@ -360,6 +365,62 @@ func TestHandleStreamsConcurrentSettings(t *testing.T) {
 	<-writerDone
 }
 
+func TestHandleStreamsRespectsMaxConcurrentStreams(t *testing.T) {
+	sc := &serverConn{
+		reader:          make(chan *FrameHeader, 8),
+		writer:          make(chan *FrameHeader, 8),
+		maxRequestTimer: time.NewTimer(time.Hour),
+		maxRequestTime:  time.Hour,
+		closer:          make(chan struct{}),
+		logger:          log.New(io.Discard, "", 0),
+		h:               func(ctx *fasthttp.RequestCtx) {},
+	}
+	sc.st.Reset()
+	sc.st.SetMaxConcurrentStreams(1)
+	sc.clientS.Reset()
+	atomic.StoreInt64(&sc.clientWindow, int64(sc.clientS.MaxWindowSize()))
+	sc.dec.Reset()
+
+	streamsDone := make(chan struct{})
+	go func() {
+		sc.handleStreams()
+		close(streamsDone)
+	}()
+
+	headers := [][2]string{
+		{":method", "GET"},
+		{":authority", "localhost"},
+		{":scheme", "https"},
+		{":path", "/"},
+	}
+
+	sc.reader <- buildHeadersFrame(t, 1, headers)
+	sc.reader <- buildHeadersFrame(t, 3, headers)
+
+	var rst *FrameHeader
+	select {
+	case rst = <-sc.writer:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for stream reset")
+	}
+
+	require.Equal(t, FrameResetStream, rst.Type())
+	require.Equal(t, RefusedStreamError, rst.Body().(*RstStream).Code())
+	ReleaseFrameHeader(rst)
+
+	close(sc.closer)
+	close(sc.reader)
+	<-streamsDone
+	close(sc.writer)
+
+	require.Equal(t, uint32(3), sc.lastID)
+
+	for fr := range sc.writer {
+		ReleaseFrameHeader(fr)
+	}
+	sc.maxRequestTimer.Stop()
+}
+
 func TestServerConnSettingsWhileEncoding(t *testing.T) {
 	sc := &serverConn{
 		writer: make(chan *FrameHeader, 256),
@@ -482,6 +543,135 @@ func TestServerConnFrameSizeUsesServerSettings(t *testing.T) {
 	fr := <-sc.reader
 	require.Equal(t, FrameData, fr.Type())
 	ReleaseFrameHeader(fr)
+}
+
+func TestConnectionErrorClosesAfterGoAway(t *testing.T) {
+	s := &Server{
+		s: &fasthttp.Server{
+			Handler: func(ctx *fasthttp.RequestCtx) {},
+		},
+	}
+	s.cnf.defaults()
+
+	serverSide, clientSide := net.Pipe()
+	defer serverSide.Close()
+	defer clientSide.Close()
+
+	done := make(chan struct{})
+	go func() {
+		_ = s.ServeConn(serverSide)
+		close(done)
+	}()
+
+	serverData := make(chan []byte, 1)
+	go func() {
+		data, _ := io.ReadAll(clientSide)
+		serverData <- data
+		close(serverData)
+	}()
+
+	require.NoError(t, WritePreface(clientSide))
+
+	invalidPing := append([]byte{
+		0x0, 0x0, 0x8,
+		byte(FramePing), 0x0,
+		0x0, 0x0, 0x0, 0x3,
+	}, make([]byte, 8)...)
+	_, err := clientSide.Write(invalidPing)
+	require.NoError(t, err)
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for server to close connection")
+	}
+
+	frames := <-serverData
+	reader := bufio.NewReader(bytes.NewReader(frames))
+	foundGoAway := false
+	var seenTypes []FrameType
+	for {
+		fr, frErr := ReadFrameFromWithSize(reader, defaultDataFrameSize)
+		if frErr != nil {
+			require.Equal(t, io.EOF, frErr)
+			break
+		}
+
+		seenTypes = append(seenTypes, fr.Type())
+		if fr.Type() == FrameGoAway {
+			foundGoAway = true
+		}
+		ReleaseFrameHeader(fr)
+	}
+
+	require.True(t, foundGoAway, "expected GOAWAY frame before connection closed (frames=%v)", seenTypes)
+}
+
+func TestUnknownFrameDuringHeaderBlockCausesConnectionError(t *testing.T) {
+	s := &Server{
+		s: &fasthttp.Server{
+			Handler: func(ctx *fasthttp.RequestCtx) {},
+		},
+	}
+	s.cnf.defaults()
+
+	serverSide, clientSide := net.Pipe()
+	defer serverSide.Close()
+	defer clientSide.Close()
+
+	go func() {
+		_ = s.ServeConn(serverSide)
+	}()
+
+	serverData := make(chan []byte, 1)
+	go func() {
+		data, _ := io.ReadAll(clientSide)
+		serverData <- data
+		close(serverData)
+	}()
+
+	require.NoError(t, WritePreface(clientSide))
+
+	bw := bufio.NewWriter(clientSide)
+	headers := buildHeadersFrameWithOptions(t, 1, [][2]string{
+		{":method", "GET"},
+		{":scheme", "https"},
+		{":authority", "localhost"},
+		{":path", "/"},
+	}, false, false)
+	_, err := headers.WriteTo(bw)
+	require.NoError(t, err)
+	ReleaseFrameHeader(headers)
+	require.NoError(t, bw.Flush())
+
+	_, err = bw.Write([]byte("\x00\x00\x08\x16\x00\x00\x00\x00\x00"))
+	require.NoError(t, err)
+	_, err = bw.Write([]byte("\x00\x00\x00\x00\x00\x00\x00\x00"))
+	require.NoError(t, err)
+	require.NoError(t, bw.Flush())
+
+	var frames []byte
+	select {
+	case frames = <-serverData:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for connection error")
+	}
+	reader := bufio.NewReader(bytes.NewReader(frames))
+	var goAwayCodes []ErrorCode
+	for {
+		fr, frErr := ReadFrameFromWithSize(reader, defaultDataFrameSize)
+		if frErr != nil {
+			require.Equal(t, io.EOF, frErr)
+			break
+		}
+
+		if fr.Type() == FrameGoAway {
+			goAwayCodes = append(goAwayCodes, fr.Body().(*GoAway).Code())
+		}
+		ReleaseFrameHeader(fr)
+	}
+
+	require.Contains(t, goAwayCodes, ProtocolError, "expected GOAWAY with PROTOCOL_ERROR")
 }
 
 func TestHandleHeaderFramePseudoAfterRegular(t *testing.T) {

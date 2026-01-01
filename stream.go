@@ -48,9 +48,10 @@ type Stream struct {
 	headerBlockNum int
 
 	// original type
-	origType        FrameType
-	startedAt       time.Time
-	headersFinished bool
+	origType         FrameType
+	startedAt        time.Time
+	headersFinished  bool
+	pendingEndStream bool
 
 	// Header validation tracking
 	regularHeaderSeen bool
@@ -75,6 +76,7 @@ func NewStream(id uint32, recvWin, sendWin int32) *Stream {
 	strm.sendWindow = int64(sendWin)
 	strm.state = StreamStateIdle
 	strm.headersFinished = false
+	strm.pendingEndStream = false
 	strm.startedAt = time.Time{}
 	strm.previousHeaderBytes = strm.previousHeaderBytes[:0]
 	strm.ctx = nil

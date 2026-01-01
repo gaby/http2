@@ -160,7 +160,7 @@ func ReadFrameFromWithSize(br *bufio.Reader, max uint32) (*FrameHeader, error) {
 
 	_, err := fr.ReadFrom(br)
 	if err != nil {
-		if err != ErrPayloadExceeds {
+		if err != ErrPayloadExceeds && err != ErrUnknownFrameType {
 			if fr.Body() != nil {
 				ReleaseFrameHeader(fr)
 			} else {

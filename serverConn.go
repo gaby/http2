@@ -46,11 +46,17 @@ type serverConn struct {
 	// our values
 	maxWindow     int32
 	currentWindow int32
-
-	writer chan *FrameHeader
-	reader chan *FrameHeader
+	writer        chan *FrameHeader
+	reader        chan *FrameHeader
 
 	state connState
+	// connErr signals that a connection-level error has been triggered and the
+	// socket should be closed after sending the GOAWAY frame.
+	connErr atomic.Bool
+	// closing signals that the connection should be closed soon, either due to
+	// a connection-level error or because the server is shutting down the
+	// connection (for example, after an idle timeout).
+	closing atomic.Bool
 	// closeRef stores the last stream that was valid before sending a GOAWAY.
 	// Thus, the number stored in closeRef is used to complete all the requests that were sent before
 	// to gracefully close the connection with a GOAWAY.
@@ -87,6 +93,23 @@ func (sc *serverConn) closeIdleConn() {
 		sc.logger.Printf("Connection is idle. Closing\n")
 	}
 	close(sc.closer)
+	sc.signalConnClose()
+}
+
+func (sc *serverConn) signalConnError() {
+	if sc.connErr.CompareAndSwap(false, true) {
+		sc.signalConnClose()
+	}
+}
+
+func (sc *serverConn) signalConnClose() {
+	if sc.closing.CompareAndSwap(false, true) && sc.c != nil {
+		_ = sc.c.SetReadDeadline(time.Now())
+		go func(c net.Conn) {
+			time.Sleep(10 * time.Millisecond)
+			_ = c.Close()
+		}(sc.c)
+	}
 }
 
 func (sc *serverConn) Handshake() error {
@@ -110,6 +133,7 @@ func (sc *serverConn) Serve() error {
 		}
 	}()
 
+	writerDone := make(chan struct{})
 	go func() {
 		// defer closing the connection in the writeLoop in case the writeLoop panics
 		defer func() {
@@ -117,6 +141,7 @@ func (sc *serverConn) Serve() error {
 		}()
 
 		sc.writeLoop()
+		close(writerDone)
 	}()
 
 	go func() {
@@ -126,11 +151,6 @@ func (sc *serverConn) Serve() error {
 		// close the writer here to ensure that no pending requests
 		// are writing to a closed channel
 		close(sc.writer)
-	}()
-
-	defer func() {
-		// close the reader here so we can stop handling stream updates
-		close(sc.reader)
 	}()
 
 	var err error
@@ -148,7 +168,9 @@ func (sc *serverConn) Serve() error {
 		err = nil
 	}
 
+	close(sc.reader)
 	sc.close()
+	<-writerDone
 
 	return err
 }
@@ -250,12 +272,26 @@ func (sc *serverConn) readLoop() (err error) {
 	}()
 
 	var fr *FrameHeader
+	openHeaderBlocks := make(map[uint32]struct{})
 
 	for err == nil {
+		if sc.connErr.Load() || sc.closing.Load() {
+			break
+		}
+
 		fr, err = ReadFrameFromWithSize(sc.br, sc.st.MaxFrameSize())
 		if err != nil {
 			if errors.Is(err, ErrUnknownFrameType) {
-				sc.writeGoAway(0, ProtocolError, "unknown frame type")
+				if fr != nil {
+					if len(openHeaderBlocks) > 0 {
+						sc.writeGoAway(0, ProtocolError, "invalid frame")
+						sc.signalConnError()
+						ReleaseFrameHeader(fr)
+						err = NewGoAwayError(ProtocolError, "invalid frame")
+						break
+					}
+					ReleaseFrameHeader(fr)
+				}
 				err = nil
 				continue
 			}
@@ -276,16 +312,43 @@ func (sc *serverConn) readLoop() (err error) {
 				if fr != nil {
 					ReleaseFrameHeader(fr)
 				}
+
+				if fr == nil || fr.Stream() == 0 {
+					sc.signalConnError()
+				}
 			}
 
 			break
 		}
 
-		if fr.Stream() != 0 {
-			err := sc.checkFrameWithStream(fr)
-			if err != nil {
-				sc.writeError(nil, err)
+		switch fr.Type() {
+		case FrameHeaders, FrameContinuation:
+			if fr.Flags().Has(FlagEndHeaders) {
+				delete(openHeaderBlocks, fr.Stream())
 			} else {
+				openHeaderBlocks[fr.Stream()] = struct{}{}
+			}
+		case FrameResetStream:
+			delete(openHeaderBlocks, fr.Stream())
+		}
+
+		if fr.Stream() != 0 {
+			cerr := sc.checkFrameWithStream(fr)
+			if cerr != nil {
+				sc.writeError(nil, cerr)
+				if isConnectionError(cerr) {
+					sc.signalConnError()
+					ReleaseFrameHeader(fr)
+					err = cerr
+					break
+				}
+
+				ReleaseFrameHeader(fr)
+			} else {
+				if sc.connErr.Load() {
+					ReleaseFrameHeader(fr)
+					break
+				}
 				sc.reader <- fr
 			}
 
@@ -293,6 +356,7 @@ func (sc *serverConn) readLoop() (err error) {
 		}
 
 		// handle 'anonymous' frames (frames without stream_id)
+		var frameErr error
 		switch fr.Type() {
 		case FrameSettings:
 			st := fr.Body().(*Settings)
@@ -303,12 +367,12 @@ func (sc *serverConn) readLoop() (err error) {
 			win := int64(fr.Body().(*WindowUpdate).Increment())
 			if win == 0 {
 				sc.writeGoAway(0, ProtocolError, "window increment of 0")
-				// return
-				continue
+				frameErr = NewGoAwayError(ProtocolError, "window increment of 0")
 			}
 
-			if atomic.AddInt64(&sc.clientWindow, win) >= 1<<31-1 {
+			if frameErr == nil && atomic.AddInt64(&sc.clientWindow, win) >= 1<<31-1 {
 				sc.writeGoAway(0, FlowControlError, "window is above limits")
+				frameErr = NewGoAwayError(FlowControlError, "window is above limits")
 			}
 		case FramePing:
 			ping := fr.Body().(*Ping)
@@ -324,9 +388,21 @@ func (sc *serverConn) readLoop() (err error) {
 			}
 		default:
 			sc.writeGoAway(0, ProtocolError, "invalid frame")
+			frameErr = NewGoAwayError(ProtocolError, "invalid frame")
+		}
+
+		if frameErr != nil {
+			if isConnectionError(frameErr) {
+				sc.signalConnError()
+			}
+			err = frameErr
 		}
 
 		ReleaseFrameHeader(fr)
+	}
+
+	if sc.closing.Load() && !sc.connErr.Load() {
+		err = nil
 	}
 
 	return
@@ -346,6 +422,14 @@ func (sc *serverConn) handleStreams() {
 	var openStreams int
 
 	closedStrms := make(map[uint32]struct{})
+
+	markClosedStream := func(id uint32, origType FrameType) {
+		closedStrms[id] = struct{}{}
+
+		if origType == FrameHeaders && id > sc.lastID {
+			sc.lastID = id
+		}
+	}
 
 	closeStream := func(strm *Stream) {
 		if strm.origType == FrameHeaders {
@@ -427,6 +511,28 @@ loop:
 				strm = strms.Search(fr.Stream())
 			}
 
+			if fr.Body() == nil {
+				pendingHeaders := strm != nil && !strm.headersFinished
+				if !pendingHeaders {
+					for _, s := range strms {
+						if s.origType == FrameHeaders && !s.headersFinished {
+							pendingHeaders = true
+							break
+						}
+					}
+				}
+
+				if pendingHeaders {
+					sc.writeGoAway(fr.Stream(), ProtocolError, "frame on incomplete header block")
+					sc.signalConnError()
+					ReleaseFrameHeader(fr)
+					break loop
+				}
+
+				ReleaseFrameHeader(fr)
+				continue
+			}
+
 			if strm == nil {
 				// if the stream doesn't exist, create it
 
@@ -460,6 +566,7 @@ loop:
 					}
 
 					sc.writeReset(fr.Stream(), RefusedStreamError)
+					markClosedStream(fr.Stream(), fr.Type())
 
 					continue
 				}
@@ -544,6 +651,9 @@ loop:
 				payloadLen := fr.Len()
 				if err := sc.consumeConnectionWindow(payloadLen); err != nil {
 					sc.writeError(nil, err)
+					if isConnectionError(err) {
+						sc.signalConnError()
+					}
 					if strm != nil {
 						strm.SetState(StreamStateClosed)
 					}
@@ -554,6 +664,10 @@ loop:
 			if err := sc.handleFrame(strm, fr); err != nil {
 				sc.writeError(strm, err)
 				strm.SetState(StreamStateClosed)
+				if isConnectionError(err) {
+					sc.signalConnError()
+					break loop
+				}
 			}
 
 			handleState(fr, strm)
@@ -659,6 +773,15 @@ func (sc *serverConn) writeError(strm *Stream, err error) {
 	}
 }
 
+func isConnectionError(err error) bool {
+	var h2Err Error
+	if errors.As(err, &h2Err) {
+		return h2Err.frameType == FrameGoAway
+	}
+
+	return false
+}
+
 func handleState(fr *FrameHeader, strm *Stream) {
 	if fr.Type() == FrameResetStream {
 		strm.SetState(StreamStateClosed)
@@ -669,14 +792,22 @@ func handleState(fr *FrameHeader, strm *Stream) {
 		if fr.Type() == FrameHeaders {
 			strm.SetState(StreamStateOpen)
 			if fr.Flags().Has(FlagEndStream) {
-				strm.SetState(StreamStateHalfClosed)
+				if strm.headersFinished {
+					strm.SetState(StreamStateHalfClosed)
+				} else {
+					strm.pendingEndStream = true
+				}
 			}
 		} // TODO: else push promise ...
 	case StreamStateReserved:
 		// TODO: ...
 	case StreamStateOpen:
 		if fr.Flags().Has(FlagEndStream) {
-			strm.SetState(StreamStateHalfClosed)
+			if strm.headersFinished {
+				strm.SetState(StreamStateHalfClosed)
+			} else {
+				strm.pendingEndStream = true
+			}
 		} else if fr.Type() == FrameResetStream {
 			strm.SetState(StreamStateClosed)
 		}
@@ -732,6 +863,11 @@ func (sc *serverConn) handleFrame(strm *Stream, fr *FrameHeader) error {
 			strm.headersFinished = len(strm.previousHeaderBytes) == 0
 			if !strm.headersFinished {
 				return NewGoAwayError(CompressionError, "END_HEADERS received on an incomplete stream")
+			}
+
+			if strm.headersFinished && strm.pendingEndStream {
+				strm.SetState(StreamStateHalfClosed)
+				strm.pendingEndStream = false
 			}
 
 			// calling req.URI() triggers a URL parsing, so because of that we need to delay the URL parsing.
