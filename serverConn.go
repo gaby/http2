@@ -1343,6 +1343,26 @@ func (sc *serverConn) writeLoop() {
 	buffered := 0
 
 	for fr := range sc.writer {
+		if fr.Type() == FrameData {
+			if strm := sc.getActiveStream(fr.Stream()); strm != nil {
+				if data, ok := fr.Body().(*Data); ok {
+					frameLen := fr.Len()
+					if frameLen == 0 {
+						frameLen = len(data.Data())
+					}
+
+					if atomic.LoadInt64(&strm.sendWindow) < 0 {
+						atomic.AddInt64(&strm.sendWindow, int64(frameLen))
+						atomic.AddInt64(&sc.clientWindow, int64(frameLen))
+
+						sc.queueData(strm, append([]byte(nil), data.Data()...), data.EndStream())
+						ReleaseFrameHeader(fr)
+						continue
+					}
+				}
+			}
+		}
+
 		_, err := fr.WriteTo(sc.bw)
 		if err == nil && (len(sc.writer) == 0 || buffered > 10) {
 			err = sc.bw.Flush()
@@ -1462,6 +1482,13 @@ func (sc *serverConn) forEachActiveStream(fn func(*Stream)) {
 	for _, strm := range streams {
 		fn(strm)
 	}
+}
+
+func (sc *serverConn) getActiveStream(id uint32) *Stream {
+	sc.streamsMu.Lock()
+	strm := sc.streams[id]
+	sc.streamsMu.Unlock()
+	return strm
 }
 
 func addAndClampWindow(window *int64, inc int64) (int64, error) {
