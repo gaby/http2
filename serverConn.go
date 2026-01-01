@@ -1420,26 +1420,32 @@ func (sc *serverConn) handleSettings(st *Settings) {
 	atomic.StoreInt64(&sc.clientMaxFrameSize, int64(maxFrameSize))
 	
 	// Hold streamsMu while updating initialClientWindow and adjusting streams
-	// to prevent race with stream creation
+	// to prevent race with stream creation and queueData
 	if st.HasMaxWindowSize() {
 		delta := int64(initWin) - int64(prevWindow)
 		if delta != 0 {
 			sc.streamsMu.Lock()
+			// Collect streams that need flushing
+			var streamsToFlush []*Stream
 			// Adjust existing streams
 			for _, strm := range sc.streams {
 				newWin := atomic.AddInt64(&strm.sendWindow, delta)
 				if newWin > maxWindowSize {
 					atomic.StoreInt64(&strm.sendWindow, maxWindowSize)
 				}
-				// Note: we can't call flushPendingData here while holding streamsMu
-				// as it may cause deadlock. Mark streams for flushing instead.
+				// Mark streams for flushing after releasing lock
 				if delta > 0 && strm != nil {
-					go sc.flushPendingData(strm)
+					streamsToFlush = append(streamsToFlush, strm)
 				}
 			}
 			// Update initialClientWindow while holding the lock
 			atomic.StoreInt64(&sc.initialClientWindow, int64(initWin))
 			sc.streamsMu.Unlock()
+			
+			// Flush pending data after releasing lock
+			for _, strm := range streamsToFlush {
+				sc.flushPendingData(strm)
+			}
 		} else {
 			// No delta, just update initialClientWindow
 			atomic.StoreInt64(&sc.initialClientWindow, int64(initWin))
@@ -1612,16 +1618,21 @@ func (sc *serverConn) queueData(strm *Stream, data []byte, endStream bool) {
 	}
 
 	for len(data) > 0 {
+		// Hold streamsMu to ensure atomic operation with handleSettings window adjustments
+		sc.streamsMu.Lock()
+		
 		streamWin := atomic.LoadInt64(&strm.sendWindow)
 		connWin := atomic.LoadInt64(&sc.clientWindow)
 		
 		if streamWin <= 0 || connWin <= 0 {
+			sc.streamsMu.Unlock()
 			sc.appendPendingData(strm, data, endStream)
 			return
 		}
 
 		toSend := min(len(data), maxFrame, int(streamWin), int(connWin))
 		if toSend <= 0 {
+			sc.streamsMu.Unlock()
 			sc.appendPendingData(strm, data, endStream)
 			return
 		}
@@ -1636,6 +1647,8 @@ func (sc *serverConn) queueData(strm *Stream, data []byte, endStream bool) {
 			sc.markResponseEnded(strm)
 		}
 		sc.queueDataFrame(strm, chunk, isLastChunk)
+		
+		sc.streamsMu.Unlock()
 	}
 }
 
