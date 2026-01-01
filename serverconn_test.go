@@ -620,3 +620,53 @@ func TestHandleHeaderFrameInvalidCompressionIsConnectionError(t *testing.T) {
 
 	ReleaseFrameHeader(fr)
 }
+
+func TestHandleHeaderFrameConnectAllowsSchemeAndPathOmission(t *testing.T) {
+	sc := newTestServerConn()
+	strm := newTestStream(1)
+
+	fr := buildHeadersFrame(t, strm.ID(), [][2]string{
+		{":method", "CONNECT"},
+		{":authority", "example.com:443"},
+	})
+	defer ReleaseFrameHeader(fr)
+
+	err := sc.handleHeaderFrame(strm, fr)
+	require.NoError(t, err)
+}
+
+func TestHandleHeaderFrameConnectRequiresAuthority(t *testing.T) {
+	sc := newTestServerConn()
+	strm := newTestStream(1)
+
+	fr := buildHeadersFrame(t, strm.ID(), [][2]string{
+		{":method", "CONNECT"},
+	})
+	defer ReleaseFrameHeader(fr)
+
+	err := sc.handleHeaderFrame(strm, fr)
+	require.Error(t, err)
+	var h2Err Error
+	require.ErrorAs(t, err, &h2Err)
+	require.Equal(t, ProtocolError, h2Err.Code())
+	require.Equal(t, FrameResetStream, h2Err.frameType)
+}
+
+func TestHandleHeaderFrameConnectRejectsPathAndScheme(t *testing.T) {
+	sc := newTestServerConn()
+	strm := newTestStream(1)
+
+	fr := buildHeadersFrame(t, strm.ID(), [][2]string{
+		{":method", "CONNECT"},
+		{":authority", "example.com:443"},
+		{":path", "/"},
+	})
+	defer ReleaseFrameHeader(fr)
+
+	err := sc.handleHeaderFrame(strm, fr)
+	require.Error(t, err)
+	var h2Err Error
+	require.ErrorAs(t, err, &h2Err)
+	require.Equal(t, ProtocolError, h2Err.Code())
+	require.Equal(t, FrameResetStream, h2Err.frameType)
+}

@@ -834,10 +834,18 @@ func (sc *serverConn) handleHeaderFrame(strm *Stream, fr *FrameHeader) error {
 				}
 
 				strm.seenMethod = true
+				strm.isConnect = bytes.Equal(v, StringCONNECT)
+				if strm.isConnect && (strm.seenPath || strm.seenScheme) {
+					return NewResetStreamError(ProtocolError, "CONNECT must not include :path or :scheme")
+				}
 				req.Header.SetMethodBytes(v)
 			case bytes.Equal(k, StringPath):
 				if strm.seenPath {
 					return NewResetStreamError(ProtocolError, "duplicate pseudo-header :path")
+				}
+
+				if strm.isConnect {
+					return NewResetStreamError(ProtocolError, "CONNECT must not include :path or :scheme")
 				}
 
 				strm.seenPath = true
@@ -845,6 +853,10 @@ func (sc *serverConn) handleHeaderFrame(strm *Stream, fr *FrameHeader) error {
 			case bytes.Equal(k, StringScheme):
 				if strm.seenScheme {
 					return NewResetStreamError(ProtocolError, "duplicate pseudo-header :scheme")
+				}
+
+				if strm.isConnect {
+					return NewResetStreamError(ProtocolError, "CONNECT must not include :path or :scheme")
 				}
 
 				strm.seenScheme = true
@@ -883,7 +895,19 @@ func (sc *serverConn) handleHeaderFrame(strm *Stream, fr *FrameHeader) error {
 	strm.headerBlockNum++
 
 	if err == nil && fr.Flags().Has(FlagEndHeaders) && len(strm.previousHeaderBytes) == 0 {
-		if !strm.seenMethod || !strm.seenScheme || !strm.seenPath {
+		if !strm.seenMethod {
+			return NewResetStreamError(ProtocolError, "missing required pseudo-header")
+		}
+
+		if strm.isConnect {
+			if !strm.seenAuthority {
+				return NewResetStreamError(ProtocolError, "missing required pseudo-header")
+			}
+
+			if strm.seenPath || strm.seenScheme {
+				return NewResetStreamError(ProtocolError, "CONNECT must not include :path or :scheme")
+			}
+		} else if !strm.seenScheme || !strm.seenPath {
 			return NewResetStreamError(ProtocolError, "missing required pseudo-header")
 		}
 	}

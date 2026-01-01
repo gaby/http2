@@ -14,6 +14,7 @@ var (
 	StringGET           = []byte("GET")
 	StringHEAD          = []byte("HEAD")
 	StringPOST          = []byte("POST")
+	StringCONNECT       = []byte("CONNECT")
 	StringHTTP2         = []byte("HTTP/2")
 )
 

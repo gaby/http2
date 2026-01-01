@@ -58,6 +58,7 @@ type Stream struct {
 	seenScheme        bool
 	seenPath          bool
 	seenAuthority     bool
+	isConnect         bool
 }
 
 var streamPool = sync.Pool{
@@ -85,6 +86,7 @@ func NewStream(id uint32, recvWin, sendWin int32) *Stream {
 	strm.seenScheme = false
 	strm.seenPath = false
 	strm.seenAuthority = false
+	strm.isConnect = false
 
 	return strm
 }
