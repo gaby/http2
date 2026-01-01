@@ -92,6 +92,12 @@ func (sc *serverConn) closeIdleConn() {
 	close(sc.closer)
 }
 
+func (sc *serverConn) signalConnError() {
+	if sc.connErr.CompareAndSwap(false, true) && sc.c != nil {
+		_ = sc.c.SetReadDeadline(time.Now())
+	}
+}
+
 func (sc *serverConn) Handshake() error {
 	return Handshake(false, sc.bw, &sc.st, sc.maxWindow)
 }
@@ -289,7 +295,7 @@ func (sc *serverConn) readLoop() (err error) {
 				}
 
 				if fr == nil || fr.Stream() == 0 {
-					sc.connErr.Store(true)
+					sc.signalConnError()
 				}
 			}
 
@@ -301,7 +307,7 @@ func (sc *serverConn) readLoop() (err error) {
 			if cerr != nil {
 				sc.writeError(nil, cerr)
 				if isConnectionError(cerr) {
-					sc.connErr.Store(true)
+					sc.signalConnError()
 					ReleaseFrameHeader(fr)
 					err = cerr
 					break
@@ -357,7 +363,7 @@ func (sc *serverConn) readLoop() (err error) {
 
 		if frameErr != nil {
 			if isConnectionError(frameErr) {
-				sc.connErr.Store(true)
+				sc.signalConnError()
 			}
 			err = frameErr
 		}
@@ -484,10 +490,7 @@ loop:
 
 				if pendingHeaders {
 					sc.writeGoAway(fr.Stream(), ProtocolError, "frame on incomplete header block")
-					sc.connErr.Store(true)
-					if sc.c != nil {
-						_ = sc.c.SetReadDeadline(time.Now())
-					}
+					sc.signalConnError()
 					ReleaseFrameHeader(fr)
 					break loop
 				}
@@ -615,10 +618,7 @@ loop:
 				if err := sc.consumeConnectionWindow(payloadLen); err != nil {
 					sc.writeError(nil, err)
 					if isConnectionError(err) {
-						sc.connErr.Store(true)
-						if sc.c != nil {
-							_ = sc.c.SetReadDeadline(time.Now())
-						}
+						sc.signalConnError()
 					}
 					if strm != nil {
 						strm.SetState(StreamStateClosed)
@@ -631,10 +631,7 @@ loop:
 				sc.writeError(strm, err)
 				strm.SetState(StreamStateClosed)
 				if isConnectionError(err) {
-					sc.connErr.Store(true)
-					if sc.c != nil {
-						_ = sc.c.SetReadDeadline(time.Now())
-					}
+					sc.signalConnError()
 					break loop
 				}
 			}
