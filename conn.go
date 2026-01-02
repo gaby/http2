@@ -18,6 +18,8 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
+// windowWaitTimeout is the maximum duration to wait for flow control window credit
+// before giving up and returning a flow control–related error.
 const windowWaitTimeout = 200 * time.Millisecond
 
 // ConnOpts defines the connection options.
