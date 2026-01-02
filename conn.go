@@ -18,6 +18,10 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
+// windowWaitTimeout is the maximum duration to wait for flow control window credit
+// before giving up and returning a flow control–related error.
+const windowWaitTimeout = 200 * time.Millisecond
+
 // ConnOpts defines the connection options.
 type ConnOpts struct {
 	// PingInterval defines the interval in which the client will ping the server.
@@ -97,6 +101,10 @@ type Conn struct {
 	serverS   Settings
 	serverSMu sync.RWMutex
 
+	windowMu       sync.Mutex
+	windowCond     *sync.Cond
+	windowCondOnce sync.Once
+
 	state    connState
 	closeRef uint32
 
@@ -136,6 +144,7 @@ func NewConn(c net.Conn, opts ConnOpts) *Conn {
 		disableAcks:   opts.DisablePingChecking,
 		onDisconnect:  opts.OnDisconnect,
 	}
+	nc.windowCond = sync.NewCond(&nc.windowMu)
 
 	nc.current.SetMaxWindowSize(1 << 20)
 	nc.current.SetPush(false)
@@ -326,6 +335,28 @@ func (c *Conn) updateServerSettings(st *Settings) {
 
 	c.serverStreamWindow = newStreamWindow
 	c.serverSMu.Unlock()
+
+	if delta != 0 {
+		c.notifyWindowAvailable()
+	}
+}
+
+func (c *Conn) windowCondition() *sync.Cond {
+	c.windowCondOnce.Do(func() {
+		if c.windowCond == nil {
+			c.windowCond = sync.NewCond(&c.windowMu)
+		}
+	})
+
+	return c.windowCond
+}
+
+func (c *Conn) notifyWindowAvailable() {
+	cond := c.windowCondition()
+
+	c.windowMu.Lock()
+	cond.Broadcast()
+	c.windowMu.Unlock()
 }
 
 // CanOpenStream returns whether the client will be able to open a new stream or not.
@@ -348,6 +379,8 @@ func (c *Conn) Close() error {
 	if !atomic.CompareAndSwapUint64(&c.closed, 0, 1) {
 		return io.EOF
 	}
+
+	c.notifyWindowAvailable()
 
 	close(c.in)
 
@@ -671,35 +704,54 @@ func (c *Conn) writeRequest(ctx *Ctx) error {
 func (c *Conn) writeData(fh *FrameHeader, ctx *Ctx, body []byte) (err error) {
 	maxFrame := 1 << 14
 
+	cond := c.windowCondition()
 	data := AcquireFrame(FrameData).(*Data)
 	fh.SetBody(data)
 
 	for i := 0; err == nil && i < len(body); {
-		// Check both connection and stream windows before sending
-		connWin := atomic.LoadInt32(&c.serverWindow)
-		streamWin := atomic.LoadInt32(&ctx.sendWindow)
+		remaining := len(body) - i
 
-		if connWin <= 0 || streamWin <= 0 {
-			// Wait briefly for window update
-			// In practice, WINDOW_UPDATE frames should arrive through readLoop
-			time.Sleep(10 * time.Millisecond)
+		c.windowMu.Lock()
+		for {
+			if atomic.LoadUint64(&c.closed) == 1 {
+				c.windowMu.Unlock()
+				return net.ErrClosed
+			}
 
-			// Re-check windows after waiting
-			connWin = atomic.LoadInt32(&c.serverWindow)
-			streamWin = atomic.LoadInt32(&ctx.sendWindow)
+			connWin := atomic.LoadInt32(&c.serverWindow)
+			streamWin := atomic.LoadInt32(&ctx.sendWindow)
+			if connWin > 0 && streamWin > 0 {
+				break
+			}
 
-			if connWin <= 0 || streamWin <= 0 {
-				return errors.New("flow control: send window exhausted")
+			timer := time.AfterFunc(windowWaitTimeout, c.notifyWindowAvailable)
+			cond.Wait()
+			if !timer.Stop() {
+				connWin = atomic.LoadInt32(&c.serverWindow)
+				streamWin = atomic.LoadInt32(&ctx.sendWindow)
+
+				if atomic.LoadUint64(&c.closed) == 1 {
+					c.windowMu.Unlock()
+					return net.ErrClosed
+				}
+
+				if connWin <= 0 || streamWin <= 0 {
+					c.windowMu.Unlock()
+					return FlowControlError
+				}
 			}
 		}
 
+		connWin := atomic.LoadInt32(&c.serverWindow)
+		streamWin := atomic.LoadInt32(&ctx.sendWindow)
+
 		// Calculate chunk size respecting both windows and max frame size
-		remaining := len(body) - i
 		toSend := min(min(min(remaining, maxFrame), int(connWin)), int(streamWin))
 
 		// Deduct from both windows
 		atomic.AddInt32(&c.serverWindow, -int32(toSend))
 		atomic.AddInt32(&ctx.sendWindow, -int32(toSend))
+		c.windowMu.Unlock()
 
 		data.SetEndStream(i+toSend == len(body))
 		data.SetPadding(false)
@@ -735,6 +787,7 @@ loop:
 			win := int32(fr.Body().(*WindowUpdate).Increment())
 
 			atomic.AddInt32(&c.serverWindow, win)
+			c.notifyWindowAvailable()
 		case FramePing:
 			ping := fr.Body().(*Ping)
 			if !ping.IsAck() {
@@ -846,6 +899,7 @@ func (c *Conn) readStream(fr *FrameHeader, res *fasthttp.Response) (err error) {
 		if ri, ok := c.reqQueued.Load(fr.Stream()); ok {
 			ctx := ri.(*Ctx)
 			atomic.AddInt32(&ctx.sendWindow, win)
+			c.notifyWindowAvailable()
 		}
 	}
 
