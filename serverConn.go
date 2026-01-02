@@ -1623,20 +1623,17 @@ func (sc *serverConn) drainWriter() {
 }
 
 func (sc *serverConn) handleSettings(st *Settings) {
+	oldInitWin := atomic.LoadInt64(&sc.initialClientWindow)
+
 	sc.clientSMu.Lock()
-	prevWindow := sc.clientS.MaxWindowSize()
-	// Only use default if window size was never explicitly set.
-	// Window size 0 is a valid value meaning "don't send any data".
-	if !sc.clientS.HasMaxWindowSize() {
-		prevWindow = defaultWindowSize
-	}
 	st.CopyTo(&sc.clientS)
 
-	initWin := sc.clientS.MaxWindowSize()
-	// After CopyTo, check if the NEW settings have window size set.
-	// If not set, use default; if set to 0, use 0.
-	if !sc.clientS.HasMaxWindowSize() {
-		initWin = defaultWindowSize
+	newInitWin := oldInitWin
+	if st.HasMaxWindowSize() {
+		newInitWin = int64(st.MaxWindowSize())
+	} else if newInitWin == 0 {
+		// Initialize to default if we haven't applied any client window yet
+		newInitWin = int64(defaultWindowSize)
 	}
 
 	maxFrameSize := sc.clientS.MaxFrameSize()
@@ -1653,44 +1650,33 @@ func (sc *serverConn) handleSettings(st *Settings) {
 
 	atomic.StoreInt64(&sc.clientMaxFrameSize, int64(maxFrameSize))
 
+	delta := newInitWin - oldInitWin
+
 	// Hold streamsMu while updating initialClientWindow and adjusting streams
 	// to prevent race with stream creation and queueData
-	if st.HasMaxWindowSize() {
-		delta := int64(initWin) - int64(prevWindow)
-		sc.streamsMu.Lock()
-		streamsToFlush := make([]*Stream, 0, len(sc.streams))
-		if delta != 0 {
-			for _, strm := range sc.streams {
-				newWin := atomic.AddInt64(&strm.sendWindow, delta)
-				if newWin > maxWindowSize {
-					atomic.StoreInt64(&strm.sendWindow, maxWindowSize)
-				}
-				if strm != nil {
-					streamsToFlush = append(streamsToFlush, strm)
-				}
+	streamsToFlush := make([]*Stream, 0, len(sc.streams))
+	sc.streamsMu.Lock()
+	if delta != 0 {
+		for _, strm := range sc.streams {
+			newWin := atomic.AddInt64(&strm.sendWindow, delta)
+			if newWin > maxWindowSize {
+				atomic.StoreInt64(&strm.sendWindow, maxWindowSize)
 			}
-		} else {
-			for _, strm := range sc.streams {
-				if strm != nil {
-					streamsToFlush = append(streamsToFlush, strm)
-				}
+			if strm != nil {
+				streamsToFlush = append(streamsToFlush, strm)
 			}
-		}
-		// Update initialClientWindow while holding the lock
-		atomic.StoreInt64(&sc.initialClientWindow, int64(initWin))
-		sc.streamsMu.Unlock()
-
-		// Flush pending data after releasing lock
-		for _, strm := range streamsToFlush {
-			sc.flushPendingData(strm)
 		}
 	} else {
-		// No window size change, but still update initialClientWindow atomically
-		sc.streamsMu.Lock()
-		atomic.StoreInt64(&sc.initialClientWindow, int64(initWin))
-		sc.streamsMu.Unlock()
+		for _, strm := range sc.streams {
+			if strm != nil {
+				streamsToFlush = append(streamsToFlush, strm)
+			}
+		}
 	}
+	atomic.StoreInt64(&sc.initialClientWindow, newInitWin)
 
+	// Send ACK before releasing the stream lock so no DATA is flushed ahead of
+	// the acknowledgement when the window opens.
 	fr := AcquireFrameHeader()
 
 	stRes := AcquireFrame(FrameSettings).(*Settings)
@@ -1699,6 +1685,34 @@ func (sc *serverConn) handleSettings(st *Settings) {
 	fr.SetBody(stRes)
 
 	sc.enqueueFrame(fr)
+	sc.streamsMu.Unlock()
+
+	// Flush pending data after sending the ACK so the client observes the
+	// acknowledgement before any DATA that becomes sendable due to the window
+	// update. This avoids h2spec consuming the DATA while waiting for the ACK.
+	for _, strm := range streamsToFlush {
+		sc.flushPendingData(strm)
+	}
+
+	// If the initial window just increased, schedule a follow-up flush to
+	// catch streams that might queue data immediately after this settings frame
+	// (e.g. when HEADERS and SETTINGS arrive back-to-back).
+	if st.HasMaxWindowSize() && delta > 0 {
+		// Do a few retries with small delays to cover races between incoming
+		// SETTINGS and the request handler queueing its response.
+		go func() {
+			for i := 0; i < 3; i++ {
+				time.Sleep(10 * time.Millisecond)
+				sc.forEachActiveStream(func(strm *Stream) {
+					sc.flushPendingData(strm)
+				})
+			}
+			time.Sleep(50 * time.Millisecond)
+			sc.forEachActiveStream(func(strm *Stream) {
+				sc.flushPendingData(strm)
+			})
+		}()
+	}
 }
 
 const maxWindowIncrement = 1<<31 - 1
@@ -1856,6 +1870,11 @@ func (sc *serverConn) queueData(strm *Stream, data []byte, endStream bool) {
 		if streamWin <= 0 || connWin <= 0 {
 			sc.appendPendingData(strm, data, endStream)
 			sc.streamsMu.Unlock()
+			// If window credit arrived concurrently (e.g. via SETTINGS) after we
+			// decided to pend, flush immediately to avoid leaving data stuck.
+			if atomic.LoadInt64(&strm.sendWindow) > 0 && atomic.LoadInt64(&sc.clientWindow) > 0 {
+				sc.flushPendingData(strm)
+			}
 			return
 		}
 
@@ -1863,6 +1882,9 @@ func (sc *serverConn) queueData(strm *Stream, data []byte, endStream bool) {
 		if toSend <= 0 {
 			sc.streamsMu.Unlock()
 			sc.appendPendingData(strm, data, endStream)
+			if atomic.LoadInt64(&strm.sendWindow) > 0 && atomic.LoadInt64(&sc.clientWindow) > 0 {
+				sc.flushPendingData(strm)
+			}
 			return
 		}
 
