@@ -369,6 +369,65 @@ func TestConnWriteDataRespectsFlowControl(t *testing.T) {
 	require.Equal(t, body, payload)
 }
 
+func TestConnWriteDataTimesOutWhenWindowStalled(t *testing.T) {
+	conn := &Conn{
+		bw: bufio.NewWriter(io.Discard),
+	}
+	atomic.StoreInt32(&conn.serverWindow, 0)
+
+	ctx := &Ctx{
+		Err: make(chan error, 1),
+	}
+	atomic.StoreInt32(&ctx.sendWindow, 0)
+
+	fh := AcquireFrameHeader()
+	defer ReleaseFrameHeader(fh)
+	fh.SetStream(1)
+
+	start := time.Now()
+	err := conn.writeData(fh, ctx, []byte("abc"))
+	elapsed := time.Since(start)
+
+	require.ErrorIs(t, err, FlowControlError)
+	require.GreaterOrEqual(t, elapsed, windowWaitTimeout)
+}
+
+func TestConnWriteDataUnblocksOnClose(t *testing.T) {
+	conn := &Conn{
+		bw: bufio.NewWriter(io.Discard),
+		c:  &stubConn{},
+		in: make(chan *Ctx),
+	}
+	atomic.StoreInt32(&conn.serverWindow, 0)
+
+	ctx := &Ctx{
+		Err: make(chan error, 1),
+	}
+	atomic.StoreInt32(&ctx.sendWindow, 0)
+
+	fh := AcquireFrameHeader()
+	defer ReleaseFrameHeader(fh)
+	fh.SetStream(1)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- conn.writeData(fh, ctx, []byte("abc"))
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	require.NoError(t, conn.Close())
+
+	require.Eventually(t, func() bool {
+		select {
+		case werr := <-done:
+			require.ErrorIs(t, werr, net.ErrClosed)
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
+}
+
 func TestConnWritePing(t *testing.T) {
 	var buf bytes.Buffer
 	conn := &Conn{

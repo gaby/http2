@@ -18,6 +18,8 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
+const windowWaitTimeout = 200 * time.Millisecond
+
 // ConnOpts defines the connection options.
 type ConnOpts struct {
 	// PingInterval defines the interval in which the client will ping the server.
@@ -376,6 +378,8 @@ func (c *Conn) Close() error {
 		return io.EOF
 	}
 
+	c.notifyWindowAvailable()
+
 	close(c.in)
 
 	fr := AcquireFrameHeader()
@@ -707,13 +711,33 @@ func (c *Conn) writeData(fh *FrameHeader, ctx *Ctx, body []byte) (err error) {
 
 		c.windowMu.Lock()
 		for {
+			if atomic.LoadUint64(&c.closed) == 1 {
+				c.windowMu.Unlock()
+				return net.ErrClosed
+			}
+
 			connWin := atomic.LoadInt32(&c.serverWindow)
 			streamWin := atomic.LoadInt32(&ctx.sendWindow)
 			if connWin > 0 && streamWin > 0 {
 				break
 			}
 
+			timer := time.AfterFunc(windowWaitTimeout, c.notifyWindowAvailable)
 			cond.Wait()
+			if !timer.Stop() {
+				connWin = atomic.LoadInt32(&c.serverWindow)
+				streamWin = atomic.LoadInt32(&ctx.sendWindow)
+
+				if atomic.LoadUint64(&c.closed) == 1 {
+					c.windowMu.Unlock()
+					return net.ErrClosed
+				}
+
+				if connWin <= 0 || streamWin <= 0 {
+					c.windowMu.Unlock()
+					return FlowControlError
+				}
+			}
 		}
 
 		connWin := atomic.LoadInt32(&c.serverWindow)
