@@ -529,6 +529,8 @@ func TestQueueDataRespectsInitialWindowChanges(t *testing.T) {
 		logger: log.New(io.Discard, "", 0),
 	}
 	sc.clientS.Reset()
+	// Initialize connection window to allow sending
+	atomic.StoreInt64(&sc.clientWindow, int64(defaultWindowSize))
 
 	strm := NewStream(1, int32(defaultWindowSize), 3)
 	strm.SetState(StreamStateOpen)

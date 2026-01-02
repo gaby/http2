@@ -634,17 +634,12 @@ loop:
 				recvWindow := int32(sc.st.MaxWindowSize())
 
 				// Hold streamsMu while reading initialClientWindow and adding stream
-				// to prevent race with handleSettings updating it
+				// to prevent race with handleSettings updating it.
+				// Note: SETTINGS frames are now processed through the channel in order,
+				// so initialClientWindow always reflects the correct value including 0
+				// if the client explicitly set it to 0.
 				sc.streamsMu.Lock()
 				sendWindow := int32(atomic.LoadInt64(&sc.initialClientWindow))
-				if sendWindow == 0 {
-					sc.clientSMu.Lock()
-					sendWindow = int32(sc.clientS.MaxWindowSize())
-					sc.clientSMu.Unlock()
-					if sendWindow == 0 {
-						sendWindow = int32(defaultWindowSize)
-					}
-				}
 				strm = NewStream(fr.Stream(), recvWindow, sendWindow)
 				strms = append(strms, strm)
 				if sc.streams == nil {
@@ -1423,13 +1418,17 @@ func (sc *serverConn) writeLoop() {
 func (sc *serverConn) handleSettings(st *Settings) {
 	sc.clientSMu.Lock()
 	prevWindow := sc.clientS.MaxWindowSize()
-	if prevWindow == 0 {
+	// Only use default if window size was never explicitly set.
+	// Window size 0 is a valid value meaning "don't send any data".
+	if !sc.clientS.HasMaxWindowSize() {
 		prevWindow = defaultWindowSize
 	}
 	st.CopyTo(&sc.clientS)
 
 	initWin := sc.clientS.MaxWindowSize()
-	if initWin == 0 {
+	// After CopyTo, check if the NEW settings have window size set.
+	// If not set, use default; if set to 0, use 0.
+	if !sc.clientS.HasMaxWindowSize() {
 		initWin = defaultWindowSize
 	}
 
@@ -1637,16 +1636,9 @@ func (sc *serverConn) queueData(strm *Stream, data []byte, endStream bool) {
 		maxFrame = 1 << 14
 	}
 
-	if atomic.LoadInt64(&sc.initialClientWindow) == 0 && atomic.LoadInt64(&sc.clientWindow) == 0 {
-		sc.clientSMu.Lock()
-		initWin := int64(sc.clientS.MaxWindowSize())
-		sc.clientSMu.Unlock()
-		if initWin == 0 {
-			initWin = int64(defaultWindowSize)
-		}
-		atomic.StoreInt64(&sc.initialClientWindow, initWin)
-		atomic.StoreInt64(&sc.clientWindow, initWin)
-	}
+	// Note: initialClientWindow and clientWindow are properly initialized in Serve()
+	// and updated via handleSettings. Window value of 0 is valid (means flow control
+	// is blocking all data), so we should not override it.
 
 	for len(data) > 0 {
 		// Hold streamsMu to ensure atomic operation with handleSettings window adjustments
