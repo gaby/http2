@@ -385,13 +385,13 @@ func TestWindowUpdateDeserializeRejectsInvalidPayloadLength(t *testing.T) {
 			name:              "undersizeStream",
 			stream:            3,
 			payload:           []byte{0x0, 0x0, 0x0},
-			expectedFrameType: FrameResetStream,
+			expectedFrameType: FrameGoAway,
 		},
 		{
 			name:              "oversizeStream",
 			stream:            3,
 			payload:           []byte{0x0, 0x0, 0x0, 0x1, 0x2},
-			expectedFrameType: FrameResetStream,
+			expectedFrameType: FrameGoAway,
 		},
 	}
 

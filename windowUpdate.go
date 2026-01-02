@@ -38,7 +38,7 @@ func (wu *WindowUpdate) SetIncrement(increment int) {
 
 func (wu *WindowUpdate) Deserialize(fr *FrameHeader) error {
 	if len(fr.payload) != 4 {
-		return newFrameSizeError(fr.Stream(), "window_update frame payload must be 4 bytes")
+		return NewGoAwayError(FrameSizeError, "window_update frame payload must be 4 bytes")
 	}
 
 	wu.increment = int(http2utils.BytesToUint32(fr.payload) & (1<<31 - 1))
