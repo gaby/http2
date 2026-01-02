@@ -142,7 +142,8 @@ func TestH2Spec(t *testing.T) {
 		{desc: "http2/6.9.1/1"},
 		{desc: "http2/6.9.1/2"},
 		{desc: "http2/6.9.1/3"},
-		{desc: "http2/6.9.2/1"},
+		// Note: 6.9.2/1 is tested separately in TestH2Spec_6_9_2_1 to avoid timing issues
+		// {desc: "http2/6.9.2/1"},
 		{desc: "http2/6.9.2/2"},
 		{desc: "http2/6.9.2/3"},
 		{desc: "http2/6.9/1"},
@@ -222,6 +223,30 @@ func TestH2Spec(t *testing.T) {
 			require.Equal(t, 0, tg.FailedCount)
 		})
 	}
+}
+
+// TestH2Spec_6_9_2_1 tests the SETTINGS_INITIAL_WINDOW_SIZE change behavior
+// separately from other h2spec tests to avoid timing issues in CI environments.
+// This test verifies RFC 7540 Section 6.9.2: when INITIAL_WINDOW_SIZE changes,
+// the server must adjust all stream flow-control windows by the delta.
+func TestH2Spec_6_9_2_1(t *testing.T) {
+	port := launchLocalServer(t)
+
+	conf := &config.Config{
+		Host:         "127.0.0.1",
+		Port:         port,
+		Path:         "/",
+		Timeout:      3 * time.Second, // Longer timeout for this timing-sensitive test
+		MaxHeaderLen: 4000,
+		TLS:          true,
+		Insecure:     true,
+		Verbose:      testing.Verbose(),
+		Sections:     []string{"http2/6.9.2/1"},
+	}
+
+	tg := h2spec.Spec()
+	tg.Test(conf)
+	require.Equal(t, 0, tg.FailedCount)
 }
 
 func TestUnknownExtensionFrameDuringHeaders(t *testing.T) {
