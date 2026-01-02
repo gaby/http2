@@ -52,14 +52,13 @@ func (pry *Priority) SetWeight(w byte) {
 }
 
 func (pry *Priority) Deserialize(fr *FrameHeader) (err error) {
-	if len(fr.payload) < 5 {
-		err = ErrMissingBytes
-	} else {
-		pry.stream = http2utils.BytesToUint32(fr.payload) & (1<<31 - 1)
-		pry.weight = fr.payload[4]
+	if len(fr.payload) != 5 {
+		return newFrameSizeError(fr.Stream(), "priority frame payload must be 5 bytes")
 	}
 
-	return
+	pry.stream = http2utils.BytesToUint32(fr.payload) & (1<<31 - 1)
+	pry.weight = fr.payload[4]
+	return nil
 }
 
 func (pry *Priority) Serialize(fr *FrameHeader) {
