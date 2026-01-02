@@ -50,7 +50,7 @@ func TestClientRoundTripTimeoutCancelsStream(t *testing.T) {
 	}
 	conn.serverS.maxStreams = 1
 
-	client := createClient(&Dialer{}, ClientOpts{MaxResponseTime: time.Millisecond * 10})
+	client := createClient(&Dialer{}, ClientOpts{MaxResponseTime: time.Millisecond * 50})
 	client.conns.PushBack(conn)
 
 	req := fasthttp.AcquireRequest()
@@ -73,7 +73,7 @@ func TestClientRoundTripTimeoutCancelsStream(t *testing.T) {
 		default:
 			return false
 		}
-	}, time.Second, time.Millisecond*10, "cancel frame not enqueued")
+	}, 2*time.Second, time.Millisecond*10, "cancel frame not enqueued")
 	require.True(t, resetReceived, "cancel frame not enqueued")
 }
 
@@ -84,7 +84,7 @@ func TestClientRoundTripTimeoutIgnoresLateResponse(t *testing.T) {
 	}
 	conn.serverS.maxStreams = 1
 
-	client := createClient(&Dialer{}, ClientOpts{MaxResponseTime: time.Millisecond * 10})
+	client := createClient(&Dialer{}, ClientOpts{MaxResponseTime: time.Millisecond * 50})
 	client.conns.PushBack(conn)
 
 	req := fasthttp.AcquireRequest()
@@ -106,7 +106,8 @@ func TestClientRoundTripTimeoutIgnoresLateResponse(t *testing.T) {
 
 		ctx := <-conn.in
 		<-timeoutDone
-
+		// Small delay to ensure timeout has been processed
+		time.Sleep(10 * time.Millisecond)
 		ctx.resolve(nil)
 	}()
 

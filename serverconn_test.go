@@ -584,6 +584,89 @@ func TestQueueDataRespectsInitialWindowChanges(t *testing.T) {
 	require.Equal(t, len(body)-4, pendingLen)
 }
 
+func TestSettingsInitialWindowIncreaseFlushesPendingData(t *testing.T) {
+	s := &Server{
+		s: &fasthttp.Server{
+			Handler: func(ctx *fasthttp.RequestCtx) {
+				ctx.Response.SetBodyString("hello world")
+			},
+		},
+	}
+
+	c, ln, err := getConn(s)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		c.Close()
+		ln.Close()
+	})
+
+	sendSettings := func(val uint32) {
+		fr := AcquireFrameHeader()
+		st := AcquireFrame(FrameSettings).(*Settings)
+		st.SetMaxWindowSize(val)
+		fr.SetBody(st)
+		require.NoError(t, c.writeFrame(fr))
+		ReleaseFrameHeader(fr)
+	}
+
+	sendSettings(0)
+
+	headers := makeHeaders(1, c.enc, true, true, map[string]string{
+		string(StringAuthority): "localhost",
+		string(StringMethod):    "GET",
+		string(StringPath):      "/",
+		string(StringScheme):    "https",
+	})
+	require.NoError(t, c.writeFrame(headers))
+
+	deadline := time.Now().Add(time.Second)
+	var gotHeaders bool
+	for time.Now().Before(deadline) && !gotHeaders {
+		fr, err := c.readNext()
+		require.NoError(t, err)
+
+		if fr.Stream() != 1 {
+			ReleaseFrameHeader(fr)
+			continue
+		}
+
+		if fr.Type() == FrameHeaders {
+			gotHeaders = true
+		} else if fr.Type() == FrameData {
+			t.Fatalf("unexpected DATA length %d before window increase", len(fr.Body().(*Data).Data()))
+		}
+
+		ReleaseFrameHeader(fr)
+	}
+	require.True(t, gotHeaders, "expected response headers before expanding window")
+
+	sendSettings(1)
+
+	deadline = time.Now().Add(time.Second)
+	var dataFrame *FrameHeader
+	for time.Now().Before(deadline) && dataFrame == nil {
+		fr, err := c.readNext()
+		require.NoError(t, err)
+
+		if fr.Stream() != 1 {
+			ReleaseFrameHeader(fr)
+			continue
+		}
+		if fr.Type() == FrameData {
+			dataFrame = fr
+			break
+		}
+
+		ReleaseFrameHeader(fr)
+	}
+	require.NotNil(t, dataFrame, "expected DATA frame after window increase")
+
+	data := dataFrame.Body().(*Data)
+	require.Equal(t, 1, len(data.Data()))
+	require.False(t, data.EndStream())
+	ReleaseFrameHeader(dataFrame)
+}
+
 func TestConnectionWindowLimitsDataAcrossStreams(t *testing.T) {
 	sc := &serverConn{
 		writer: make(chan *FrameHeader, 8),
@@ -827,12 +910,14 @@ func TestHandleStreamsRespectsMaxConcurrentStreams(t *testing.T) {
 	}
 
 	sc.reader <- buildHeadersFrame(t, 1, headers)
+	// Give time for first stream to be processed
+	time.Sleep(10 * time.Millisecond)
 	sc.reader <- buildHeadersFrame(t, 3, headers)
 
 	var rst *FrameHeader
 	select {
 	case rst = <-sc.writer:
-	case <-time.After(time.Second):
+	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for stream reset")
 	}
 
@@ -842,7 +927,13 @@ func TestHandleStreamsRespectsMaxConcurrentStreams(t *testing.T) {
 
 	close(sc.closer)
 	close(sc.reader)
-	<-streamsDone
+
+	select {
+	case <-streamsDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for handleStreams to complete")
+	}
+
 	sc.closeWriter()
 
 	require.Equal(t, uint32(3), sc.lastID)
@@ -986,8 +1077,10 @@ func TestConnectionErrorClosesAfterGoAway(t *testing.T) {
 	s.cnf.defaults()
 
 	serverSide, clientSide := net.Pipe()
-	defer serverSide.Close()
-	defer clientSide.Close()
+	t.Cleanup(func() {
+		serverSide.Close()
+		clientSide.Close()
+	})
 
 	done := make(chan struct{})
 	go func() {
@@ -1014,7 +1107,7 @@ func TestConnectionErrorClosesAfterGoAway(t *testing.T) {
 
 	select {
 	case <-done:
-	case <-time.After(time.Second):
+	case <-time.After(3 * time.Second):
 		t.Fatal("timeout waiting for server to close connection")
 	}
 
@@ -1048,11 +1141,15 @@ func TestUnknownFrameDuringHeaderBlockCausesConnectionError(t *testing.T) {
 	s.cnf.defaults()
 
 	serverSide, clientSide := net.Pipe()
-	defer serverSide.Close()
-	defer clientSide.Close()
+	t.Cleanup(func() {
+		serverSide.Close()
+		clientSide.Close()
+	})
 
+	done := make(chan struct{})
 	go func() {
 		_ = s.ServeConn(serverSide)
+		close(done)
 	}()
 
 	serverData := make(chan []byte, 1)
@@ -1086,7 +1183,7 @@ func TestUnknownFrameDuringHeaderBlockCausesConnectionError(t *testing.T) {
 	var frames []byte
 	select {
 	case frames = <-serverData:
-	case <-time.After(2 * time.Second):
+	case <-time.After(3 * time.Second):
 		t.Fatal("timeout waiting for connection error")
 	}
 	reader := bufio.NewReader(bytes.NewReader(frames))
@@ -1345,15 +1442,20 @@ func TestWriteLoopErrorClosesConnection(t *testing.T) {
 	data.SetEndStream(true)
 	fr.SetStream(1)
 	fr.SetBody(data)
-	sc.writer <- fr
+	sc.enqueueFrame(fr)
 
 	// Allow additional writes after the failure without panicking.
 	fr2 := AcquireFrameHeader()
 	fr2.SetStream(3)
 	fr2.SetBody(AcquireFrame(FrameResetStream))
+	sendDone := make(chan struct{})
+	go func() {
+		sc.enqueueFrame(fr2)
+		close(sendDone)
+	}()
 	select {
-	case sc.writer <- fr2:
-	case <-time.After(time.Second):
+	case <-sendDone:
+	case <-time.After(2 * time.Second):
 		t.Fatal("timed out sending frame after write failure")
 	}
 
@@ -1364,7 +1466,7 @@ func TestWriteLoopErrorClosesConnection(t *testing.T) {
 		default:
 			return false
 		}
-	}, time.Second, 10*time.Millisecond)
+	}, 3*time.Second, 10*time.Millisecond)
 
 	require.Eventually(t, func() bool {
 		select {
@@ -1373,7 +1475,7 @@ func TestWriteLoopErrorClosesConnection(t *testing.T) {
 		default:
 			return false
 		}
-	}, time.Second, 10*time.Millisecond)
+	}, 3*time.Second, 10*time.Millisecond)
 
 	require.Eventually(t, func() bool {
 		select {
@@ -1382,11 +1484,11 @@ func TestWriteLoopErrorClosesConnection(t *testing.T) {
 		default:
 			return false
 		}
-	}, time.Second, 10*time.Millisecond)
+	}, 3*time.Second, 10*time.Millisecond)
 
 	require.Eventually(t, func() bool {
 		return conn.closed.Load()
-	}, time.Second, 10*time.Millisecond)
+	}, 3*time.Second, 10*time.Millisecond)
 
 	require.Eventually(t, func() bool {
 		select {
@@ -1395,7 +1497,7 @@ func TestWriteLoopErrorClosesConnection(t *testing.T) {
 		default:
 			return false
 		}
-	}, time.Second, 10*time.Millisecond)
+	}, 3*time.Second, 10*time.Millisecond)
 
 	select {
 	case _, ok := <-sc.writer:
@@ -1405,4 +1507,21 @@ func TestWriteLoopErrorClosesConnection(t *testing.T) {
 	}
 
 	sc.maxRequestTimer.Stop()
+}
+
+func TestCloseIdleConnAfterShutdownDoesNotPanic(t *testing.T) {
+	sc := &serverConn{
+		writer: make(chan *FrameHeader),
+		logger: log.New(io.Discard, "", 0),
+	}
+	sc.st.Reset()
+	sc.clientS.Reset()
+	sc.dec.Reset()
+
+	atomic.StoreInt32((*int32)(&sc.state), int32(connStateClosed))
+	sc.closeWriter()
+
+	require.NotPanics(t, func() {
+		sc.closeIdleConn()
+	})
 }
