@@ -94,6 +94,9 @@ type serverConn struct {
 
 	debug  bool
 	logger fasthttp.Logger
+
+	closerOnce      sync.Once
+	writerCloseOnce sync.Once
 }
 
 func (sc *serverConn) closeIdleConn() {
@@ -101,7 +104,7 @@ func (sc *serverConn) closeIdleConn() {
 	if sc.debug {
 		sc.logger.Printf("Connection is idle. Closing\n")
 	}
-	close(sc.closer)
+	sc.closeCloser()
 	sc.signalConnClose()
 }
 
@@ -119,6 +122,24 @@ func (sc *serverConn) signalConnClose() {
 			_ = c.Close()
 		}(sc.c)
 	}
+}
+
+func (sc *serverConn) closeCloser() {
+	if sc.closer == nil {
+		return
+	}
+	sc.closerOnce.Do(func() {
+		close(sc.closer)
+	})
+}
+
+func (sc *serverConn) closeWriter() {
+	if sc.writer == nil {
+		return
+	}
+	sc.writerCloseOnce.Do(func() {
+		close(sc.writer)
+	})
 }
 
 func (sc *serverConn) Handshake() error {
@@ -167,7 +188,7 @@ func (sc *serverConn) Serve() error {
 		sc.stopPingTimer()
 		// close the writer here to ensure that no pending requests
 		// are writing to a closed channel
-		close(sc.writer)
+		sc.closeWriter()
 	}()
 
 	var err error
@@ -1409,9 +1430,25 @@ func (sc *serverConn) writeLoop() {
 
 		if err != nil {
 			sc.logger.Printf("ERROR: writeLoop: %s\n", err)
-			// TODO: sc.writer.err <- err
+			sc.handleWriteLoopFailure()
+			sc.drainWriter()
 			return
 		}
+	}
+}
+
+func (sc *serverConn) handleWriteLoopFailure() {
+	sc.signalConnClose()
+	sc.closeCloser()
+	sc.close()
+}
+
+func (sc *serverConn) drainWriter() {
+	if sc.writer == nil {
+		return
+	}
+	for fr := range sc.writer {
+		ReleaseFrameHeader(fr)
 	}
 }
 
