@@ -33,6 +33,28 @@ func newTestStream(id uint32) *Stream {
 	return strm
 }
 
+type writeFailConn struct {
+	net.Conn
+	writeErr  error
+	closed    atomic.Bool
+	closeOnce sync.Once
+}
+
+func (c *writeFailConn) Write(_ []byte) (int, error) {
+	return 0, c.writeErr
+}
+
+func (c *writeFailConn) Close() error {
+	var err error
+	c.closeOnce.Do(func() {
+		c.closed.Store(true)
+		if c.Conn != nil {
+			err = c.Conn.Close()
+		}
+	})
+	return err
+}
+
 func buildHeadersFrame(t *testing.T, streamID uint32, headers [][2]string) *FrameHeader {
 	return buildHeadersFrameWithOptions(t, streamID, headers, true, false)
 }
@@ -771,7 +793,7 @@ func TestHandleStreamsConcurrentSettings(t *testing.T) {
 	close(sc.closer)
 	<-streamsDone
 
-	close(sc.writer)
+	sc.closeWriter()
 	<-writerDone
 }
 
@@ -821,7 +843,7 @@ func TestHandleStreamsRespectsMaxConcurrentStreams(t *testing.T) {
 	close(sc.closer)
 	close(sc.reader)
 	<-streamsDone
-	close(sc.writer)
+	sc.closeWriter()
 
 	require.Equal(t, uint32(3), sc.lastID)
 
@@ -889,7 +911,7 @@ func TestServerConnSettingsWhileEncoding(t *testing.T) {
 
 	close(start)
 	wg.Wait()
-	close(sc.writer)
+	sc.closeWriter()
 	<-writerDone
 }
 
@@ -1270,4 +1292,107 @@ func TestHandleHeaderFrameConnectRejectsPathAndScheme(t *testing.T) {
 	require.ErrorAs(t, err, &h2Err)
 	require.Equal(t, ProtocolError, h2Err.Code())
 	require.Equal(t, FrameResetStream, h2Err.frameType)
+}
+
+func TestWriteLoopErrorClosesConnection(t *testing.T) {
+	srv, cli := net.Pipe()
+	t.Cleanup(func() {
+		_ = cli.Close()
+	})
+
+	conn := &writeFailConn{
+		Conn:     srv,
+		writeErr: errors.New("write failure"),
+	}
+
+	sc := &serverConn{
+		c:               conn,
+		br:              bufio.NewReader(conn),
+		bw:              bufio.NewWriter(conn),
+		writer:          make(chan *FrameHeader, 1),
+		reader:          make(chan *FrameHeader, 1),
+		maxRequestTimer: time.NewTimer(time.Hour),
+		maxRequestTime:  time.Hour,
+		closer:          make(chan struct{}),
+		logger:          log.New(io.Discard, "", 0),
+	}
+	sc.st.Reset()
+	sc.clientS.Reset()
+	sc.dec.Reset()
+
+	streamsDone := make(chan struct{})
+	go func() {
+		sc.handleStreams()
+		sc.stopPingTimer()
+		sc.closeWriter()
+		close(streamsDone)
+	}()
+
+	readDone := make(chan error, 1)
+	go func() {
+		readDone <- sc.readLoop()
+	}()
+
+	writeDone := make(chan struct{})
+	go func() {
+		sc.writeLoop()
+		close(writeDone)
+	}()
+
+	fr := AcquireFrameHeader()
+	data := AcquireFrame(FrameData).(*Data)
+	data.SetData([]byte("payload"))
+	data.SetEndStream(true)
+	fr.SetStream(1)
+	fr.SetBody(data)
+	sc.writer <- fr
+
+	require.Eventually(t, func() bool {
+		select {
+		case <-writeDone:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
+
+	require.Eventually(t, func() bool {
+		select {
+		case <-streamsDone:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
+
+	require.Eventually(t, func() bool {
+		select {
+		case <-sc.closer:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
+
+	require.Eventually(t, func() bool {
+		return conn.closed.Load()
+	}, time.Second, 10*time.Millisecond)
+
+	require.Eventually(t, func() bool {
+		select {
+		case <-readDone:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
+
+	select {
+	case _, ok := <-sc.writer:
+		require.False(t, ok)
+	default:
+		t.Fatal("writer channel not closed")
+	}
+
+	sc.maxRequestTimer.Stop()
 }
