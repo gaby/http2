@@ -585,7 +585,6 @@ func (sc *serverConn) handleStreams() {
 		strms.Del(strm.ID())
 
 		ctxPool.Put(strm.ctx)
-		streamPool.Put(strm)
 
 		if sc.debug {
 			sc.logger.Printf("Stream destroyed %d. Open streams: %d\n", strmID, openStreams)
@@ -1655,22 +1654,18 @@ func (sc *serverConn) handleSettings(st *Settings) {
 	// Hold streamsMu while updating initialClientWindow and adjusting streams
 	// to prevent race with stream creation and queueData
 	sc.streamsMu.Lock()
-	streamsToFlush := make([]*Stream, 0, len(sc.streams))
+	streamIDsToFlush := make([]uint32, 0, len(sc.streams))
 	if delta != 0 {
 		for _, strm := range sc.streams {
 			newWin := atomic.AddInt64(&strm.sendWindow, delta)
 			if newWin > maxWindowSize {
 				atomic.StoreInt64(&strm.sendWindow, maxWindowSize)
 			}
-			if strm != nil {
-				streamsToFlush = append(streamsToFlush, strm)
-			}
+			streamIDsToFlush = append(streamIDsToFlush, strm.ID())
 		}
 	} else {
 		for _, strm := range sc.streams {
-			if strm != nil {
-				streamsToFlush = append(streamsToFlush, strm)
-			}
+			streamIDsToFlush = append(streamIDsToFlush, strm.ID())
 		}
 	}
 	atomic.StoreInt64(&sc.initialClientWindow, newInitWin)
@@ -1690,8 +1685,10 @@ func (sc *serverConn) handleSettings(st *Settings) {
 	// Flush pending data after sending the ACK so the client observes the
 	// acknowledgement before any DATA that becomes sendable due to the window
 	// update. This avoids h2spec consuming the DATA while waiting for the ACK.
-	for _, strm := range streamsToFlush {
-		sc.flushPendingData(strm)
+	for _, id := range streamIDsToFlush {
+		if strm := sc.getActiveStream(id); strm != nil {
+			sc.flushPendingData(strm)
+		}
 	}
 
 	// If the initial window just increased, schedule a follow-up flush to
