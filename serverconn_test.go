@@ -86,6 +86,137 @@ func buildWindowUpdateFrame(_ *testing.T, streamID uint32, increment uint32) []b
 	return append(header, payload...)
 }
 
+func appendEmptySettingsFrame(payload []byte) []byte {
+	settings := []byte{
+		0x0, 0x0, 0x0,
+		byte(FrameSettings), 0x0,
+		0x0, 0x0, 0x0, 0x0,
+	}
+	return append(settings, payload...)
+}
+
+func writeEmptySettingsFrame(t *testing.T, w *bufio.Writer) {
+	t.Helper()
+	_, err := w.Write([]byte{
+		0x0, 0x0, 0x0,
+		byte(FrameSettings), 0x0,
+		0x0, 0x0, 0x0, 0x0,
+	})
+	require.NoError(t, err)
+}
+
+func TestFirstFrameMustBeSettings(t *testing.T) {
+	fr := buildHeadersFrame(t, 1, [][2]string{{"a", "b"}})
+	var b bytes.Buffer
+	bw := bufio.NewWriter(&b)
+	_, err := fr.WriteTo(bw)
+	require.NoError(t, err)
+	require.NoError(t, bw.Flush())
+	ReleaseFrameHeader(fr)
+
+	sc := &serverConn{
+		br:      bufio.NewReader(bytes.NewReader(b.Bytes())),
+		st:      Settings{},
+		clientS: Settings{},
+		writer:  make(chan *FrameHeader, 1),
+		logger:  log.New(io.Discard, "", 0),
+	}
+	sc.st.Reset()
+	sc.clientS.Reset()
+
+	err = sc.readLoop()
+	require.Error(t, err)
+	var h2Err Error
+	require.ErrorAs(t, err, &h2Err)
+	require.Equal(t, ProtocolError, h2Err.Code())
+	require.Equal(t, FrameGoAway, h2Err.frameType)
+
+	fr = <-sc.writer
+	require.Equal(t, FrameGoAway, fr.Type())
+	require.Equal(t, ProtocolError, fr.Body().(*GoAway).Code())
+	ReleaseFrameHeader(fr)
+}
+
+func TestFirstFrameSettingsAckSendsGoAway(t *testing.T) {
+	var st Settings
+	st.SetAck(true)
+
+	var b bytes.Buffer
+	bw := bufio.NewWriter(&b)
+
+	fr := AcquireFrameHeader()
+	fr.SetBody(&st)
+	_, err := fr.WriteTo(bw)
+	require.NoError(t, err)
+	require.NoError(t, bw.Flush())
+	ReleaseFrameHeader(fr)
+
+	sc := &serverConn{
+		br:      bufio.NewReader(bytes.NewReader(b.Bytes())),
+		st:      Settings{},
+		clientS: Settings{},
+		writer:  make(chan *FrameHeader, 1),
+		logger:  log.New(io.Discard, "", 0),
+	}
+	sc.st.Reset()
+	sc.clientS.Reset()
+
+	err = sc.readLoop()
+	require.Error(t, err)
+	var h2Err Error
+	require.ErrorAs(t, err, &h2Err)
+	require.Equal(t, ProtocolError, h2Err.Code())
+	require.Equal(t, FrameGoAway, h2Err.frameType)
+
+	fr = <-sc.writer
+	require.Equal(t, FrameGoAway, fr.Type())
+	require.Equal(t, ProtocolError, fr.Body().(*GoAway).Code())
+	ReleaseFrameHeader(fr)
+}
+
+func TestFirstFrameSettingsContinues(t *testing.T) {
+	var b bytes.Buffer
+	bw := bufio.NewWriter(&b)
+
+	settings := Settings{}
+	fr := AcquireFrameHeader()
+	fr.SetBody(&settings)
+	_, err := fr.WriteTo(bw)
+	require.NoError(t, err)
+	ReleaseFrameHeader(fr)
+
+	ping := &Ping{}
+	fr = AcquireFrameHeader()
+	fr.SetBody(ping)
+	_, err = fr.WriteTo(bw)
+	require.NoError(t, err)
+	require.NoError(t, bw.Flush())
+	ReleaseFrameHeader(fr)
+
+	sc := &serverConn{
+		br:      bufio.NewReader(bytes.NewReader(b.Bytes())),
+		st:      Settings{},
+		clientS: Settings{},
+		writer:  make(chan *FrameHeader, 2),
+		logger:  log.New(io.Discard, "", 0),
+	}
+	sc.st.Reset()
+	sc.clientS.Reset()
+
+	err = sc.readLoop()
+	require.ErrorIs(t, err, io.EOF)
+
+	fr = <-sc.writer
+	require.Equal(t, FrameSettings, fr.Type())
+	require.True(t, fr.Body().(*Settings).IsAck())
+	ReleaseFrameHeader(fr)
+
+	fr = <-sc.writer
+	require.Equal(t, FramePing, fr.Type())
+	require.True(t, fr.Body().(*Ping).IsAck())
+	ReleaseFrameHeader(fr)
+}
+
 func TestServerConnPingAndErrors(t *testing.T) {
 	writer := make(chan *FrameHeader, 4)
 	sc := &serverConn{
@@ -179,12 +310,12 @@ func TestConnectionWindowUnderflowSendsGoAway(t *testing.T) {
 }
 
 func TestConnectionWindowUpdateOverflowSendsFlowControlGoAway(t *testing.T) {
-	frame := buildWindowUpdateFrame(t, 0, uint32(maxWindowIncrement))
+	frame := appendEmptySettingsFrame(buildWindowUpdateFrame(t, 0, uint32(maxWindowIncrement)))
 	sc := &serverConn{
 		br:      bufio.NewReader(bytes.NewReader(frame)),
 		st:      Settings{},
 		clientS: Settings{},
-		writer:  make(chan *FrameHeader, 1),
+		writer:  make(chan *FrameHeader, 2),
 		logger:  log.New(io.Discard, "", 0),
 	}
 	sc.st.Reset()
@@ -200,18 +331,23 @@ func TestConnectionWindowUpdateOverflowSendsFlowControlGoAway(t *testing.T) {
 	require.EqualValues(t, maxWindowIncrement, atomic.LoadInt64(&sc.clientWindow))
 
 	fr := <-sc.writer
+	require.Equal(t, FrameSettings, fr.Type())
+	require.True(t, fr.Body().(*Settings).IsAck())
+	ReleaseFrameHeader(fr)
+
+	fr = <-sc.writer
 	require.Equal(t, FrameGoAway, fr.Type())
 	require.Equal(t, FlowControlError, fr.Body().(*GoAway).Code())
 	ReleaseFrameHeader(fr)
 }
 
 func TestConnectionWindowUpdateZeroSendsProtocolGoAway(t *testing.T) {
-	frame := buildWindowUpdateFrame(t, 0, 0)
+	frame := appendEmptySettingsFrame(buildWindowUpdateFrame(t, 0, 0))
 	sc := &serverConn{
 		br:      bufio.NewReader(bytes.NewReader(frame)),
 		st:      Settings{},
 		clientS: Settings{},
-		writer:  make(chan *FrameHeader, 1),
+		writer:  make(chan *FrameHeader, 2),
 		logger:  log.New(io.Discard, "", 0),
 	}
 	sc.st.Reset()
@@ -226,6 +362,11 @@ func TestConnectionWindowUpdateZeroSendsProtocolGoAway(t *testing.T) {
 	require.Equal(t, FrameGoAway, h2Err.frameType)
 
 	fr := <-sc.writer
+	require.Equal(t, FrameSettings, fr.Type())
+	require.True(t, fr.Body().(*Settings).IsAck())
+	ReleaseFrameHeader(fr)
+
+	fr = <-sc.writer
 	require.Equal(t, FrameGoAway, fr.Type())
 	require.Equal(t, ProtocolError, fr.Body().(*GoAway).Code())
 	ReleaseFrameHeader(fr)
@@ -789,7 +930,7 @@ func TestServerConnFrameSizeUsesServerSettings(t *testing.T) {
 		0x0, 0x0, 0x0, 0x1,
 	}
 	payload := bytes.Repeat([]byte{0}, maxSize)
-	data := append(header, payload...)
+	data := appendEmptySettingsFrame(append(header, payload...))
 
 	sc := &serverConn{
 		br:      bufio.NewReader(bytes.NewReader(data)),
@@ -900,6 +1041,7 @@ func TestUnknownFrameDuringHeaderBlockCausesConnectionError(t *testing.T) {
 	require.NoError(t, WritePreface(clientSide))
 
 	bw := bufio.NewWriter(clientSide)
+	writeEmptySettingsFrame(t, bw)
 	headers := buildHeadersFrameWithOptions(t, 1, [][2]string{
 		{":method", "GET"},
 		{":scheme", "https"},
