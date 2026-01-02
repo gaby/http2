@@ -1431,6 +1431,7 @@ func (sc *serverConn) writeLoop() {
 		if err != nil {
 			sc.logger.Printf("ERROR: writeLoop: %s\n", err)
 			sc.handleWriteLoopFailure()
+			sc.drainWriter()
 			return
 		}
 	}
@@ -1440,7 +1441,15 @@ func (sc *serverConn) handleWriteLoopFailure() {
 	sc.signalConnClose()
 	sc.closeCloser()
 	sc.close()
-	sc.closeWriter()
+}
+
+func (sc *serverConn) drainWriter() {
+	if sc.writer == nil {
+		return
+	}
+	for fr := range sc.writer {
+		ReleaseFrameHeader(fr)
+	}
 }
 
 func (sc *serverConn) handleSettings(st *Settings) {

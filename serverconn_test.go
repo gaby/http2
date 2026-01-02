@@ -1347,6 +1347,16 @@ func TestWriteLoopErrorClosesConnection(t *testing.T) {
 	fr.SetBody(data)
 	sc.writer <- fr
 
+	// Allow additional writes after the failure without panicking.
+	fr2 := AcquireFrameHeader()
+	fr2.SetStream(3)
+	fr2.SetBody(AcquireFrame(FrameResetStream))
+	select {
+	case sc.writer <- fr2:
+	case <-time.After(time.Second):
+		t.Fatal("timed out sending frame after write failure")
+	}
+
 	require.Eventually(t, func() bool {
 		select {
 		case <-writeDone:
