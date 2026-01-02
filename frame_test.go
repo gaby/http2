@@ -215,6 +215,62 @@ func TestPriorityRoundTrip(t *testing.T) {
 	require.Equal(t, uint8(20), decoded.Weight(), "weight mismatch")
 }
 
+func TestPriorityDeserializeRejectsInvalidPayloadLength(t *testing.T) {
+	testCases := []struct {
+		name              string
+		payload           []byte
+		stream            uint32
+		expectedFrameType FrameType
+	}{
+		{
+			name:              "undersizeConnection",
+			payload:           []byte{0x0, 0x0, 0x0, 0x1},
+			stream:            0,
+			expectedFrameType: FrameGoAway,
+		},
+		{
+			name:              "oversizeConnection",
+			payload:           []byte{0x0, 0x0, 0x0, 0x1, 0x2, 0x3},
+			stream:            0,
+			expectedFrameType: FrameGoAway,
+		},
+		{
+			name:              "undersizeStream",
+			payload:           []byte{0x0, 0x0, 0x0, 0x1},
+			stream:            1,
+			expectedFrameType: FrameResetStream,
+		},
+		{
+			name:              "oversizeStream",
+			payload:           []byte{0x0, 0x0, 0x0, 0x1, 0x2, 0x3},
+			stream:            1,
+			expectedFrameType: FrameResetStream,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			fr := AcquireFrameHeader()
+			defer ReleaseFrameHeader(fr)
+
+			fr.SetStream(tc.stream)
+			fr.payload = append(fr.payload[:0], tc.payload...)
+			fr.length = len(fr.payload)
+
+			pr := &Priority{}
+			fr.SetBody(pr)
+
+			err := pr.Deserialize(fr)
+			require.Error(t, err)
+
+			var h2Err Error
+			require.ErrorAs(t, err, &h2Err)
+			require.Equal(t, FrameSizeError, h2Err.Code())
+			require.Equal(t, tc.expectedFrameType, h2Err.frameType)
+		})
+	}
+}
+
 func TestPingRoundTrip(t *testing.T) {
 	fr := AcquireFrameHeader()
 	defer ReleaseFrameHeader(fr)
@@ -304,6 +360,61 @@ func TestWindowUpdateRejectsZeroIncrement(t *testing.T) {
 	err := wu.Deserialize(fr)
 	require.NoError(t, err)
 	require.Zero(t, wu.Increment())
+}
+
+func TestWindowUpdateDeserializeRejectsInvalidPayloadLength(t *testing.T) {
+	testCases := []struct {
+		name              string
+		stream            uint32
+		payload           []byte
+		expectedFrameType FrameType
+	}{
+		{
+			name:              "undersizeConnection",
+			stream:            0,
+			payload:           []byte{0x0, 0x0, 0x0},
+			expectedFrameType: FrameGoAway,
+		},
+		{
+			name:              "oversizeConnection",
+			stream:            0,
+			payload:           []byte{0x0, 0x0, 0x0, 0x1, 0x2},
+			expectedFrameType: FrameGoAway,
+		},
+		{
+			name:              "undersizeStream",
+			stream:            3,
+			payload:           []byte{0x0, 0x0, 0x0},
+			expectedFrameType: FrameGoAway,
+		},
+		{
+			name:              "oversizeStream",
+			stream:            3,
+			payload:           []byte{0x0, 0x0, 0x0, 0x1, 0x2},
+			expectedFrameType: FrameGoAway,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			fr := AcquireFrameHeader()
+			defer ReleaseFrameHeader(fr)
+
+			fr.SetStream(tc.stream)
+			fr.payload = append(fr.payload[:0], tc.payload...)
+			fr.length = len(fr.payload)
+
+			wu := &WindowUpdate{}
+			fr.SetBody(wu)
+			err := wu.Deserialize(fr)
+			require.Error(t, err)
+
+			var h2Err Error
+			require.ErrorAs(t, err, &h2Err)
+			require.Equal(t, FrameSizeError, h2Err.Code())
+			require.Equal(t, tc.expectedFrameType, h2Err.frameType)
+		})
+	}
 }
 
 func TestGoAwaySerializeAndDeserialize(t *testing.T) {

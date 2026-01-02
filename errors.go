@@ -111,6 +111,14 @@ func NewResetStreamError(e ErrorCode, debug string) Error {
 	}
 }
 
+func newFrameSizeError(stream uint32, debug string) Error {
+	if stream == 0 {
+		return NewGoAwayError(FrameSizeError, debug)
+	}
+
+	return NewResetStreamError(FrameSizeError, debug)
+}
+
 // Error implements the error interface.
 func (e Error) Error() string {
 	return fmt.Sprintf("%s: %s", e.code, e.debug)
