@@ -160,10 +160,6 @@ func (sc *serverConn) closeWriter() {
 		sc.writerClosed.Store(true)
 		close(sc.writer)
 		sc.writerMu.Unlock()
-
-		// Wait for any in-flight enqueue to complete after closing so blocked
-		// senders can unwind.
-		sc.writerSendWG.Wait()
 	})
 }
 
@@ -200,19 +196,17 @@ func (sc *serverConn) enqueueFrame(fr *FrameHeader) {
 		}
 	}
 
-	sc.writerSendWG.Add(1)
-	sc.writerMu.Unlock()
-	defer func() {
-		sc.writerSendWG.Done()
-		if r := recover(); r != nil {
-			ReleaseFrameHeader(fr)
-			if sc.debug {
-				sc.logger.Printf("enqueueFrame: writer closed, dropping frame: %v\n", r)
-			}
-		}
-	}()
+	defer sc.writerMu.Unlock()
 
-	sc.writer <- fr
+	// Avoid blocking forever: attempt send with a short timeout.
+	timer := time.NewTimer(100 * time.Millisecond)
+	defer timer.Stop()
+
+	select {
+	case sc.writer <- fr:
+	case <-timer.C:
+		ReleaseFrameHeader(fr)
+	}
 }
 
 func (sc *serverConn) Handshake() error {
@@ -964,26 +958,12 @@ func (sc *serverConn) enqueueFrameWithTimeout(fr *FrameHeader, d time.Duration) 
 		}
 	}
 
-	sc.writerSendWG.Add(1)
-	sc.writerMu.Unlock()
+	defer sc.writerMu.Unlock()
 
 	timer := time.NewTimer(d)
 	defer timer.Stop()
 
 	sent := true
-	defer func() {
-		sc.writerSendWG.Done()
-		if r := recover(); r != nil {
-			sent = false
-			ReleaseFrameHeader(fr)
-		}
-	}()
-
-	if sc.writerClosed.Load() {
-		ReleaseFrameHeader(fr)
-		return false
-	}
-
 	select {
 	case sc.writer <- fr:
 	case <-timer.C:
