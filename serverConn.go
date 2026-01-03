@@ -56,7 +56,6 @@ type serverConn struct {
 	reader        chan *FrameHeader
 	writerMu      sync.Mutex
 	writerClosed  atomic.Bool
-	writerSendWG  sync.WaitGroup
 
 	streamsMu sync.Mutex
 	streams   map[uint32]*Stream
@@ -159,14 +158,12 @@ func (sc *serverConn) closeWriter() {
 	sc.writerCloseOnce.Do(func() {
 		sc.writerMu.Lock()
 		sc.writerClosed.Store(true)
-		sc.writerMu.Unlock()
-
-		// Wait for any in-flight enqueue to complete before closing.
-		sc.writerSendWG.Wait()
-
-		sc.writerMu.Lock()
 		close(sc.writer)
 		sc.writerMu.Unlock()
+
+		// Wait for any in-flight enqueue to complete after closing so blocked
+		// senders can unwind.
+		sc.writerSendWG.Wait()
 	})
 }
 
