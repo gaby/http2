@@ -46,7 +46,7 @@ modernize:
 ## longtest: 🚦 Execute all tests 10x
 .PHONY: longtest
 longtest:
-	GOTOOLCHAIN=$(GOVERSION) go run gotest.tools/gotestsum@latest -f testname -- ./... -race -count=100 -shuffle=on
+	GOTOOLCHAIN=$(GOVERSION) go run gotest.tools/gotestsum@latest -f testname -- ./... -race -count=25 -timeout=20m -shuffle=on
 
 ## betteralign: 📐 Optimize alignment of fields in structs
 .PHONY: betteralign

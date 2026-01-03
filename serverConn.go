@@ -205,8 +205,13 @@ func (sc *serverConn) enqueueFrame(fr *FrameHeader) {
 		}
 	}()
 
+	// Keep the writerMu locked while sending to avoid racing with closeWriter.
+	// The channel is buffered, so this should only block if the writer goroutine is stuck.
+	defer func() {
+		sc.writerMu.Unlock()
+	}()
+
 	sc.writer <- fr
-	sc.writerMu.Unlock()
 }
 
 func (sc *serverConn) Handshake() error {
@@ -893,17 +898,6 @@ func (sc *serverConn) writeGoAway(strm uint32, code ErrorCode, message string) {
 
 	fr.SetBody(ga)
 
-	// Use defer/recover to prevent panic if channel is closed
-	defer func() {
-		if r := recover(); r != nil {
-			// Channel was closed, release the frame
-			ReleaseFrameHeader(fr)
-			if sc.debug {
-				sc.logger.Printf("writeGoAway: writer channel closed, skipping: %v\n", r)
-			}
-		}
-	}()
-
 	sc.enqueueFrame(fr)
 
 	if strm != 0 {
@@ -979,6 +973,13 @@ func (sc *serverConn) enqueueFrameWithTimeout(fr *FrameHeader, d time.Duration) 
 		}
 	}()
 
+	if sc.writerClosed.Load() {
+		sc.writerMu.Unlock()
+		ReleaseFrameHeader(fr)
+		return false
+	}
+
+	defer sc.writerMu.Unlock()
 	select {
 	case sc.writer <- fr:
 	case <-timer.C:
@@ -988,7 +989,6 @@ func (sc *serverConn) enqueueFrameWithTimeout(fr *FrameHeader, d time.Duration) 
 		ReleaseFrameHeader(fr)
 	}
 
-	sc.writerMu.Unlock()
 	return sent
 }
 
@@ -1462,11 +1462,7 @@ func (s *streamWrite) Write(body []byte) (n int, err error) {
 
 			fr.SetBody(data)
 
-			if s.sc != nil {
-				s.sc.enqueueFrame(fr)
-			} else {
-				s.sendFrame(fr)
-			}
+			s.sendFrame(fr)
 		}
 
 		return len(body), nil

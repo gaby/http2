@@ -2,6 +2,7 @@ package http2
 
 import (
 	"bufio"
+	"fmt"
 	"io"
 	"net"
 	"sort"
@@ -122,7 +123,7 @@ func TestIssue52(t *testing.T) {
 		t.Skip("skipping stress test in short mode")
 	}
 	for i := 0; i < 100; i++ {
-		t.Run("iteration", func(t *testing.T) {
+		t.Run(fmt.Sprintf("iteration_%d", i), func(t *testing.T) {
 			testIssue52(t)
 		})
 	}
