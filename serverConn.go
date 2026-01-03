@@ -156,8 +156,8 @@ func (sc *serverConn) closeWriter() {
 		return
 	}
 	sc.writerCloseOnce.Do(func() {
-		sc.writerMu.Lock()
 		sc.writerClosed.Store(true)
+		sc.writerMu.Lock()
 		close(sc.writer)
 		sc.writerMu.Unlock()
 	})
@@ -196,22 +196,12 @@ func (sc *serverConn) enqueueFrame(fr *FrameHeader) {
 		}
 	}
 
-	defer func() {
-		if r := recover(); r != nil {
-			ReleaseFrameHeader(fr)
-			if sc.debug {
-				sc.logger.Printf("enqueueFrame: writer closed, dropping frame: %v\n", r)
-			}
-		}
-	}()
-
-	// Keep the writerMu locked while sending to avoid racing with closeWriter.
-	// The channel is buffered, so this should only block if the writer goroutine is stuck.
-	defer func() {
-		sc.writerMu.Unlock()
-	}()
-
-	sc.writer <- fr
+	defer sc.writerMu.Unlock()
+	select {
+	case sc.writer <- fr:
+	default:
+		ReleaseFrameHeader(fr)
+	}
 }
 
 func (sc *serverConn) Handshake() error {
@@ -963,32 +953,16 @@ func (sc *serverConn) enqueueFrameWithTimeout(fr *FrameHeader, d time.Duration) 
 		}
 	}
 
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-
 	sent := true
-	defer func() {
-		if r := recover(); r != nil {
-			sent = false
-		}
-	}()
-
-	if sc.writerClosed.Load() {
-		sc.writerMu.Unlock()
-		ReleaseFrameHeader(fr)
-		return false
-	}
-
 	defer sc.writerMu.Unlock()
 	select {
 	case sc.writer <- fr:
-	case <-timer.C:
+	default:
 		sent = false
 	}
 	if !sent {
 		ReleaseFrameHeader(fr)
 	}
-
 	return sent
 }
 
@@ -1606,6 +1580,7 @@ func (sc *serverConn) handleWriteLoopFailure() {
 	sc.signalConnClose()
 	sc.closeCloser()
 	sc.close()
+	sc.closeWriter()
 }
 
 func (sc *serverConn) drainWriter() {
