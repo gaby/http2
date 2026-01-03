@@ -43,4 +43,4 @@ jobs:
           go-version: stable
 
       - name: Test
-        run: go run gotest.tools/gotestsum@latest -f testname -- ./... -race -count=25 -timeout=30m -shuffle=on
+        run: go run gotest.tools/gotestsum@latest -f testname -- ./... -race -count=25 -shuffle=on

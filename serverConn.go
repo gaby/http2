@@ -56,6 +56,7 @@ type serverConn struct {
 	reader        chan *FrameHeader
 	writerMu      sync.Mutex
 	writerClosed  atomic.Bool
+	writerSendWG  sync.WaitGroup
 
 	streamsMu sync.Mutex
 	streams   map[uint32]*Stream
@@ -156,7 +157,13 @@ func (sc *serverConn) closeWriter() {
 		return
 	}
 	sc.writerCloseOnce.Do(func() {
+		sc.writerMu.Lock()
 		sc.writerClosed.Store(true)
+		sc.writerMu.Unlock()
+
+		// Wait for any in-flight enqueue to complete before closing.
+		sc.writerSendWG.Wait()
+
 		sc.writerMu.Lock()
 		close(sc.writer)
 		sc.writerMu.Unlock()
@@ -196,12 +203,19 @@ func (sc *serverConn) enqueueFrame(fr *FrameHeader) {
 		}
 	}
 
-	defer sc.writerMu.Unlock()
-	select {
-	case sc.writer <- fr:
-	default:
-		ReleaseFrameHeader(fr)
-	}
+	sc.writerSendWG.Add(1)
+	sc.writerMu.Unlock()
+	defer func() {
+		sc.writerSendWG.Done()
+		if r := recover(); r != nil {
+			ReleaseFrameHeader(fr)
+			if sc.debug {
+				sc.logger.Printf("enqueueFrame: writer closed, dropping frame: %v\n", r)
+			}
+		}
+	}()
+
+	sc.writer <- fr
 }
 
 func (sc *serverConn) Handshake() error {
@@ -953,16 +967,33 @@ func (sc *serverConn) enqueueFrameWithTimeout(fr *FrameHeader, d time.Duration) 
 		}
 	}
 
+	sc.writerSendWG.Add(1)
+	sc.writerMu.Unlock()
+
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
 	sent := true
-	defer sc.writerMu.Unlock()
+	defer func() {
+		sc.writerSendWG.Done()
+		if r := recover(); r != nil {
+			sent = false
+			ReleaseFrameHeader(fr)
+		}
+	}()
+
+	if sc.writerClosed.Load() {
+		ReleaseFrameHeader(fr)
+		return false
+	}
+
 	select {
 	case sc.writer <- fr:
-	default:
+	case <-timer.C:
 		sent = false
-	}
-	if !sent {
 		ReleaseFrameHeader(fr)
 	}
+
 	return sent
 }
 
