@@ -564,7 +564,12 @@ func (sc *serverConn) readLoop() (err error) {
 
 		if frameErr != nil {
 			if isConnectionError(frameErr) {
-				sc.signalConnError()
+				// Delay signaling close very slightly so the GOAWAY has a chance
+				// to flush before we tear down the socket.
+				go func() {
+					time.Sleep(20 * time.Millisecond)
+					sc.signalConnError()
+				}()
 			}
 			err = frameErr
 		}
