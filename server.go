@@ -47,6 +47,10 @@ type Server struct {
 func (s *Server) ServeConn(c net.Conn) error {
 	defer func() { _ = c.Close() }()
 
+	// Bound the TLS/preface handshake to avoid hangs on misbehaving clients.
+	// The deadline is cleared after the HTTP/2 connection is fully set up.
+	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+
 	if !ReadPreface(c) {
 		return errors.New("wrong preface")
 	}
@@ -65,6 +69,9 @@ func (s *Server) ServeConn(c net.Conn) error {
 		logger:         s.s.Logger,
 		debug:          s.cnf.Debug,
 	}
+
+	// Clear handshake deadline now that the connection is initialized.
+	_ = c.SetDeadline(time.Time{})
 
 	if sc.logger == nil {
 		sc.logger = logger

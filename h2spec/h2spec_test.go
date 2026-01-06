@@ -302,8 +302,17 @@ func launchLocalServer(t *testing.T) int {
 	}
 	http2.ConfigureServer(server, http2.ServerConfig{})
 
-	ln, err := net.Listen("tcp4", "127.0.0.1:0")
-	require.NoError(t, err)
+	var ln net.Listener
+	for i := 0; i < 5; i++ {
+		ln, err = net.Listen("tcp", "127.0.0.1:0")
+		if err == nil {
+			break
+		}
+		// Some environments intermittently deny tcp4 binds; retry on the
+		// generic "tcp" network with a short backoff to reduce flakes.
+		time.Sleep(50 * time.Millisecond)
+	}
+	require.NoError(t, err, "failed to bind local h2spec test server")
 
 	// Ensure listener is closed when test ends
 	t.Cleanup(func() {
