@@ -140,12 +140,10 @@ func (sc *serverConn) signalConnError() {
 
 func (sc *serverConn) signalConnClose() {
 	if sc.closing.CompareAndSwap(false, true) {
-		sc.closeCloser()
-		sc.closeWriter()
 		if sc.c != nil {
 			_ = sc.c.SetReadDeadline(time.Now())
 			go func(c net.Conn) {
-				time.Sleep(10 * time.Millisecond)
+				time.Sleep(50 * time.Millisecond)
 				_ = c.Close()
 			}(sc.c)
 		}
