@@ -195,27 +195,10 @@ func (sc *serverConn) enqueueFrameInternal(fr *FrameHeader, d time.Duration) boo
 		}
 	}
 
-	trySend := func(ch chan *FrameHeader, timer <-chan time.Time) (sent bool) {
-		defer func() {
-			if r := recover(); r != nil {
-				sent = false
-				if sc.debug {
-					sc.logger.Printf("enqueueFrame: writer closed, dropping frame: %v\n", r)
-				}
-			}
-		}()
-
-		select {
-		case ch <- fr:
-			return true
-		case <-timer:
-			return false
-		}
-	}
-
 	sc.writerMu.RLock()
+	defer sc.writerMu.RUnlock()
+
 	if sc.writerClosed.Load() {
-		sc.writerMu.RUnlock()
 		return false
 	}
 
@@ -226,29 +209,20 @@ func (sc *serverConn) enqueueFrameInternal(fr *FrameHeader, d time.Duration) boo
 	timer := time.NewTimer(d)
 	defer timer.Stop()
 
+	defer func() {
+		if r := recover(); r != nil {
+			if sc.debug {
+				sc.logger.Printf("enqueueFrame: writer closed, dropping frame: %v\n", r)
+			}
+		}
+	}()
+
 	select {
 	case sc.writer <- fr:
-		sc.writerMu.RUnlock()
 		return true
 	case <-timer.C:
-		sc.writerMu.RUnlock()
 		return false
-	default:
 	}
-
-	// If the channel is full, wait with the lock released but re-check closure
-	// before committing to the send to avoid racing with closeWriter.
-	sc.writerMu.RUnlock()
-
-	if sc.closer != nil {
-		select {
-		case <-sc.closer:
-			return false
-		default:
-		}
-	}
-
-	return trySend(sc.writer, timer.C)
 }
 
 func (sc *serverConn) Handshake() error {
