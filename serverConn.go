@@ -680,6 +680,12 @@ loop:
 				return
 			}
 
+			// Ensure idle connections close even if the idle timer is lost; keep
+			// a read deadline aligned with maxIdleTime after each client frame.
+			if sc.maxIdleTime > 0 && sc.c != nil {
+				_ = sc.c.SetReadDeadline(time.Now().Add(sc.maxIdleTime))
+			}
+
 			isClosing := atomic.LoadInt32((*int32)(&sc.state)) == int32(connStateClosed)
 
 			var strm *Stream
