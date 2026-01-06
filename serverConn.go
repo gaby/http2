@@ -139,12 +139,16 @@ func (sc *serverConn) signalConnError() {
 }
 
 func (sc *serverConn) signalConnClose() {
-	if sc.closing.CompareAndSwap(false, true) && sc.c != nil {
-		_ = sc.c.SetReadDeadline(time.Now())
-		go func(c net.Conn) {
-			time.Sleep(10 * time.Millisecond)
-			_ = c.Close()
-		}(sc.c)
+	if sc.closing.CompareAndSwap(false, true) {
+		sc.closeCloser()
+		sc.closeWriter()
+		if sc.c != nil {
+			_ = sc.c.SetReadDeadline(time.Now())
+			go func(c net.Conn) {
+				time.Sleep(10 * time.Millisecond)
+				_ = c.Close()
+			}(sc.c)
+		}
 	}
 }
 
@@ -453,6 +457,12 @@ func (sc *serverConn) readLoop() (err error) {
 				}
 			}
 
+			var h2Err Error
+			if errors.As(err, &h2Err) && isConnectionError(h2Err) {
+				sc.writeError(nil, h2Err)
+				sc.signalConnError()
+			}
+
 			break
 		}
 
@@ -487,6 +497,11 @@ func (sc *serverConn) readLoop() (err error) {
 				sc.writeError(nil, cerr)
 				if isConnectionError(cerr) {
 					sc.signalConnError()
+					sc.closeWriter()
+					sc.closeCloser()
+					if sc.c != nil {
+						_ = sc.c.Close()
+					}
 					ReleaseFrameHeader(fr)
 					err = cerr
 					break
