@@ -54,7 +54,7 @@ type serverConn struct {
 	currentWindow int32
 	writer        chan *FrameHeader
 	reader        chan *FrameHeader
-	writerMu      sync.Mutex
+	writerMu      sync.RWMutex
 	writerClosed  atomic.Bool
 
 	streamsMu sync.Mutex
@@ -100,6 +100,12 @@ type serverConn struct {
 	closerOnce      sync.Once
 	writerCloseOnce sync.Once
 }
+
+// defaultEnqueueTimeout bounds how long a sender will wait when the writer
+// channel is full. A generous timeout avoids dropping frames under normal
+// load, while still letting shutdown make progress if the writer loop is
+// wedged.
+const defaultEnqueueTimeout = 2 * time.Second
 
 func (sc *serverConn) closeIdleConn() {
 	if sc.isClosed() || sc.closing.Load() {
@@ -158,55 +164,64 @@ func (sc *serverConn) closeWriter() {
 	sc.writerCloseOnce.Do(func() {
 		sc.writerMu.Lock()
 		sc.writerClosed.Store(true)
+		defer func() { _ = recover() }()
 		close(sc.writer)
 		sc.writerMu.Unlock()
 	})
 }
 
 func (sc *serverConn) enqueueFrame(fr *FrameHeader) {
+	if sc.enqueueFrameInternal(fr, defaultEnqueueTimeout) {
+		return
+	}
+
+	ReleaseFrameHeader(fr)
+}
+
+func (sc *serverConn) enqueueFrameInternal(fr *FrameHeader, d time.Duration) bool {
 	if sc.writer == nil {
-		ReleaseFrameHeader(fr)
-		return
+		return false
 	}
 
-	if sc.writerClosed.Load() {
-		ReleaseFrameHeader(fr)
-		return
-	}
-
-	if sc.closing.Load() {
-		ReleaseFrameHeader(fr)
-		return
+	if sc.writerClosed.Load() || sc.closing.Load() {
+		return false
 	}
 
 	if sc.closer != nil {
 		select {
 		case <-sc.closer:
-			ReleaseFrameHeader(fr)
-			return
+			return false
 		default:
 		}
 	}
 
-	sc.writerMu.Lock()
+	sc.writerMu.RLock()
 	if sc.writerClosed.Load() {
-		sc.writerMu.Unlock()
-		ReleaseFrameHeader(fr)
-		return
+		sc.writerMu.RUnlock()
+		return false
 	}
 
-	timer := time.NewTimer(100 * time.Millisecond)
+	defer func() {
+		sc.writerMu.RUnlock()
+		if r := recover(); r != nil {
+			if sc.debug {
+				sc.logger.Printf("enqueueFrame: writer closed, dropping frame: %v\n", r)
+			}
+		}
+	}()
+
+	if d <= 0 {
+		d = defaultEnqueueTimeout
+	}
+
+	timer := time.NewTimer(d)
 	defer timer.Stop()
 
-	sent := true
-	defer sc.writerMu.Unlock()
 	select {
 	case sc.writer <- fr:
+		return true
 	case <-timer.C:
-		sent = false
-	}
-	if !sent {
-		ReleaseFrameHeader(fr)
+		return false
 	}
 }
 
@@ -839,6 +854,14 @@ loop:
 				}
 			}
 
+			// Fallback: if the client signaled EndStream on the request but the
+			// state machine didn't land in HalfClosed (for example due to some
+			// unexpected sequencing), ensure the response still starts once.
+			if !strm.responseStarted && fr.Type() == FrameHeaders && fr.Flags().Has(FlagEndStream) {
+				strm.responseStarted = true
+				sc.handleEndRequest(strm)
+			}
+
 			if strm.State() == StreamStateClosed {
 				closeStream(strm)
 			}
@@ -932,32 +955,8 @@ func (sc *serverConn) writeGoAwayWithTimeout(strm uint32, code ErrorCode, messag
 }
 
 func (sc *serverConn) enqueueFrameWithTimeout(fr *FrameHeader, d time.Duration) bool {
-	if sc.writer == nil {
-		ReleaseFrameHeader(fr)
-		return false
-	}
-
-	if sc.writerClosed.Load() || sc.closing.Load() {
-		ReleaseFrameHeader(fr)
-		return false
-	}
-
-	sc.writerMu.Lock()
-	if sc.writerClosed.Load() {
-		sc.writerMu.Unlock()
-		ReleaseFrameHeader(fr)
-		return false
-	}
-
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-
-	sent := true
-	defer sc.writerMu.Unlock()
-	select {
-	case sc.writer <- fr:
-	case <-timer.C:
-		sent = false
+	sent := sc.enqueueFrameInternal(fr, d)
+	if !sent {
 		ReleaseFrameHeader(fr)
 	}
 
