@@ -183,7 +183,7 @@ func (sc *serverConn) enqueueFrameInternal(fr *FrameHeader, d time.Duration) boo
 		return false
 	}
 
-	if sc.writerClosed.Load() || sc.closing.Load() {
+	if sc.closing.Load() {
 		return false
 	}
 
@@ -195,20 +195,29 @@ func (sc *serverConn) enqueueFrameInternal(fr *FrameHeader, d time.Duration) boo
 		}
 	}
 
+	trySend := func(ch chan *FrameHeader, timer <-chan time.Time) (sent bool) {
+		defer func() {
+			if r := recover(); r != nil {
+				sent = false
+				if sc.debug {
+					sc.logger.Printf("enqueueFrame: writer closed, dropping frame: %v\n", r)
+				}
+			}
+		}()
+
+		select {
+		case ch <- fr:
+			return true
+		case <-timer:
+			return false
+		}
+	}
+
 	sc.writerMu.RLock()
 	if sc.writerClosed.Load() {
 		sc.writerMu.RUnlock()
 		return false
 	}
-
-	defer func() {
-		sc.writerMu.RUnlock()
-		if r := recover(); r != nil {
-			if sc.debug {
-				sc.logger.Printf("enqueueFrame: writer closed, dropping frame: %v\n", r)
-			}
-		}
-	}()
 
 	if d <= 0 {
 		d = defaultEnqueueTimeout
@@ -219,10 +228,27 @@ func (sc *serverConn) enqueueFrameInternal(fr *FrameHeader, d time.Duration) boo
 
 	select {
 	case sc.writer <- fr:
+		sc.writerMu.RUnlock()
 		return true
 	case <-timer.C:
+		sc.writerMu.RUnlock()
 		return false
+	default:
 	}
+
+	// If the channel is full, wait with the lock released but re-check closure
+	// before committing to the send to avoid racing with closeWriter.
+	sc.writerMu.RUnlock()
+
+	if sc.closer != nil {
+		select {
+		case <-sc.closer:
+			return false
+		default:
+		}
+	}
+
+	return trySend(sc.writer, timer.C)
 }
 
 func (sc *serverConn) Handshake() error {
@@ -1573,7 +1599,6 @@ func (sc *serverConn) writeLoop() {
 }
 
 func (sc *serverConn) handleWriteLoopFailure() {
-	sc.writerClosed.Store(true)
 	sc.signalConnClose()
 	sc.closeCloser()
 	sc.close()
@@ -1835,11 +1860,6 @@ func (sc *serverConn) queueData(strm *Stream, data []byte, endStream bool) {
 		if streamWin <= 0 || connWin <= 0 {
 			sc.appendPendingData(strm, data, endStream)
 			sc.streamsMu.Unlock()
-			// If window credit arrived concurrently (e.g. via SETTINGS) after we
-			// decided to pend, flush immediately to avoid leaving data stuck.
-			if atomic.LoadInt64(&strm.sendWindow) > 0 && atomic.LoadInt64(&sc.clientWindow) > 0 {
-				sc.flushPendingData(strm)
-			}
 			return
 		}
 
@@ -1847,9 +1867,6 @@ func (sc *serverConn) queueData(strm *Stream, data []byte, endStream bool) {
 		if toSend <= 0 {
 			sc.streamsMu.Unlock()
 			sc.appendPendingData(strm, data, endStream)
-			if atomic.LoadInt64(&strm.sendWindow) > 0 && atomic.LoadInt64(&sc.clientWindow) > 0 {
-				sc.flushPendingData(strm)
-			}
 			return
 		}
 
