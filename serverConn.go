@@ -940,6 +940,10 @@ func (sc *serverConn) writeGoAway(strm uint32, code ErrorCode, message string) {
 
 	atomic.StoreInt32((*int32)(&sc.state), int32(connStateClosed))
 
+	if strm == 0 {
+		sc.signalConnClose()
+	}
+
 	if sc.debug {
 		sc.logger.Printf(
 			"%s: GoAway(stream=%d, code=%s): %s\n",
@@ -965,6 +969,9 @@ func (sc *serverConn) writeGoAwayWithTimeout(strm uint32, code ErrorCode, messag
 	}
 
 	atomic.StoreInt32((*int32)(&sc.state), int32(connStateClosed))
+	if strm == 0 {
+		sc.signalConnClose()
+	}
 
 	return sent
 }
