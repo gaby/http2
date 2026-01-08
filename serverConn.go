@@ -1687,14 +1687,15 @@ func (sc *serverConn) handleSettings(st *Settings) {
 	// catch streams that might queue data immediately after this settings frame
 	// (e.g. when HEADERS and SETTINGS arrive back-to-back).
 	if st.HasMaxWindowSize() && delta > 0 {
-		// Do a few retries with small delays to cover races between incoming
+		// Do a few retries with delays to cover races between incoming
 		// SETTINGS and the request handler queueing its response.
+		// Use moderate delays to account for slower CI environments while keeping tests fast.
 		go func() {
 			for i := 0; i < 3; i++ {
 				select {
 				case <-sc.closer:
 					return
-				case <-time.After(10 * time.Millisecond):
+				case <-time.After(25 * time.Millisecond):
 					if sc.isClosed() {
 						return
 					}
@@ -1706,7 +1707,7 @@ func (sc *serverConn) handleSettings(st *Settings) {
 			select {
 			case <-sc.closer:
 				return
-			case <-time.After(50 * time.Millisecond):
+			case <-time.After(100 * time.Millisecond):
 				if sc.isClosed() {
 					return
 				}
