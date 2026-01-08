@@ -292,6 +292,7 @@ func (sc *serverConn) Serve() error {
 	}
 
 	close(sc.reader)
+	sc.closeCloser()
 	sc.close()
 	<-writerDone
 
@@ -1690,37 +1691,29 @@ func (sc *serverConn) handleSettings(st *Settings) {
 		// SETTINGS and the request handler queueing its response.
 		go func() {
 			for i := 0; i < 3; i++ {
+				select {
+				case <-sc.closer:
+					return
+				case <-time.After(10 * time.Millisecond):
+					if sc.isClosed() {
+						return
+					}
+					sc.forEachActiveStream(func(strm *Stream) {
+						sc.flushPendingData(strm)
+					})
+				}
+			}
+			select {
+			case <-sc.closer:
+				return
+			case <-time.After(50 * time.Millisecond):
 				if sc.isClosed() {
 					return
-				}
-				if sc.closer != nil {
-					select {
-					case <-sc.closer:
-						return
-					case <-time.After(10 * time.Millisecond):
-					}
-				} else {
-					time.Sleep(10 * time.Millisecond)
 				}
 				sc.forEachActiveStream(func(strm *Stream) {
 					sc.flushPendingData(strm)
 				})
 			}
-			if sc.isClosed() {
-				return
-			}
-			if sc.closer != nil {
-				select {
-				case <-sc.closer:
-					return
-				case <-time.After(50 * time.Millisecond):
-				}
-			} else {
-				time.Sleep(50 * time.Millisecond)
-			}
-			sc.forEachActiveStream(func(strm *Stream) {
-				sc.flushPendingData(strm)
-			})
 		}()
 	}
 }
