@@ -292,7 +292,6 @@ func (sc *serverConn) Serve() error {
 	}
 
 	close(sc.reader)
-	sc.closeCloser()
 	sc.close()
 	<-writerDone
 
