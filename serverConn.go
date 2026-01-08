@@ -1690,15 +1690,23 @@ func (sc *serverConn) handleSettings(st *Settings) {
 		// SETTINGS and the request handler queueing its response.
 		go func() {
 			for i := 0; i < 3; i++ {
-				time.Sleep(10 * time.Millisecond)
+				select {
+				case <-sc.closer:
+					return
+				case <-time.After(10 * time.Millisecond):
+					sc.forEachActiveStream(func(strm *Stream) {
+						sc.flushPendingData(strm)
+					})
+				}
+			}
+			select {
+			case <-sc.closer:
+				return
+			case <-time.After(50 * time.Millisecond):
 				sc.forEachActiveStream(func(strm *Stream) {
 					sc.flushPendingData(strm)
 				})
 			}
-			time.Sleep(50 * time.Millisecond)
-			sc.forEachActiveStream(func(strm *Stream) {
-				sc.flushPendingData(strm)
-			})
 		}()
 	}
 }
