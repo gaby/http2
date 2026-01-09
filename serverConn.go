@@ -1805,7 +1805,9 @@ func (sc *serverConn) appendPendingData(strm *Stream, data []byte, endStream boo
 	// If this is the first pending data added (transition from empty to non-empty),
 	// schedule an async flush attempt. This handles the race where SETTINGS increases
 	// window before the handler queues data.
-	if !hadPending && len(data) > 0 {
+	// Don't spawn goroutine if connection is already closing to avoid interfering
+	// with shutdown sequences (e.g., idle timeout sending GOAWAY).
+	if !hadPending && len(data) > 0 && !sc.closing.Load() && !sc.isClosed() {
 		go func() {
 			// Small delay to batch multiple rapid queueData calls
 			select {
@@ -1813,8 +1815,7 @@ func (sc *serverConn) appendPendingData(strm *Stream, data []byte, endStream boo
 				return
 			case <-time.After(5 * time.Millisecond):
 			}
-			// Check both isClosed and closing flags to avoid interfering with
-			// connection shutdown (e.g., idle timeout sending GOAWAY).
+			// Double-check flags before flushing
 			if !sc.isClosed() && !sc.closing.Load() {
 				sc.flushPendingData(strm)
 			}
