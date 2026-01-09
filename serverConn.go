@@ -294,6 +294,10 @@ func (sc *serverConn) Serve() error {
 	close(sc.reader)
 	sc.close()
 	<-writerDone
+	
+	// Close the closer channel after all goroutines have finished to ensure
+	// the handleSettings goroutine can exit cleanly.
+	sc.closeCloser()
 
 	return err
 }
@@ -1681,26 +1685,6 @@ func (sc *serverConn) handleSettings(st *Settings) {
 			sc.flushPendingData(strm)
 		}
 	}
-
-	// If the initial window just increased, schedule a follow-up flush to
-	// catch streams that might queue data immediately after this settings frame
-	// (e.g. when HEADERS and SETTINGS arrive back-to-back).
-	if st.HasMaxWindowSize() && delta > 0 {
-		// Do a few retries with small delays to cover races between incoming
-		// SETTINGS and the request handler queueing its response.
-		go func() {
-			for i := 0; i < 3; i++ {
-				time.Sleep(10 * time.Millisecond)
-				sc.forEachActiveStream(func(strm *Stream) {
-					sc.flushPendingData(strm)
-				})
-			}
-			time.Sleep(50 * time.Millisecond)
-			sc.forEachActiveStream(func(strm *Stream) {
-				sc.flushPendingData(strm)
-			})
-		}()
-	}
 }
 
 const maxWindowIncrement = 1<<31 - 1
@@ -1811,11 +1795,32 @@ func (sc *serverConn) queueDataFrame(strm *Stream, data []byte, endStream bool) 
 
 func (sc *serverConn) appendPendingData(strm *Stream, data []byte, endStream bool) {
 	strm.pendingMu.Lock()
+	hadPending := len(strm.pendingData) > 0
 	strm.pendingData = append(strm.pendingData, data...)
 	if endStream {
 		strm.pendingDataEndStream = true
 	}
 	strm.pendingMu.Unlock()
+
+	// If this is the first pending data added (transition from empty to non-empty),
+	// schedule an async flush attempt. This handles the race where SETTINGS increases
+	// window before the handler queues data.
+	// Don't spawn goroutine if connection is already closing to avoid interfering
+	// with shutdown sequences (e.g., idle timeout sending GOAWAY).
+	if !hadPending && len(data) > 0 && !sc.closing.Load() && !sc.isClosed() {
+		go func() {
+			// Small delay to batch multiple rapid queueData calls
+			select {
+			case <-sc.closer:
+				return
+			case <-time.After(5 * time.Millisecond):
+			}
+			// Double-check flags before flushing
+			if !sc.isClosed() && !sc.closing.Load() {
+				sc.flushPendingData(strm)
+			}
+		}()
+	}
 }
 
 func (sc *serverConn) markResponseEnded(strm *Stream) {
