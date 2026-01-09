@@ -1685,41 +1685,6 @@ func (sc *serverConn) handleSettings(st *Settings) {
 			sc.flushPendingData(strm)
 		}
 	}
-
-	// If the initial window just increased, schedule a follow-up flush to
-	// catch streams that might queue data immediately after this settings frame
-	// (e.g. when HEADERS and SETTINGS arrive back-to-back).
-	if st.HasMaxWindowSize() && delta > 0 {
-		// Do a few retries with delays to cover races between incoming
-		// SETTINGS and the request handler queueing its response.
-		// Use moderate delays to account for slower CI environments while keeping tests fast.
-		go func() {
-			for i := 0; i < 3; i++ {
-				select {
-				case <-sc.closer:
-					return
-				case <-time.After(25 * time.Millisecond):
-					if sc.isClosed() {
-						return
-					}
-					sc.forEachActiveStream(func(strm *Stream) {
-						sc.flushPendingData(strm)
-					})
-				}
-			}
-			select {
-			case <-sc.closer:
-				return
-			case <-time.After(100 * time.Millisecond):
-				if sc.isClosed() {
-					return
-				}
-				sc.forEachActiveStream(func(strm *Stream) {
-					sc.flushPendingData(strm)
-				})
-			}
-		}()
-	}
 }
 
 const maxWindowIncrement = 1<<31 - 1
@@ -1830,11 +1795,29 @@ func (sc *serverConn) queueDataFrame(strm *Stream, data []byte, endStream bool) 
 
 func (sc *serverConn) appendPendingData(strm *Stream, data []byte, endStream bool) {
 	strm.pendingMu.Lock()
+	hadPending := len(strm.pendingData) > 0
 	strm.pendingData = append(strm.pendingData, data...)
 	if endStream {
 		strm.pendingDataEndStream = true
 	}
 	strm.pendingMu.Unlock()
+
+	// If this is the first pending data added (transition from empty to non-empty),
+	// schedule an async flush attempt. This handles the race where SETTINGS increases
+	// window before the handler queues data.
+	if !hadPending && len(data) > 0 {
+		go func() {
+			// Small delay to batch multiple rapid queueData calls
+			select {
+			case <-sc.closer:
+				return
+			case <-time.After(5 * time.Millisecond):
+			}
+			if !sc.isClosed() {
+				sc.flushPendingData(strm)
+			}
+		}()
+	}
 }
 
 func (sc *serverConn) markResponseEnded(strm *Stream) {
