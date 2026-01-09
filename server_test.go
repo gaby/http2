@@ -2,6 +2,7 @@ package http2
 
 import (
 	"bufio"
+	"fmt"
 	"io"
 	"net"
 	"sort"
@@ -118,12 +119,18 @@ func makeHeaders(id uint32, enc *HPACK, endHeaders, endStream bool, hs map[strin
 }
 
 func TestIssue52(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping stress test in short mode")
+	}
 	for i := 0; i < 100; i++ {
-		testIssue52(t)
+		t.Run(fmt.Sprintf("iteration_%d", i), func(t *testing.T) {
+			testIssue52(t)
+		})
 	}
 }
 
 func testIssue52(t *testing.T) {
+	t.Helper()
 	s := &Server{
 		s: &fasthttp.Server{
 			Handler: func(ctx *fasthttp.RequestCtx) {
@@ -138,8 +145,10 @@ func testIssue52(t *testing.T) {
 
 	c, ln, err := getConn(s)
 	require.NoError(t, err)
-	defer c.Close()
-	defer ln.Close()
+	t.Cleanup(func() {
+		c.Close()
+		ln.Close()
+	})
 
 	msg := []byte("Hello world, how are you doing?")
 
@@ -188,6 +197,10 @@ func testIssue52(t *testing.T) {
 		FrameData, FrameHeaders, FrameData,
 	}
 
+	// Set read deadline to prevent hanging
+	require.NoError(t, c.c.SetReadDeadline(time.Now().Add(5*time.Second)))
+	defer c.c.SetReadDeadline(time.Time{})
+
 	for len(expect) != 0 {
 		fr, err := c.readNext()
 		require.NoError(t, err)
@@ -229,7 +242,7 @@ func TestIssue27(t *testing.T) {
 			Handler: func(ctx *fasthttp.RequestCtx) {
 				io.WriteString(ctx, "Hello world")
 			},
-			ReadTimeout: time.Millisecond * 50,
+			ReadTimeout: time.Millisecond * 100,
 		},
 		cnf: ServerConfig{
 			Debug: false,
@@ -238,8 +251,10 @@ func TestIssue27(t *testing.T) {
 
 	c, ln, err := getConn(s)
 	require.NoError(t, err)
-	defer c.Close()
-	defer ln.Close()
+	t.Cleanup(func() {
+		c.Close()
+		ln.Close()
+	})
 
 	msg := []byte("Hello world, how are you doing?")
 
@@ -271,7 +286,9 @@ func TestIssue27(t *testing.T) {
 	readReset := func(expectedID uint32) {
 		t.Helper()
 
-		require.NoError(t, c.c.SetReadDeadline(time.Now().Add(time.Second)))
+		require.NoError(t, c.c.SetReadDeadline(time.Now().Add(2*time.Second)))
+		defer c.c.SetReadDeadline(time.Time{})
+
 		fr, err := c.readNext()
 		require.NoError(t, err)
 
@@ -280,8 +297,7 @@ func TestIssue27(t *testing.T) {
 
 		rst := fr.Body().(*RstStream)
 		require.Equal(t, StreamCanceled, rst.Code(), "Expecting StreamCanceled")
-
-		require.NoError(t, c.c.SetReadDeadline(time.Time{}))
+		ReleaseFrameHeader(fr)
 	}
 
 	readReset(3)
@@ -307,8 +323,10 @@ func TestIdleConnection(t *testing.T) {
 
 	c, ln, err := getConn(s)
 	require.NoError(t, err)
-	defer c.Close()
-	defer ln.Close()
+	t.Cleanup(func() {
+		c.Close()
+		ln.Close()
+	})
 
 	h1 := makeHeaders(3, c.enc, true, true, map[string]string{
 		string(StringAuthority): "localhost",

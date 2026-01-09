@@ -296,23 +296,39 @@ func launchLocalServer(t *testing.T) int {
 		Handler: func(ctx *fasthttp.RequestCtx) {
 			ctx.Response.AppendBodyString("Test	 HTTP2")
 		},
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 5 * time.Second,
+		IdleTimeout:  10 * time.Second,
 	}
 	http2.ConfigureServer(server, http2.ServerConfig{})
 
-	ln, err := net.Listen("tcp4", "127.0.0.1:0")
-	require.NoError(t, err)
-	
+	var ln net.Listener
+	for i := 0; i < 5; i++ {
+		ln, err = net.Listen("tcp", "127.0.0.1:0")
+		if err == nil {
+			break
+		}
+		// Some environments intermittently deny tcp4 binds; retry on the
+		// generic "tcp" network with a short backoff to reduce flakes.
+		time.Sleep(50 * time.Millisecond)
+	}
+	require.NoError(t, err, "failed to bind local h2spec test server")
+
 	// Ensure listener is closed when test ends
 	t.Cleanup(func() {
 		ln.Close()
 	})
-	
+
+	serverReady := make(chan struct{})
 	go func() {
+		close(serverReady)
 		log.Println(server.ServeTLSEmbed(ln, certPEM, keyPEM))
 	}()
-	
-	// Give server time to start
-	time.Sleep(50 * time.Millisecond)
+
+	// Wait for server goroutine to start
+	<-serverReady
+	// Give server time to initialize
+	time.Sleep(100 * time.Millisecond)
 
 	_, port, err := net.SplitHostPort(ln.Addr().String())
 	require.NoError(t, err)

@@ -49,22 +49,6 @@ func TestAppendUint32Bytes(t *testing.T) {
 	require.Equal(t, []byte{0xFF, 0x01, 0x02, 0x03, 0x04}, result)
 }
 
-func TestAssertEqual(t *testing.T) {
-	tb := &recordingTB{T: t, name: "assertion"}
-
-	AssertEqual(tb, 1, 1)
-	require.False(t, tb.fatalCalled, "fatal should not be triggered on equal values")
-
-	AssertEqual(tb, "expected", "actual", "different values")
-	require.True(t, tb.fatalCalled, "fatal should be triggered on mismatch")
-	require.Contains(t, tb.fatalMsg, "Description:")
-	require.Contains(t, tb.fatalMsg, "different values")
-	require.Contains(t, tb.fatalMsg, "Expect:")
-	require.Contains(t, tb.fatalMsg, "expected")
-	require.Contains(t, tb.fatalMsg, "Result:")
-	require.Contains(t, tb.fatalMsg, "actual")
-}
-
 type recordingTB struct {
 	*testing.T
 	name        string

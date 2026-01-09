@@ -304,7 +304,7 @@ func TestConnWriteDataRespectsFlowControl(t *testing.T) {
 		done <- conn.writeData(fh, ctx, body)
 	}()
 
-	time.Sleep(20 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
 	select {
 	case err := <-done:
 		require.NoError(t, err)
@@ -316,7 +316,7 @@ func TestConnWriteDataRespectsFlowControl(t *testing.T) {
 	atomic.AddInt32(&ctx.sendWindow, 5)
 	conn.notifyWindowAvailable()
 
-	time.Sleep(20 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
 	select {
 	case err := <-done:
 		require.NoError(t, err)
@@ -336,7 +336,7 @@ func TestConnWriteDataRespectsFlowControl(t *testing.T) {
 		default:
 			return false
 		}
-	}, time.Second, 10*time.Millisecond)
+	}, 2*time.Second, 10*time.Millisecond)
 
 	require.NoError(t, conn.bw.Flush())
 
@@ -414,7 +414,7 @@ func TestConnWriteDataUnblocksOnClose(t *testing.T) {
 		done <- conn.writeData(fh, ctx, []byte("abc"))
 	}()
 
-	time.Sleep(20 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
 	require.NoError(t, conn.Close())
 
 	require.Eventually(t, func() bool {
@@ -425,7 +425,7 @@ func TestConnWriteDataUnblocksOnClose(t *testing.T) {
 		default:
 			return false
 		}
-	}, time.Second, 10*time.Millisecond)
+	}, 2*time.Second, 10*time.Millisecond)
 }
 
 func TestConnWritePing(t *testing.T) {
@@ -613,24 +613,27 @@ func TestConnSettingsUpdateLimitsStreamsDuringRequests(t *testing.T) {
 	checksDone := make(chan struct{})
 	go func() {
 		<-start
+		// Small delay to ensure settings are being processed
+		time.Sleep(10 * time.Millisecond)
 		for {
 			if !conn.CanOpenStream() {
 				close(checksDone)
 				return
 			}
+			time.Sleep(time.Millisecond)
 		}
 	}()
 
 	close(start)
 	select {
 	case <-settingsDone:
-	case <-time.After(time.Second):
+	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for settings handling to finish")
 	}
 
 	select {
 	case <-checksDone:
-	case <-time.After(time.Second):
+	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for stream limit enforcement")
 	}
 

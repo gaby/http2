@@ -242,7 +242,7 @@ func (st *Settings) Encode() {
 		)
 	}
 
-	if st.windowSize != 0 {
+	if st.windowSet {
 		st.rawSettings = append(st.rawSettings,
 			byte(MaxWindowSize>>8), byte(MaxWindowSize),
 			byte(st.windowSize>>24), byte(st.windowSize>>16),
