@@ -1813,7 +1813,9 @@ func (sc *serverConn) appendPendingData(strm *Stream, data []byte, endStream boo
 				return
 			case <-time.After(5 * time.Millisecond):
 			}
-			if !sc.isClosed() {
+			// Check both isClosed and closing flags to avoid interfering with
+			// connection shutdown (e.g., idle timeout sending GOAWAY).
+			if !sc.isClosed() && !sc.closing.Load() {
 				sc.flushPendingData(strm)
 			}
 		}()
