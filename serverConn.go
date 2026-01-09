@@ -294,6 +294,10 @@ func (sc *serverConn) Serve() error {
 	close(sc.reader)
 	sc.close()
 	<-writerDone
+	
+	// Close the closer channel after all goroutines have finished to ensure
+	// the handleSettings goroutine can exit cleanly.
+	sc.closeCloser()
 
 	return err
 }
