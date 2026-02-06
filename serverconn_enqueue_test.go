@@ -13,15 +13,21 @@ func TestEnqueueFrameInternalReturnsOnClose(t *testing.T) {
 	sc.writer <- &FrameHeader{}
 
 	done := make(chan struct{})
+	entered := make(chan struct{})
 	go func() {
 		defer close(done)
+		close(entered)
 		ok := sc.enqueueFrameInternal(&FrameHeader{}, time.Second)
 		if ok {
 			t.Error("enqueueFrameInternal unexpectedly accepted frame")
 		}
 	}()
 
-	time.Sleep(10 * time.Millisecond)
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for enqueue goroutine to start")
+	}
 	close(sc.closer)
 
 	select {
