@@ -162,19 +162,24 @@ func (h *Headers) Serialize(frh *FrameHeader) {
 	if h.priority {
 		frh.SetFlags(
 			frh.Flags().Add(FlagPriority))
+	}
 
-		raw := make([]byte, 5+len(h.rawHeaders))
-		http2utils.Uint32ToBytes(raw[0:4], h.stream)
-		raw[4] = h.weight
-		copy(raw[5:], h.rawHeaders)
-		h.rawHeaders = raw
+	payload := frh.payload[:0]
+	if h.priority {
+		n := 5 + len(h.rawHeaders)
+		payload = http2utils.Resize(payload, n)
+		http2utils.Uint32ToBytes(payload[0:4], h.stream)
+		payload[4] = h.weight
+		copy(payload[5:], h.rawHeaders)
+	} else {
+		payload = append(payload, h.rawHeaders...)
 	}
 
 	if h.hasPadding {
 		frh.SetFlags(
 			frh.Flags().Add(FlagPadded))
-		h.rawHeaders = http2utils.AddPadding(h.rawHeaders)
+		payload = http2utils.AddPadding(payload)
 	}
 
-	frh.payload = append(frh.payload[:0], h.rawHeaders...)
+	frh.payload = payload
 }

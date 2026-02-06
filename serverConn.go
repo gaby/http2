@@ -204,13 +204,6 @@ func (sc *serverConn) enqueueFrameInternal(fr *FrameHeader, d time.Duration) boo
 		return false
 	}
 
-	if d <= 0 {
-		d = defaultEnqueueTimeout
-	}
-
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-
 	defer func() {
 		if r := recover(); r != nil {
 			if sc.debug {
@@ -219,9 +212,34 @@ func (sc *serverConn) enqueueFrameInternal(fr *FrameHeader, d time.Duration) boo
 		}
 	}()
 
+	// Fast path: avoid timer allocation when writer has capacity.
 	select {
 	case sc.writer <- fr:
 		return true
+	default:
+	}
+
+	if d <= 0 {
+		d = defaultEnqueueTimeout
+	}
+
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	if sc.closer == nil {
+		select {
+		case sc.writer <- fr:
+			return true
+		case <-timer.C:
+			return false
+		}
+	}
+
+	select {
+	case sc.writer <- fr:
+		return true
+	case <-sc.closer:
+		return false
 	case <-timer.C:
 		return false
 	}
@@ -294,7 +312,7 @@ func (sc *serverConn) Serve() error {
 	close(sc.reader)
 	sc.close()
 	<-writerDone
-	
+
 	// Close the closer channel after all goroutines have finished to ensure
 	// the handleSettings goroutine can exit cleanly.
 	sc.closeCloser()
