@@ -521,9 +521,9 @@ func TestConnHandshakeStartsLoopsAfterServerSettings(t *testing.T) {
 		PingInterval:        time.Hour,
 		DisablePingChecking: true,
 	})
-	atomic.StoreUint64(&conn.closed, 1)
-	close(conn.in)
 
+	pingReceived := make(chan error, 1)
+	shutdown := make(chan struct{})
 	serverDone := make(chan error, 1)
 	go func() {
 		br := bufio.NewReader(serverSide)
@@ -572,11 +572,34 @@ func TestConnHandshakeStartsLoopsAfterServerSettings(t *testing.T) {
 			return
 		}
 
+		pingFrame, err := ReadFrameFrom(br)
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		defer ReleaseFrameHeader(pingFrame)
+
+		if pingFrame.Type() != FramePing {
+			serverDone <- errors.New("write loop did not flush queued ping")
+			return
+		}
+
+		pingReceived <- nil
+		<-shutdown
+
 		_ = serverSide.Close()
 		serverDone <- nil
 	}()
 
 	require.NoError(t, conn.Handshake())
+	pingFrame := AcquireFrameHeader()
+	ping := AcquireFrame(FramePing).(*Ping)
+	ping.SetData([]byte("pingpong"))
+	pingFrame.SetBody(ping)
+	conn.out <- pingFrame
+
+	require.NoError(t, <-pingReceived)
+	close(shutdown)
 	require.NoError(t, <-serverDone)
 }
 

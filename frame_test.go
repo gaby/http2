@@ -561,7 +561,7 @@ func TestPushPromisePaddingAndAccessors(t *testing.T) {
 	defer ReleaseFrameHeader(fr)
 
 	pp := &PushPromise{}
-	pp.SetStream(^uint32(0))
+	pp.SetStream(1<<31 - 1)
 	pp.SetEndHeaders(true)
 	pp.SetPadding(true)
 	pp.SetHeader([]byte("padded-header"))
