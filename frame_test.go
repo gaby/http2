@@ -417,6 +417,19 @@ func TestWindowUpdateDeserializeRejectsInvalidPayloadLength(t *testing.T) {
 	}
 }
 
+func TestWindowUpdateSetIncrementValidation(t *testing.T) {
+	wu := &WindowUpdate{}
+	wu.SetIncrement(1<<31 - 1)
+	require.Equal(t, 1<<31-1, wu.Increment())
+
+	require.PanicsWithValue(t, "invalid window size increment", func() {
+		wu.SetIncrement(0)
+	})
+	require.PanicsWithValue(t, "invalid window size increment", func() {
+		wu.SetIncrement(1 << 31)
+	})
+}
+
 func TestGoAwaySerializeAndDeserialize(t *testing.T) {
 	fr := AcquireFrameHeader()
 	ga := &GoAway{}
@@ -541,4 +554,34 @@ func TestPushPromiseDeserializeWithInsufficientPadding(t *testing.T) {
 	fr.SetBody(pp)
 	err := pp.Deserialize(fr)
 	require.ErrorIs(t, err, ErrMissingBytes)
+}
+
+func TestPushPromisePaddingAndAccessors(t *testing.T) {
+	fr := AcquireFrameHeader()
+	defer ReleaseFrameHeader(fr)
+
+	pp := &PushPromise{}
+	pp.SetStream(^uint32(0))
+	pp.SetEndHeaders(true)
+	pp.SetPadding(true)
+	pp.SetHeader([]byte("padded-header"))
+
+	require.Equal(t, uint32(1<<31-1), pp.Stream())
+	require.True(t, pp.EndHeaders())
+	require.True(t, pp.Padding())
+
+	fr.SetBody(pp)
+	pp.Serialize(fr)
+	require.True(t, fr.Flags().Has(FlagEndHeaders))
+	require.True(t, fr.Flags().Has(FlagPadded))
+
+	fr.length = len(fr.payload)
+
+	var parsed PushPromise
+	err := parsed.Deserialize(fr)
+	require.NoError(t, err)
+	require.Equal(t, pp.Stream(), parsed.Stream())
+	require.True(t, parsed.EndHeaders())
+	require.True(t, parsed.Padding())
+	require.Equal(t, []byte("padded-header"), parsed.header)
 }

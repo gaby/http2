@@ -116,3 +116,44 @@ func TestConnCancelErrors(t *testing.T) {
 	err := c.Cancel(ctx)
 	require.ErrorIs(t, err, ErrStreamNotReady)
 }
+
+type failingWriter struct {
+	err error
+}
+
+func (w failingWriter) Write([]byte) (int, error) {
+	return 0, w.err
+}
+
+func TestPrefaceHelpers(t *testing.T) {
+	var buf bytes.Buffer
+	require.NoError(t, WritePreface(&buf))
+	require.Equal(t, http2Preface, buf.Bytes())
+	require.True(t, ReadPreface(bytes.NewReader(buf.Bytes())))
+
+	short := append([]byte(nil), buf.Bytes()[:len(buf.Bytes())-1]...)
+	require.False(t, ReadPreface(bytes.NewReader(short)))
+
+	invalid := append([]byte(nil), buf.Bytes()...)
+	invalid[len(invalid)-1] = 'x'
+	require.False(t, ReadPreface(bytes.NewReader(invalid)))
+}
+
+func TestWritePrefacePropagatesErrors(t *testing.T) {
+	require.ErrorIs(t, WritePreface(failingWriter{err: io.ErrClosedPipe}), io.ErrClosedPipe)
+}
+
+func TestErrorFormattingHelpers(t *testing.T) {
+	require.Equal(t, "99", ErrorCode(99).Error())
+
+	connErr := newFrameSizeError(0, "conn")
+	require.Equal(t, FrameGoAway, connErr.frameType)
+	require.Equal(t, FrameSizeError, connErr.Code())
+	require.Contains(t, connErr.Error(), "FrameHeader size error")
+	require.Contains(t, connErr.Error(), "conn")
+
+	streamErr := newFrameSizeError(1, "stream")
+	require.Equal(t, FrameResetStream, streamErr.frameType)
+	require.Equal(t, FrameSizeError, streamErr.Code())
+	require.Contains(t, streamErr.Error(), "stream")
+}

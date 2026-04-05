@@ -488,9 +488,167 @@ func TestWriteErrorWrapping(t *testing.T) {
 	we := WriteError{err: customErr{}}
 	require.EqualError(t, we, "writing error: custom")
 	require.ErrorIs(t, we, customErr{})
+	require.EqualError(t, we.Unwrap(), "custom")
 
 	var target customErr
 	require.True(t, errors.As(we, &target))
+}
+
+func TestConnCancelQueuesResetFrame(t *testing.T) {
+	conn := &Conn{
+		out: make(chan *FrameHeader, 1),
+	}
+	ctx := &Ctx{Err: make(chan error, 1)}
+	atomic.StoreUint32(&ctx.streamID, 7)
+
+	require.NoError(t, conn.Cancel(ctx))
+
+	fr := <-conn.out
+	require.Equal(t, FrameResetStream, fr.Type())
+	require.Equal(t, uint32(7), fr.Stream())
+	require.Equal(t, StreamCanceled, fr.Body().(*RstStream).Code())
+	ReleaseFrameHeader(fr)
+}
+
+func TestConnHandshakeStartsLoopsAfterServerSettings(t *testing.T) {
+	clientSide, serverSide := net.Pipe()
+	t.Cleanup(func() {
+		_ = clientSide.Close()
+		_ = serverSide.Close()
+	})
+
+	conn := NewConn(clientSide, ConnOpts{
+		PingInterval:        time.Hour,
+		DisablePingChecking: true,
+	})
+
+	serverDone := make(chan error, 1)
+	go func() {
+		br := bufio.NewReader(serverSide)
+		if !ReadPreface(br) {
+			serverDone <- errors.New("missing client preface")
+			return
+		}
+
+		for _, expected := range []FrameType{FrameSettings, FrameWindowUpdate} {
+			fr, err := ReadFrameFrom(br)
+			if err != nil {
+				serverDone <- err
+				return
+			}
+			if fr.Type() != expected {
+				ReleaseFrameHeader(fr)
+				serverDone <- errors.New("unexpected client handshake frame")
+				return
+			}
+			ReleaseFrameHeader(fr)
+		}
+
+		bw := bufio.NewWriter(serverSide)
+		settings := AcquireFrameHeader()
+		settings.SetBody(AcquireFrame(FrameSettings))
+		if _, err := settings.WriteTo(bw); err != nil {
+			ReleaseFrameHeader(settings)
+			serverDone <- err
+			return
+		}
+		ReleaseFrameHeader(settings)
+		if err := bw.Flush(); err != nil {
+			serverDone <- err
+			return
+		}
+
+		ackFrame, err := ReadFrameFrom(br)
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		if ackFrame.Type() != FrameSettings || !ackFrame.Flags().Has(FlagAck) {
+			ReleaseFrameHeader(ackFrame)
+			serverDone <- errors.New("client did not ack server settings")
+			return
+		}
+		ReleaseFrameHeader(ackFrame)
+
+		pingFrame, err := ReadFrameFrom(br)
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		defer ReleaseFrameHeader(pingFrame)
+
+		if pingFrame.Type() != FramePing {
+			serverDone <- errors.New("write loop did not flush queued ping")
+			return
+		}
+
+		serverDone <- nil
+		_ = serverSide.Close()
+	}()
+
+	require.NoError(t, conn.Handshake())
+
+	pingFrame := AcquireFrameHeader()
+	ping := AcquireFrame(FramePing).(*Ping)
+	ping.SetData([]byte("pingpong"))
+	pingFrame.SetBody(ping)
+	conn.out <- pingFrame
+
+	require.NoError(t, <-serverDone)
+	require.Eventually(t, conn.Closed, time.Second, 10*time.Millisecond)
+}
+
+func TestConnHandshakeRejectsUnexpectedServerFrame(t *testing.T) {
+	clientSide, serverSide := net.Pipe()
+	t.Cleanup(func() {
+		_ = clientSide.Close()
+		_ = serverSide.Close()
+	})
+
+	conn := NewConn(clientSide, ConnOpts{
+		PingInterval:        time.Hour,
+		DisablePingChecking: true,
+	})
+
+	serverDone := make(chan error, 1)
+	go func() {
+		br := bufio.NewReader(serverSide)
+		if !ReadPreface(br) {
+			serverDone <- errors.New("missing client preface")
+			return
+		}
+
+		for _, expected := range []FrameType{FrameSettings, FrameWindowUpdate} {
+			fr, err := ReadFrameFrom(br)
+			if err != nil {
+				serverDone <- err
+				return
+			}
+			if fr.Type() != expected {
+				ReleaseFrameHeader(fr)
+				serverDone <- errors.New("unexpected client handshake frame")
+				return
+			}
+			ReleaseFrameHeader(fr)
+		}
+
+		bw := bufio.NewWriter(serverSide)
+		pingFrame := AcquireFrameHeader()
+		pingFrame.SetBody(AcquireFrame(FramePing))
+		if _, err := pingFrame.WriteTo(bw); err != nil {
+			ReleaseFrameHeader(pingFrame)
+			serverDone <- err
+			return
+		}
+		ReleaseFrameHeader(pingFrame)
+		serverDone <- bw.Flush()
+		_ = serverSide.Close()
+	}()
+
+	err := conn.Handshake()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "expected settings")
+	require.NoError(t, <-serverDone)
 }
 
 func TestConnLastErrConcurrentAccess(t *testing.T) {
