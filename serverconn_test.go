@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -68,6 +69,7 @@ func TestServerConnIsIdleReadTimeout(t *testing.T) {
 	sc.maxIdleTime = time.Second
 
 	require.True(t, sc.isIdleReadTimeout(timeoutError{}))
+	require.True(t, sc.isIdleReadTimeout(os.ErrDeadlineExceeded))
 	require.False(t, sc.isIdleReadTimeout(io.EOF))
 
 	sc.maxIdleTime = 0

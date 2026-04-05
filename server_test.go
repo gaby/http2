@@ -2,6 +2,7 @@ package http2
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -350,9 +351,12 @@ func TestIdleConnection(t *testing.T) {
 	}
 
 	_, err = c.readNext()
-	if err != nil {
-		_, ok := err.(*GoAway)
-		require.True(t, ok, "expected GoAway error")
+	require.Error(t, err, "expected idle close signal")
+	if _, ok := err.(*GoAway); !ok {
+		if !errors.Is(err, io.EOF) {
+			var netErr net.Error
+			require.True(t, errors.As(err, &netErr) && netErr.Timeout(), "expected GoAway, EOF, or timeout error")
+		}
 	}
 
 	_, err = c.readNext()

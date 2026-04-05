@@ -417,8 +417,9 @@ func (sc *serverConn) isClosed() bool {
 // for an idle timeout that still needs a graceful GOAWAY.
 func (sc *serverConn) isIdleReadTimeout(err error) bool {
 	var netErr net.Error
-	return errors.As(err, &netErr) &&
-		netErr.Timeout() &&
+	isTimeout := errors.Is(err, os.ErrDeadlineExceeded) ||
+		(errors.As(err, &netErr) && netErr.Timeout())
+	return isTimeout &&
 		sc.maxIdleTime > 0 &&
 		!sc.closing.Load() &&
 		!sc.connErr.Load()
