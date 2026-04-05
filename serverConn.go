@@ -137,15 +137,15 @@ const maxRawHeaderBlockSize = maxContinuationFrames * defaultDataFrameSize
 
 // PING rate-limiting parameters.
 const (
-	pingRateMax      = 10             // maximum PINGs per window
-	pingRateWindow   = time.Second    // sliding window duration
-	pingMaxViolation = 3              // consecutive windows over limit before GOAWAY
+	pingRateMax      = 10          // maximum PINGs per window
+	pingRateWindow   = time.Second // sliding window duration
+	pingMaxViolation = 3           // consecutive windows over limit before GOAWAY
 )
 
 // RST flood-detection parameters.
 const (
-	rstRateMax    = 100          // maximum RST_STREAM frames per window
-	rstRateWindow = time.Second  // sliding window duration
+	rstRateMax    = 100         // maximum RST_STREAM frames per window
+	rstRateWindow = time.Second // sliding window duration
 )
 
 func (sc *serverConn) closeIdleConn() {
@@ -567,6 +567,15 @@ func (sc *serverConn) readLoop() (err error) {
 			if errors.As(err, &h2Err) && isConnectionError(h2Err) {
 				sc.writeError(nil, h2Err)
 				sc.signalConnError()
+			}
+
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Timeout() && sc.maxIdleTime > 0 && !sc.closing.Load() && !sc.connErr.Load() {
+				// The socket read deadline is an idle-timeout backstop. If it wins
+				// the race against maxIdleTimer, still send GOAWAY so peers observe
+				// a graceful idle shutdown instead of a raw transport error.
+				sc.closeIdleConn()
+				err = nil
 			}
 
 			break
