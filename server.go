@@ -9,6 +9,11 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
+// defaultMaxHeaderListSize is the default maximum uncompressed header list size
+// the server is willing to accept. 32 KiB provides a safe bound against header
+// inflation attacks while allowing generous header sets in practice.
+const defaultMaxHeaderListSize uint32 = 32 * 1024
+
 // ServerConfig ...
 type ServerConfig struct {
 	// PingInterval is the interval at which the server will send a
@@ -22,6 +27,16 @@ type ServerConfig struct {
 
 	// Debug is a flag that will allow the library to print debugging information.
 	Debug bool
+
+	// MaxHeaderListSize is the maximum size of uncompressed header fields (sum of
+	// name + value + 32 bytes per field) that the server accepts per request.
+	// A value of 0 uses the default of 32 KiB.
+	MaxHeaderListSize uint32
+
+	// EnqueueTimeout is the maximum duration the server will wait when the
+	// internal frame-write queue is full before dropping the frame.
+	// A value of 0 uses the default of 2 seconds.
+	EnqueueTimeout time.Duration
 }
 
 func (sc *ServerConfig) defaults() {
@@ -31,6 +46,14 @@ func (sc *ServerConfig) defaults() {
 
 	if sc.MaxConcurrentStreams <= 0 {
 		sc.MaxConcurrentStreams = 1024
+	}
+
+	if sc.MaxHeaderListSize == 0 {
+		sc.MaxHeaderListSize = defaultMaxHeaderListSize
+	}
+
+	if sc.EnqueueTimeout == 0 {
+		sc.EnqueueTimeout = defaultEnqueueTimeout
 	}
 }
 
@@ -68,6 +91,7 @@ func (s *Server) ServeConn(c net.Conn) error {
 		pingInterval:   s.cnf.PingInterval,
 		logger:         s.s.Logger,
 		debug:          s.cnf.Debug,
+		enqueueTimeout: s.cnf.EnqueueTimeout,
 	}
 
 	// Clear handshake deadline now that the connection is initialized.
@@ -86,6 +110,7 @@ func (s *Server) ServeConn(c net.Conn) error {
 	sc.st.Reset()
 	sc.st.SetMaxWindowSize(uint32(sc.maxWindow))
 	sc.st.SetMaxConcurrentStreams(uint32(s.cnf.MaxConcurrentStreams))
+	sc.st.SetMaxHeaderListSize(s.cnf.MaxHeaderListSize)
 
 	if err := sc.Handshake(); err != nil {
 		return err

@@ -51,7 +51,6 @@ func (ga *GoAway) Code() ErrorCode {
 
 func (ga *GoAway) SetCode(code ErrorCode) {
 	ga.code = code & (1<<31 - 1)
-	// TODO: Set error description as a debug data?
 }
 
 func (ga *GoAway) Stream() uint32 {

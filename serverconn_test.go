@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -40,6 +41,13 @@ type writeFailConn struct {
 	closeOnce sync.Once
 }
 
+// timeoutError is a test helper that implements net.Error with Timeout returning true.
+type timeoutError struct{}
+
+func (timeoutError) Error() string   { return "timeout" }
+func (timeoutError) Timeout() bool   { return true }
+func (timeoutError) Temporary() bool { return false }
+
 func (c *writeFailConn) Write(_ []byte) (int, error) {
 	return 0, c.writeErr
 }
@@ -53,6 +61,32 @@ func (c *writeFailConn) Close() error {
 		}
 	})
 	return err
+}
+
+// TestServerConnIsIdleReadTimeout verifies timeout detection for idle reads.
+func TestServerConnIsIdleReadTimeout(t *testing.T) {
+	sc := newTestServerConn()
+	sc.maxIdleTime = time.Second
+
+	require.True(t, sc.isIdleReadTimeout(timeoutError{}))
+	require.True(t, sc.isIdleReadTimeout(os.ErrDeadlineExceeded))
+	require.False(t, sc.isIdleReadTimeout(io.EOF))
+
+	sc.maxIdleTime = 0
+	require.False(t, sc.isIdleReadTimeout(timeoutError{}))
+}
+
+// TestServerConnIsIdleReadTimeoutIgnoresShutdownStates verifies shutdown paths are ignored.
+func TestServerConnIsIdleReadTimeoutIgnoresShutdownStates(t *testing.T) {
+	sc := newTestServerConn()
+	sc.maxIdleTime = time.Second
+
+	sc.closing.Store(true)
+	require.False(t, sc.isIdleReadTimeout(timeoutError{}))
+
+	sc.closing.Store(false)
+	sc.connErr.Store(true)
+	require.False(t, sc.isIdleReadTimeout(timeoutError{}))
 }
 
 func buildHeadersFrame(t *testing.T, streamID uint32, headers [][2]string) *FrameHeader {

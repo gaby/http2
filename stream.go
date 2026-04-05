@@ -52,6 +52,15 @@ type Stream struct {
 	// keeps track of the number of header blocks received
 	headerBlockNum int
 
+	// headerListSize accumulates the decoded header list size (name + value + 32
+	// per field, per RFC 7541 §4.1) across the current header block.
+	// It is reset at the start of every new complete header block.
+	headerListSize uint32
+
+	// isTrailer is true once we have already finished the initial request
+	// headers and are now processing a trailing HEADERS frame.
+	isTrailer bool
+
 	// original type
 	origType         FrameType
 	startedAt        time.Time
@@ -92,6 +101,8 @@ func NewStream(id uint32, recvWin, sendWin int32) *Stream {
 	strm.scheme = []byte("https")
 	strm.origType = 0
 	strm.headerBlockNum = 0
+	strm.headerListSize = 0
+	strm.isTrailer = false
 	strm.regularHeaderSeen = false
 	strm.seenMethod = false
 	strm.seenScheme = false

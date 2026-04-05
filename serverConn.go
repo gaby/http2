@@ -99,6 +99,20 @@ type serverConn struct {
 
 	closerOnce      sync.Once
 	writerCloseOnce sync.Once
+
+	// enqueueTimeout overrides defaultEnqueueTimeout when non-zero.
+	enqueueTimeout time.Duration
+
+	// PING rate-limiting state (guards with pingMu).
+	pingMu          sync.Mutex
+	pingCount       int
+	pingWindowStart time.Time
+	pingViolations  int
+
+	// RST_STREAM flood-detection state (guards with rstMu).
+	rstMu          sync.Mutex
+	rstCount       int
+	rstWindowStart time.Time
 }
 
 // defaultEnqueueTimeout bounds how long a sender will wait when the writer
@@ -106,6 +120,33 @@ type serverConn struct {
 // load, while still letting shutdown make progress if the writer loop is
 // wedged.
 const defaultEnqueueTimeout = 2 * time.Second
+
+// goawayFlushDelay is a brief pause given to the write loop to flush a GOAWAY
+// frame to the peer before the connection is torn down.
+const goawayFlushDelay = 20 * time.Millisecond
+
+// maxContinuationFrames is the maximum number of CONTINUATION frames allowed
+// for a single header block. A client fragmenting headers across more frames
+// than this is treated as a CONTINUATION flood (CVE-2024-27983).
+const maxContinuationFrames = 64
+
+// maxRawHeaderBlockSize is the maximum raw (compressed) size of a header block
+// accumulated across HEADERS + CONTINUATION frames before HPACK decoding.
+// 64 frames × 16 KiB per frame = 1 MiB.
+const maxRawHeaderBlockSize = maxContinuationFrames * defaultDataFrameSize
+
+// PING rate-limiting parameters.
+const (
+	pingRateMax      = 10          // maximum PINGs per window
+	pingRateWindow   = time.Second // sliding window duration
+	pingMaxViolation = 3           // consecutive windows over limit before GOAWAY
+)
+
+// RST flood-detection parameters.
+const (
+	rstRateMax    = 100         // maximum RST_STREAM frames per window
+	rstRateWindow = time.Second // sliding window duration
+)
 
 func (sc *serverConn) closeIdleConn() {
 	if sc.isClosed() || sc.closing.Load() {
@@ -173,7 +214,11 @@ func (sc *serverConn) closeWriter() {
 }
 
 func (sc *serverConn) enqueueFrame(fr *FrameHeader) {
-	if sc.enqueueFrameInternal(fr, defaultEnqueueTimeout) {
+	timeout := sc.enqueueTimeout
+	if timeout <= 0 {
+		timeout = defaultEnqueueTimeout
+	}
+	if sc.enqueueFrameInternal(fr, timeout) {
 		return
 	}
 
@@ -270,7 +315,8 @@ func (sc *serverConn) Serve() error {
 
 	defer func() {
 		if err := recover(); err != nil {
-			sc.logger.Printf("Serve panicked: %s:\n%s\n", err, debug.Stack())
+			sc.logger.Printf("Serve panicked (remote=%s): %s:\n%s\n",
+				sc.c.RemoteAddr(), err, debug.Stack())
 		}
 	}()
 
@@ -365,7 +411,60 @@ func (sc *serverConn) isClosed() bool {
 	return atomic.LoadInt32((*int32)(&sc.state)) == int32(connStateClosed)
 }
 
+// isIdleReadTimeout reports whether err came from the idle-timeout read
+// deadline backstop rather than from a shutdown already in progress.
+// The shutdown flags are checked so connection teardown does not get mistaken
+// for an idle timeout that still needs a graceful GOAWAY.
+func (sc *serverConn) isIdleReadTimeout(err error) bool {
+	var netErr net.Error
+	isTimeout := errors.Is(err, os.ErrDeadlineExceeded) ||
+		(errors.As(err, &netErr) && netErr.Timeout())
+	return isTimeout &&
+		sc.maxIdleTime > 0 &&
+		!sc.closing.Load() &&
+		!sc.connErr.Load()
+}
+
 func (sc *serverConn) handlePing(ping *Ping) {
+	// Rate-limit inbound PINGs to protect against ping-flood DoS.
+	// Violations are counted per completed window: a window that exceeded
+	// pingRateMax increments the violation counter; a clean window resets it.
+	// After pingMaxViolation consecutive over-limit windows the connection is
+	// terminated with ENHANCE_YOUR_CALM.
+	sc.pingMu.Lock()
+	now := time.Now()
+	windowExpired := sc.pingWindowStart.IsZero() || now.Sub(sc.pingWindowStart) >= pingRateWindow
+	if windowExpired {
+		// Settle the previous window's verdict before starting a new one.
+		if !sc.pingWindowStart.IsZero() {
+			if sc.pingCount > pingRateMax {
+				sc.pingViolations++
+			} else {
+				sc.pingViolations = 0
+			}
+		}
+		sc.pingWindowStart = now
+		sc.pingCount = 0
+	}
+	sc.pingCount++
+	overLimit := sc.pingCount > pingRateMax
+	violations := sc.pingViolations
+	sc.pingMu.Unlock()
+
+	if violations >= pingMaxViolation {
+		sc.writeGoAway(0, EnhanceYourCalm, "too many pings")
+		go func() {
+			time.Sleep(goawayFlushDelay)
+			sc.signalConnError()
+		}()
+		return
+	}
+
+	if overLimit {
+		// Silently drop the excess PING; the client is sending too fast.
+		return
+	}
+
 	fr := AcquireFrameHeader()
 	ping.SetAck(true)
 	fr.SetBody(ping)
@@ -412,7 +511,8 @@ func (sc *serverConn) checkFrameWithStream(fr *FrameHeader) error {
 func (sc *serverConn) readLoop() (err error) {
 	defer func() {
 		if err := recover(); err != nil {
-			sc.logger.Printf("readLoop panicked: %s\n%s\n", err, debug.Stack())
+			sc.logger.Printf("readLoop panicked (remote=%s): %s\n%s\n",
+				sc.c.RemoteAddr(), err, debug.Stack())
 		}
 	}()
 
@@ -481,6 +581,14 @@ func (sc *serverConn) readLoop() (err error) {
 			if errors.As(err, &h2Err) && isConnectionError(h2Err) {
 				sc.writeError(nil, h2Err)
 				sc.signalConnError()
+			}
+
+			if sc.isIdleReadTimeout(err) {
+				// The socket read deadline is an idle-timeout backstop. If it wins
+				// the race against maxIdleTimer, still send GOAWAY so peers observe
+				// a graceful idle shutdown instead of a raw transport error.
+				sc.closeIdleConn()
+				err = nil
 			}
 
 			break
@@ -589,7 +697,7 @@ func (sc *serverConn) readLoop() (err error) {
 				// Delay signaling close very slightly so the GOAWAY has a chance
 				// to flush before we tear down the socket.
 				go func() {
-					time.Sleep(20 * time.Millisecond)
+					time.Sleep(goawayFlushDelay)
 					sc.signalConnError()
 				}()
 			}
@@ -611,7 +719,11 @@ func (sc *serverConn) readLoop() (err error) {
 func (sc *serverConn) handleStreams() {
 	defer func() {
 		if err := recover(); err != nil {
-			sc.logger.Printf("handleStreams panicked: %s\n%s\n", err, debug.Stack())
+			sc.streamsMu.Lock()
+			streamCount := len(sc.streams)
+			sc.streamsMu.Unlock()
+			sc.logger.Printf("handleStreams panicked (remote=%s, openStreams=%d): %s\n%s\n",
+				sc.c.RemoteAddr(), streamCount, err, debug.Stack())
 		}
 	}()
 
@@ -1155,6 +1267,23 @@ func (sc *serverConn) handleFrame(strm *Stream, fr *FrameHeader) error {
 		if strm.State() == StreamStateIdle {
 			return NewGoAwayError(ProtocolError, "RST_STREAM on idle stream")
 		}
+
+		// RST flood detection: too many RST_STREAM frames in a short window is
+		// a sign of a rapid stream-open/cancel attack. Close the connection with
+		// ENHANCE_YOUR_CALM when the rate exceeds the threshold.
+		sc.rstMu.Lock()
+		now := time.Now()
+		if sc.rstWindowStart.IsZero() || now.Sub(sc.rstWindowStart) >= rstRateWindow {
+			sc.rstWindowStart = now
+			sc.rstCount = 0
+		}
+		sc.rstCount++
+		rstOver := sc.rstCount > rstRateMax
+		sc.rstMu.Unlock()
+
+		if rstOver {
+			return NewGoAwayError(EnhanceYourCalm, "RST_STREAM flood detected")
+		}
 	case FramePriority:
 		if strm.State() != StreamStateIdle && !strm.headersFinished {
 			return NewGoAwayError(ProtocolError, "frame priority on an open stream")
@@ -1190,16 +1319,38 @@ func (sc *serverConn) handleFrame(strm *Stream, fr *FrameHeader) error {
 }
 
 func (sc *serverConn) handleHeaderFrame(strm *Stream, fr *FrameHeader) error {
-	if strm.headersFinished && !fr.Flags().Has(FlagEndStream|FlagEndHeaders) {
-		// TODO handle trailers
-		return NewGoAwayError(ProtocolError, "stream not open")
+	if strm.headersFinished {
+		// Once the initial request header block is complete, the only valid
+		// follow-up HEADERS frame is a trailing header block that MUST carry
+		// END_STREAM (RFC 7540 §8.1).
+		if !fr.Flags().Has(FlagEndStream) {
+			return NewGoAwayError(ProtocolError, "HEADERS without END_STREAM after request headers")
+		}
+		strm.isTrailer = true
+		// Reset the per-block list-size counter for the trailer block.
+		strm.headerListSize = 0
+	}
+
+	// Guard against CONTINUATION floods (CVE-2024-27983): limit the number of
+	// header-block fragments a single stream may send.
+	if strm.headerBlockNum >= maxContinuationFrames {
+		return NewGoAwayError(ProtocolError, "too many CONTINUATION frames")
 	}
 
 	if headerFrame, ok := fr.Body().(*Headers); ok && headerFrame.Stream() == strm.ID() {
 		return NewGoAwayError(ProtocolError, "stream that depends on itself")
 	}
 
-	b := append(strm.previousHeaderBytes, fr.Body().(FrameWithHeaders).Headers()...)
+	// Enforce the raw header-block size cap *before* HPACK decoding to prevent
+	// memory exhaustion from highly compressible header data spread across many
+	// CONTINUATION frames.
+	incoming := fr.Body().(FrameWithHeaders).Headers()
+	accumulated := len(strm.previousHeaderBytes) + len(incoming)
+	if uint32(accumulated) > maxRawHeaderBlockSize {
+		return NewGoAwayError(ProtocolError, "header block size exceeds maximum")
+	}
+
+	b := append(strm.previousHeaderBytes, incoming...)
 	hf := AcquireHeaderField()
 	req := &strm.ctx.Request
 
@@ -1207,6 +1358,9 @@ func (sc *serverConn) handleHeaderFrame(strm *Stream, fr *FrameHeader) error {
 
 	strm.previousHeaderBytes = strm.previousHeaderBytes[:0]
 	fieldsProcessed := 0
+
+	// maxHeaderListSize is what we advertised to the client in SETTINGS.
+	maxHeaderListSize := sc.st.MaxHeaderListSize()
 
 	for len(b) > 0 {
 		pb := b
@@ -1223,8 +1377,20 @@ func (sc *serverConn) handleHeaderFrame(strm *Stream, fr *FrameHeader) error {
 			break
 		}
 
+		// RFC 7541 §4.1: track uncompressed header list size and enforce the
+		// SETTINGS_MAX_HEADER_LIST_SIZE limit we advertised to the peer.
+		strm.headerListSize += uint32(len(hf.key)) + uint32(len(hf.value)) + 32
+		if maxHeaderListSize > 0 && strm.headerListSize > maxHeaderListSize {
+			return NewGoAwayError(CompressionError, "header list size exceeds SETTINGS_MAX_HEADER_LIST_SIZE")
+		}
+
 		k, v := hf.KeyBytes(), hf.ValueBytes()
 		if hf.IsPseudo() {
+			// Pseudo-headers MUST NOT appear in trailers (RFC 7540 §8.1.2.1).
+			if strm.isTrailer {
+				return NewResetStreamError(ProtocolError, "pseudo-header in trailer")
+			}
+
 			if strm.regularHeaderSeen {
 				return NewResetStreamError(ProtocolError, "pseudo-header after regular header")
 			}
@@ -1297,6 +1463,14 @@ func (sc *serverConn) handleHeaderFrame(strm *Stream, fr *FrameHeader) error {
 	strm.headerBlockNum++
 
 	if err == nil && fr.Flags().Has(FlagEndHeaders) && len(strm.previousHeaderBytes) == 0 {
+		// Reset list-size counter for the next header block.
+		strm.headerListSize = 0
+
+		if strm.isTrailer {
+			// Trailers do not need pseudo-header validation; we are done.
+			return nil
+		}
+
 		if !strm.seenMethod {
 			return NewResetStreamError(ProtocolError, "missing required pseudo-header")
 		}
