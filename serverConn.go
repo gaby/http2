@@ -411,6 +411,19 @@ func (sc *serverConn) isClosed() bool {
 	return atomic.LoadInt32((*int32)(&sc.state)) == int32(connStateClosed)
 }
 
+// isIdleReadTimeout reports whether err came from the idle-timeout read
+// deadline backstop rather than from a shutdown already in progress.
+// The shutdown flags are checked so connection teardown does not get mistaken
+// for an idle timeout that still needs a graceful GOAWAY.
+func (sc *serverConn) isIdleReadTimeout(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr) &&
+		netErr.Timeout() &&
+		sc.maxIdleTime > 0 &&
+		!sc.closing.Load() &&
+		!sc.connErr.Load()
+}
+
 func (sc *serverConn) handlePing(ping *Ping) {
 	// Rate-limit inbound PINGs to protect against ping-flood DoS.
 	// Violations are counted per completed window: a window that exceeded
@@ -569,8 +582,7 @@ func (sc *serverConn) readLoop() (err error) {
 				sc.signalConnError()
 			}
 
-			var netErr net.Error
-			if errors.As(err, &netErr) && netErr.Timeout() && sc.maxIdleTime > 0 && !sc.closing.Load() && !sc.connErr.Load() {
+			if sc.isIdleReadTimeout(err) {
 				// The socket read deadline is an idle-timeout backstop. If it wins
 				// the race against maxIdleTimer, still send GOAWAY so peers observe
 				// a graceful idle shutdown instead of a raw transport error.
