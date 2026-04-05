@@ -123,6 +123,10 @@ type serverConn struct {
 // wedged.
 const defaultEnqueueTimeout = 2 * time.Second
 
+// goawayFlushDelay is a brief pause given to the write loop to flush a GOAWAY
+// frame to the peer before the connection is torn down.
+const goawayFlushDelay = 20 * time.Millisecond
+
 // maxContinuationFrames is the maximum number of CONTINUATION frames allowed
 // for a single header block. A client fragmenting headers across more frames
 // than this is treated as a CONTINUATION flood (CVE-2024-27983).
@@ -442,7 +446,7 @@ func (sc *serverConn) handlePing(ping *Ping) {
 	if violations >= pingMaxViolation {
 		sc.writeGoAway(0, EnhanceYourCalm, "too many pings")
 		go func() {
-			time.Sleep(20 * time.Millisecond)
+			time.Sleep(goawayFlushDelay)
 			sc.signalConnError()
 		}()
 		return
@@ -677,7 +681,7 @@ func (sc *serverConn) readLoop() (err error) {
 				// Delay signaling close very slightly so the GOAWAY has a chance
 				// to flush before we tear down the socket.
 				go func() {
-					time.Sleep(20 * time.Millisecond)
+					time.Sleep(goawayFlushDelay)
 					sc.signalConnError()
 				}()
 			}
