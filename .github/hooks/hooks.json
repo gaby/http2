@@ -4,7 +4,7 @@
     "sessionStart": [
       {
         "type": "command",
-        "bash": "context-mode hook copilot sessionstart",
+        "bash": "context-mode hook vscode-copilot sessionstart",
         "cwd": ".",
         "timeoutSec": 10
       }
@@ -12,7 +12,7 @@
     "preToolUse": [
       {
         "type": "command",
-        "bash": "context-mode hook copilot pretooluse",
+        "bash": "context-mode hook vscode-copilot pretooluse",
         "cwd": ".",
         "timeoutSec": 10
       }
@@ -20,10 +20,9 @@
     "postToolUse": [
       {
         "type": "command",
-        "bash": "context-mode hook copilot posttooluse",
+        "bash": "context-mode hook vscode-copilot posttooluse",
         "cwd": ".",
         "timeoutSec": 10
       }
     ]
   }
-}
