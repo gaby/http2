@@ -34,6 +34,11 @@ type ConnOpts struct {
 
 	// OnDisconnect is a callback that fires when the Conn disconnects.
 	OnDisconnect func(c *Conn)
+
+	// WindowWaitTimeout is the maximum time to wait for flow-control window
+	// credit before returning a FlowControlError to the caller.
+	// A value of 0 uses the default of 200 ms.
+	WindowWaitTimeout time.Duration
 }
 
 // Handshake performs an HTTP/2 handshake. That means, it will send
@@ -123,26 +128,33 @@ type Conn struct {
 	onDisconnect func(*Conn)
 
 	closed uint64
+
+	windowWaitTimeout time.Duration
 }
 
 // NewConn returns a new HTTP/2 connection.
 // To start using the connection you need to call Handshake.
 func NewConn(c net.Conn, opts ConnOpts) *Conn {
+	wwt := opts.WindowWaitTimeout
+	if wwt <= 0 {
+		wwt = windowWaitTimeout
+	}
 	nc := &Conn{
-		c:             c,
-		br:            bufio.NewReaderSize(c, 4096),
-		bw:            bufio.NewWriterSize(c, maxFrameSize),
-		enc:           AcquireHPACK(),
-		dec:           AcquireHPACK(),
-		nextID:        1,
-		serverWindow:  65535, // RFC 7540 default initial window
-		maxWindow:     1 << 20,
-		currentWindow: 1 << 20,
-		in:            make(chan *Ctx, 128),
-		out:           make(chan *FrameHeader, 128),
-		pingInterval:  opts.PingInterval,
-		disableAcks:   opts.DisablePingChecking,
-		onDisconnect:  opts.OnDisconnect,
+		c:                 c,
+		br:                bufio.NewReaderSize(c, 4096),
+		bw:                bufio.NewWriterSize(c, maxFrameSize),
+		enc:               AcquireHPACK(),
+		dec:               AcquireHPACK(),
+		nextID:            1,
+		serverWindow:      65535, // RFC 7540 default initial window
+		maxWindow:         1 << 20,
+		currentWindow:     1 << 20,
+		in:                make(chan *Ctx, 128),
+		out:               make(chan *FrameHeader, 128),
+		pingInterval:      opts.PingInterval,
+		disableAcks:       opts.DisablePingChecking,
+		onDisconnect:      opts.OnDisconnect,
+		windowWaitTimeout: wwt,
 	}
 	nc.windowCond = sync.NewCond(&nc.windowMu)
 
@@ -390,6 +402,7 @@ func (c *Conn) Close() error {
 	ga := AcquireFrame(FrameGoAway).(*GoAway)
 	ga.SetStream(0)
 	ga.SetCode(NoError)
+	ga.SetData([]byte(NoError.String()))
 
 	fr.SetBody(ga)
 
@@ -708,6 +721,11 @@ func (c *Conn) writeData(fh *FrameHeader, ctx *Ctx, body []byte) (err error) {
 	data := AcquireFrame(FrameData).(*Data)
 	fh.SetBody(data)
 
+	wwt := c.windowWaitTimeout
+	if wwt <= 0 {
+		wwt = windowWaitTimeout
+	}
+
 	for i := 0; err == nil && i < len(body); {
 		remaining := len(body) - i
 
@@ -724,7 +742,7 @@ func (c *Conn) writeData(fh *FrameHeader, ctx *Ctx, body []byte) (err error) {
 				break
 			}
 
-			timer := time.AfterFunc(windowWaitTimeout, c.notifyWindowAvailable)
+			timer := time.AfterFunc(wwt, c.notifyWindowAvailable)
 			cond.Wait()
 			if !timer.Stop() {
 				connWin = atomic.LoadInt32(&c.serverWindow)
