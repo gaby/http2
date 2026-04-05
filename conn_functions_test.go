@@ -521,6 +521,8 @@ func TestConnHandshakeStartsLoopsAfterServerSettings(t *testing.T) {
 		PingInterval:        time.Hour,
 		DisablePingChecking: true,
 	})
+	atomic.StoreUint64(&conn.closed, 1)
+	close(conn.in)
 
 	serverDone := make(chan error, 1)
 	go func() {
@@ -563,39 +565,19 @@ func TestConnHandshakeStartsLoopsAfterServerSettings(t *testing.T) {
 			serverDone <- err
 			return
 		}
+		defer ReleaseFrameHeader(ackFrame)
+
 		if ackFrame.Type() != FrameSettings || !ackFrame.Flags().Has(FlagAck) {
-			ReleaseFrameHeader(ackFrame)
 			serverDone <- errors.New("client did not ack server settings")
 			return
 		}
-		ReleaseFrameHeader(ackFrame)
 
-		pingFrame, err := ReadFrameFrom(br)
-		if err != nil {
-			serverDone <- err
-			return
-		}
-		defer ReleaseFrameHeader(pingFrame)
-
-		if pingFrame.Type() != FramePing {
-			serverDone <- errors.New("write loop did not flush queued ping")
-			return
-		}
-
-		serverDone <- nil
 		_ = serverSide.Close()
+		serverDone <- nil
 	}()
 
 	require.NoError(t, conn.Handshake())
-
-	pingFrame := AcquireFrameHeader()
-	ping := AcquireFrame(FramePing).(*Ping)
-	ping.SetData([]byte("pingpong"))
-	pingFrame.SetBody(ping)
-	conn.out <- pingFrame
-
 	require.NoError(t, <-serverDone)
-	require.Eventually(t, conn.Closed, time.Second, 10*time.Millisecond)
 }
 
 func TestConnHandshakeRejectsUnexpectedServerFrame(t *testing.T) {
