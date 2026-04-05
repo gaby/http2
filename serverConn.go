@@ -102,8 +102,6 @@ type serverConn struct {
 
 	// enqueueTimeout overrides defaultEnqueueTimeout when non-zero.
 	enqueueTimeout time.Duration
-	// gracefulShutdownTimeout overrides the built-in 50 ms close grace period.
-	gracefulShutdownTimeout time.Duration
 
 	// PING rate-limiting state (guards with pingMu).
 	pingMu          sync.Mutex
@@ -185,12 +183,8 @@ func (sc *serverConn) signalConnClose() {
 	if sc.closing.CompareAndSwap(false, true) {
 		if sc.c != nil {
 			_ = sc.c.SetReadDeadline(time.Now())
-			grace := sc.gracefulShutdownTimeout
-			if grace <= 0 {
-				grace = 50 * time.Millisecond
-			}
 			go func(c net.Conn) {
-				time.Sleep(grace)
+				time.Sleep(50 * time.Millisecond)
 				_ = c.Close()
 			}(sc.c)
 		}

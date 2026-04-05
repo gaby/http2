@@ -358,7 +358,6 @@ func TestServerConfigDefaults(t *testing.T) {
 
 	require.Equal(t, defaultMaxHeaderListSize, cfg.MaxHeaderListSize)
 	require.Equal(t, defaultEnqueueTimeout, cfg.EnqueueTimeout)
-	require.Equal(t, defaultGracefulShutdownTimeout, cfg.GracefulShutdownTimeout)
 	require.Equal(t, 10*time.Second, cfg.PingInterval)
 	require.Equal(t, 1024, cfg.MaxConcurrentStreams)
 }
@@ -367,17 +366,15 @@ func TestServerConfigDefaults(t *testing.T) {
 // not overridden by defaults().
 func TestServerConfigCustomValues(t *testing.T) {
 	cfg := ServerConfig{
-		MaxHeaderListSize:       64 * 1024,
-		EnqueueTimeout:          5 * time.Second,
-		GracefulShutdownTimeout: 10 * time.Second,
-		MaxConcurrentStreams:     512,
-		PingInterval:            30 * time.Second,
+		MaxHeaderListSize:   64 * 1024,
+		EnqueueTimeout:      5 * time.Second,
+		MaxConcurrentStreams: 512,
+		PingInterval:        30 * time.Second,
 	}
 	cfg.defaults()
 
 	require.Equal(t, uint32(64*1024), cfg.MaxHeaderListSize)
 	require.Equal(t, 5*time.Second, cfg.EnqueueTimeout)
-	require.Equal(t, 10*time.Second, cfg.GracefulShutdownTimeout)
 	require.Equal(t, 512, cfg.MaxConcurrentStreams)
 	require.Equal(t, 30*time.Second, cfg.PingInterval)
 }

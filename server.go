@@ -14,10 +14,6 @@ import (
 // inflation attacks while allowing generous header sets in practice.
 const defaultMaxHeaderListSize uint32 = 32 * 1024
 
-// defaultGracefulShutdownTimeout is how long the server waits after sending a
-// GOAWAY before forcibly closing the TCP connection.
-const defaultGracefulShutdownTimeout = 5 * time.Second
-
 // ServerConfig ...
 type ServerConfig struct {
 	// PingInterval is the interval at which the server will send a
@@ -41,11 +37,6 @@ type ServerConfig struct {
 	// internal frame-write queue is full before dropping the frame.
 	// A value of 0 uses the default of 2 seconds.
 	EnqueueTimeout time.Duration
-
-	// GracefulShutdownTimeout is the duration the server waits for in-flight
-	// streams to finish after sending GOAWAY before forcibly closing the
-	// connection. A value of 0 uses the default of 5 seconds.
-	GracefulShutdownTimeout time.Duration
 }
 
 func (sc *ServerConfig) defaults() {
@@ -63,10 +54,6 @@ func (sc *ServerConfig) defaults() {
 
 	if sc.EnqueueTimeout == 0 {
 		sc.EnqueueTimeout = defaultEnqueueTimeout
-	}
-
-	if sc.GracefulShutdownTimeout == 0 {
-		sc.GracefulShutdownTimeout = defaultGracefulShutdownTimeout
 	}
 }
 
@@ -92,20 +79,19 @@ func (s *Server) ServeConn(c net.Conn) error {
 	}
 
 	sc := &serverConn{
-		c:                       c,
-		h:                       s.s.Handler,
-		br:                      bufio.NewReader(c),
-		bw:                      bufio.NewWriterSize(c, 1<<14*10),
-		lastID:                  0,
-		writer:                  make(chan *FrameHeader, 128),
-		reader:                  make(chan *FrameHeader, 128),
-		maxRequestTime:          s.s.ReadTimeout,
-		maxIdleTime:             s.s.IdleTimeout,
-		pingInterval:            s.cnf.PingInterval,
-		logger:                  s.s.Logger,
-		debug:                   s.cnf.Debug,
-		enqueueTimeout:          s.cnf.EnqueueTimeout,
-		gracefulShutdownTimeout: s.cnf.GracefulShutdownTimeout,
+		c:              c,
+		h:              s.s.Handler,
+		br:             bufio.NewReader(c),
+		bw:             bufio.NewWriterSize(c, 1<<14*10),
+		lastID:         0,
+		writer:         make(chan *FrameHeader, 128),
+		reader:         make(chan *FrameHeader, 128),
+		maxRequestTime: s.s.ReadTimeout,
+		maxIdleTime:    s.s.IdleTimeout,
+		pingInterval:   s.cnf.PingInterval,
+		logger:         s.s.Logger,
+		debug:          s.cnf.Debug,
+		enqueueTimeout: s.cnf.EnqueueTimeout,
 	}
 
 	// Clear handshake deadline now that the connection is initialized.
