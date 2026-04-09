@@ -158,14 +158,14 @@ func testIssue52(t *testing.T) {
 		string(StringMethod):    "POST",
 		string(StringPath):      "/hello/world",
 		string(StringScheme):    "https",
-		"Content-Length":        strconv.Itoa(len(msg)),
+		"content-length":        strconv.Itoa(len(msg)),
 	})
 	h2 := makeHeaders(9, c.enc, true, false, map[string]string{
 		string(StringAuthority): "localhost",
 		string(StringMethod):    "POST",
 		string(StringPath):      "/hello/world",
 		string(StringScheme):    "https",
-		"Content-Length":        strconv.Itoa(len(msg)),
+		"content-length":        strconv.Itoa(len(msg)),
 	})
 	h3 := makeHeaders(7, c.enc, true, true, map[string]string{
 		string(StringAuthority): "localhost",
@@ -264,21 +264,21 @@ func TestIssue27(t *testing.T) {
 		string(StringMethod):    "POST",
 		string(StringPath):      "/hello/world",
 		string(StringScheme):    "https",
-		"Content-Length":        strconv.Itoa(len(msg)),
+		"content-length":        strconv.Itoa(len(msg)),
 	})
 	h2 := makeHeaders(5, c.enc, true, false, map[string]string{
 		string(StringAuthority): "localhost",
 		string(StringMethod):    "POST",
 		string(StringPath):      "/hello/world",
 		string(StringScheme):    "https",
-		"Content-Length":        strconv.Itoa(len(msg)),
+		"content-length":        strconv.Itoa(len(msg)),
 	})
 	h3 := makeHeaders(7, c.enc, false, false, map[string]string{
 		string(StringAuthority): "localhost",
 		string(StringMethod):    "GET",
 		string(StringPath):      "/hello/world",
 		string(StringScheme):    "https",
-		"Content-Length":        strconv.Itoa(len(msg)),
+		"content-length":        strconv.Itoa(len(msg)),
 	})
 
 	c.writeFrame(h1)

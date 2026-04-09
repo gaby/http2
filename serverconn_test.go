@@ -1428,6 +1428,7 @@ func TestHandleFrameRejectsContentLengthMismatchOnHeadersEndStream(t *testing.T)
 func TestHandleFrameRejectsContentLengthMismatchOnDataEndStream(t *testing.T) {
 	sc := newTestServerConn()
 	strm := newTestStream(1)
+	strm.SetWindow(65535)
 
 	headers := buildHeadersFrameWithOptions(t, strm.ID(), [][2]string{
 		{":method", "POST"},
@@ -1455,6 +1456,7 @@ func TestHandleFrameRejectsContentLengthMismatchOnDataEndStream(t *testing.T) {
 func TestHandleFrameAllowsMatchingContentLength(t *testing.T) {
 	sc := newTestServerConn()
 	strm := newTestStream(1)
+	strm.SetWindow(65535)
 
 	headers := buildHeadersFrameWithOptions(t, strm.ID(), [][2]string{
 		{":method", "POST"},
