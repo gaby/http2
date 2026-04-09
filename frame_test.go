@@ -551,6 +551,7 @@ func TestPushPromiseAccessorsAndReset(t *testing.T) {
 
 	pp.SetStream((1 << 31) + 123)
 	require.Equal(t, uint32(123), pp.Stream())
+	require.Zero(t, pp.stream&(1<<31))
 
 	pp.SetEndHeaders(true)
 	require.True(t, pp.EndHeaders())
