@@ -546,10 +546,10 @@ func TestPushPromiseDeserializeWithInsufficientPadding(t *testing.T) {
 func TestPushPromiseAccessorsAndReset(t *testing.T) {
 	pp := &PushPromise{}
 
-	pp.SetStream(1<<31 - 1)
-	require.Equal(t, uint32(1<<31-1), pp.Stream())
+	pp.SetStream((1 << 31) - 1)
+	require.Equal(t, uint32((1<<31)-1), pp.Stream())
 
-	pp.SetStream(1<<31 + 123)
+	pp.SetStream((1 << 31) + 123)
 	require.Equal(t, uint32(123), pp.Stream())
 
 	pp.SetEndHeaders(true)
