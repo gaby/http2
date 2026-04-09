@@ -25,6 +25,8 @@ const (
 	connStateClosed
 )
 
+const maxInt64ForPlatform = int64(1<<(strconv.IntSize-1) - 1)
+
 type serverConn struct {
 	c net.Conn
 	h fasthttp.RequestHandler
@@ -1237,16 +1239,14 @@ func (sc *serverConn) handleFrame(strm *Stream, fr *FrameHeader) error {
 				return NewGoAwayError(CompressionError, "END_HEADERS received on an incomplete stream")
 			}
 
-			if fr.Flags().Has(FlagEndStream) {
+			requestEnds := fr.Flags().Has(FlagEndStream) || strm.pendingEndStream
+			if requestEnds {
 				if err := validateContentLengthState(strm, true); err != nil {
 					return err
 				}
 			}
 
 			if strm.headersFinished && strm.pendingEndStream {
-				if err := validateContentLengthState(strm, true); err != nil {
-					return err
-				}
 				strm.SetState(StreamStateHalfClosed)
 				strm.pendingEndStream = false
 			}
@@ -1479,7 +1479,7 @@ func (sc *serverConn) handleHeaderFrame(strm *Stream, fr *FrameHeader) error {
 				if parseErr != nil || n < 0 {
 					return NewResetStreamError(ProtocolError, "invalid content-length header")
 				}
-				if n > int64(int(^uint(0)>>1)) {
+				if n > maxInt64ForPlatform {
 					return NewResetStreamError(ProtocolError, "content-length header exceeds implementation limit")
 				}
 				if strm.contentLength >= 0 && strm.contentLength != n {

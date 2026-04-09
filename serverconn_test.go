@@ -1440,7 +1440,7 @@ func TestHandleFrameRejectsContentLengthMismatchOnDataEndStream(t *testing.T) {
 
 	err := sc.handleFrame(strm, headers)
 	require.NoError(t, err)
-	handleState(headers, strm)
+	strm.SetState(StreamStateOpen)
 
 	data := buildDataFrame(strm.ID(), []byte("test"), true)
 	defer ReleaseFrameHeader(data)
@@ -1468,7 +1468,7 @@ func TestHandleFrameAllowsMatchingContentLength(t *testing.T) {
 
 	err := sc.handleFrame(strm, headers)
 	require.NoError(t, err)
-	handleState(headers, strm)
+	strm.SetState(StreamStateOpen)
 
 	data := buildDataFrame(strm.ID(), []byte("test"), true)
 	defer ReleaseFrameHeader(data)
