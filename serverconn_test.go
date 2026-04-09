@@ -1532,32 +1532,32 @@ func TestHandleFrameRejectsContentLengthExceededBeforeEndStream(t *testing.T) {
 func TestHandleHeaderFrameAcceptsMaxIntContentLength(t *testing.T) {
 	sc := newTestServerConn()
 	strm := newTestStream(1)
-	maxInt := int64(^uint(0) >> 1)
+	maxPlatformInt := int64(^uint(0) >> 1)
 
 	fr := buildHeadersFrame(t, strm.ID(), [][2]string{
 		{":method", "POST"},
 		{":scheme", "https"},
 		{":path", "/"},
-		{"content-length", strconv.FormatInt(maxInt, 10)},
+		{"content-length", strconv.FormatInt(maxPlatformInt, 10)},
 	})
 	defer ReleaseFrameHeader(fr)
 
 	err := sc.handleHeaderFrame(strm, fr)
 	require.NoError(t, err)
-	require.Equal(t, maxInt, strm.contentLength)
-	require.Equal(t, int(maxInt), strm.ctx.Request.Header.ContentLength())
+	require.Equal(t, maxPlatformInt, strm.contentLength)
+	require.Equal(t, int(maxPlatformInt), strm.ctx.Request.Header.ContentLength())
 }
 
 func TestHandleHeaderFrameRejectsContentLengthAboveMaxInt(t *testing.T) {
 	sc := newTestServerConn()
 	strm := newTestStream(1)
-	tooLarge := strconv.FormatUint(uint64(^uint(0)>>1)+1, 10)
+	contentLengthAboveMaxInt := strconv.FormatUint(uint64(^uint(0)>>1)+1, 10)
 
 	fr := buildHeadersFrame(t, strm.ID(), [][2]string{
 		{":method", "POST"},
 		{":scheme", "https"},
 		{":path", "/"},
-		{"content-length", tooLarge},
+		{"content-length", contentLengthAboveMaxInt},
 	})
 	defer ReleaseFrameHeader(fr)
 

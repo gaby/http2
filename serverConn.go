@@ -1483,6 +1483,10 @@ func (sc *serverConn) handleHeaderFrame(strm *Stream, fr *FrameHeader) error {
 				if strm.contentLength >= 0 && strm.contentLength != contentLength {
 					return NewResetStreamError(ProtocolError, "conflicting content-length header")
 				}
+				maxPlatformInt := int64(^uint(0) >> 1)
+				if contentLength > maxPlatformInt {
+					return NewResetStreamError(ProtocolError, "invalid content-length header")
+				}
 				contentLengthInt := int(contentLength)
 				if int64(contentLengthInt) != contentLength {
 					return NewResetStreamError(ProtocolError, "invalid content-length header")
