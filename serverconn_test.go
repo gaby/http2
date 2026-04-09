@@ -1477,6 +1477,51 @@ func TestHandleFrameAllowsMatchingContentLength(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestHandleFrameRejectsContentLengthExceededBeforeEndStream(t *testing.T) {
+	sc := newTestServerConn()
+	strm := newTestStream(1)
+	strm.SetWindow(65535)
+	strm.SetState(StreamStateOpen)
+	strm.contentLength = 3
+
+	data := buildDataFrame(strm.ID(), []byte("test"), false)
+	defer ReleaseFrameHeader(data)
+
+	err := sc.handleFrame(strm, data)
+	require.Error(t, err)
+	var h2Err Error
+	require.ErrorAs(t, err, &h2Err)
+	require.Equal(t, ProtocolError, h2Err.Code())
+	require.Equal(t, FrameResetStream, h2Err.frameType)
+}
+
+func TestIsValidHTTP2HeaderName(t *testing.T) {
+	t.Run("accepts valid names", func(t *testing.T) {
+		for _, name := range [][]byte{
+			[]byte("content-length"),
+			[]byte("x_custom.header"),
+			[]byte(":method"),
+			[]byte("!#$%&'*+-.^_`|~"),
+		} {
+			require.Truef(t, isValidHTTP2HeaderName(name), "expected valid name %q", name)
+		}
+	})
+
+	t.Run("rejects invalid names", func(t *testing.T) {
+		for _, name := range [][]byte{
+			nil,
+			[]byte(""),
+			[]byte("Content-Length"),
+			[]byte("bad name"),
+			[]byte("bad\tname"),
+			[]byte(":"),
+			[]byte("héader"),
+		} {
+			require.Falsef(t, isValidHTTP2HeaderName(name), "expected invalid name %q", name)
+		}
+	})
+}
+
 func TestHandleHeaderFrameInvalidCompressionIsConnectionError(t *testing.T) {
 	sc := newTestServerConn()
 	strm := newTestStream(1)

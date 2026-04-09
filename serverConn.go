@@ -1541,6 +1541,9 @@ func isValidHTTP2HeaderName(name []byte) bool {
 	if len(name) == 0 {
 		return false
 	}
+	if len(name) == 1 && name[0] == ':' {
+		return false
+	}
 	for i, ch := range name {
 		if i == 0 && ch == ':' {
 			continue
