@@ -130,6 +130,21 @@ func buildHeadersFrameWithOptions(t *testing.T, streamID uint32, headers [][2]st
 	return fr
 }
 
+func buildDataFrame(streamID uint32, payload []byte, endStream bool) *FrameHeader {
+	data := AcquireFrame(FrameData).(*Data)
+	data.SetData(payload)
+	data.SetEndStream(endStream)
+
+	fr := AcquireFrameHeader()
+	fr.SetStream(streamID)
+	if endStream {
+		fr.SetFlags(FrameFlags(0).Add(FlagEndStream))
+	}
+	fr.SetBody(data)
+	fr.length = len(payload)
+	return fr
+}
+
 func buildWindowUpdateFrame(_ *testing.T, streamID uint32, increment uint32) []byte {
 	header := []byte{
 		0x0, 0x0, 0x4,
@@ -1349,6 +1364,115 @@ func TestHandleHeaderFrameUnknownPseudo(t *testing.T) {
 	require.ErrorAs(t, err, &h2Err)
 	require.Equal(t, ProtocolError, h2Err.Code())
 	require.Equal(t, FrameResetStream, h2Err.frameType)
+}
+
+func TestHandleHeaderFrameRejectsUppercaseHeaderName(t *testing.T) {
+	sc := newTestServerConn()
+	strm := newTestStream(1)
+
+	fr := buildHeadersFrame(t, strm.ID(), [][2]string{
+		{":method", "GET"},
+		{":scheme", "https"},
+		{":path", "/"},
+		{"X-TEST", "ok"},
+	})
+	defer ReleaseFrameHeader(fr)
+
+	err := sc.handleHeaderFrame(strm, fr)
+	require.Error(t, err)
+	var h2Err Error
+	require.ErrorAs(t, err, &h2Err)
+	require.Equal(t, ProtocolError, h2Err.Code())
+	require.Equal(t, FrameResetStream, h2Err.frameType)
+}
+
+func TestHandleHeaderFrameRejectsEmptyPath(t *testing.T) {
+	sc := newTestServerConn()
+	strm := newTestStream(1)
+
+	fr := buildHeadersFrame(t, strm.ID(), [][2]string{
+		{":method", "GET"},
+		{":scheme", "https"},
+		{":path", ""},
+	})
+	defer ReleaseFrameHeader(fr)
+
+	err := sc.handleHeaderFrame(strm, fr)
+	require.Error(t, err)
+	var h2Err Error
+	require.ErrorAs(t, err, &h2Err)
+	require.Equal(t, ProtocolError, h2Err.Code())
+	require.Equal(t, FrameResetStream, h2Err.frameType)
+}
+
+func TestHandleFrameRejectsContentLengthMismatchOnHeadersEndStream(t *testing.T) {
+	sc := newTestServerConn()
+	strm := newTestStream(1)
+
+	fr := buildHeadersFrameWithOptions(t, strm.ID(), [][2]string{
+		{":method", "POST"},
+		{":scheme", "https"},
+		{":path", "/"},
+		{"content-length", "1"},
+	}, true, true)
+	defer ReleaseFrameHeader(fr)
+
+	err := sc.handleFrame(strm, fr)
+	require.Error(t, err)
+	var h2Err Error
+	require.ErrorAs(t, err, &h2Err)
+	require.Equal(t, ProtocolError, h2Err.Code())
+	require.Equal(t, FrameResetStream, h2Err.frameType)
+}
+
+func TestHandleFrameRejectsContentLengthMismatchOnDataEndStream(t *testing.T) {
+	sc := newTestServerConn()
+	strm := newTestStream(1)
+
+	headers := buildHeadersFrameWithOptions(t, strm.ID(), [][2]string{
+		{":method", "POST"},
+		{":scheme", "https"},
+		{":path", "/"},
+		{"content-length", "1"},
+	}, true, false)
+	defer ReleaseFrameHeader(headers)
+
+	err := sc.handleFrame(strm, headers)
+	require.NoError(t, err)
+	handleState(headers, strm)
+
+	data := buildDataFrame(strm.ID(), []byte("test"), true)
+	defer ReleaseFrameHeader(data)
+
+	err = sc.handleFrame(strm, data)
+	require.Error(t, err)
+	var h2Err Error
+	require.ErrorAs(t, err, &h2Err)
+	require.Equal(t, ProtocolError, h2Err.Code())
+	require.Equal(t, FrameResetStream, h2Err.frameType)
+}
+
+func TestHandleFrameAllowsMatchingContentLength(t *testing.T) {
+	sc := newTestServerConn()
+	strm := newTestStream(1)
+
+	headers := buildHeadersFrameWithOptions(t, strm.ID(), [][2]string{
+		{":method", "POST"},
+		{":scheme", "https"},
+		{":path", "/"},
+		{"content-length", "4"},
+	}, true, false)
+	defer ReleaseFrameHeader(headers)
+
+	err := sc.handleFrame(strm, headers)
+	require.NoError(t, err)
+	handleState(headers, strm)
+
+	data := buildDataFrame(strm.ID(), []byte("test"), true)
+	defer ReleaseFrameHeader(data)
+
+	err = sc.handleFrame(strm, data)
+	require.NoError(t, err)
 }
 
 func TestHandleHeaderFrameInvalidCompressionIsConnectionError(t *testing.T) {

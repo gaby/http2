@@ -74,6 +74,8 @@ type Stream struct {
 	seenPath          bool
 	seenAuthority     bool
 	isConnect         bool
+	contentLength     int64
+	bodyBytesReceived int64
 }
 
 var streamPool = sync.Pool{
@@ -109,6 +111,8 @@ func NewStream(id uint32, recvWin, sendWin int32) *Stream {
 	strm.seenPath = false
 	strm.seenAuthority = false
 	strm.isConnect = false
+	strm.contentLength = -1
+	strm.bodyBytesReceived = 0
 
 	return strm
 }

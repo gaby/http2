@@ -1237,7 +1237,16 @@ func (sc *serverConn) handleFrame(strm *Stream, fr *FrameHeader) error {
 				return NewGoAwayError(CompressionError, "END_HEADERS received on an incomplete stream")
 			}
 
+			if fr.Flags().Has(FlagEndStream) {
+				if err := validateContentLengthState(strm, true); err != nil {
+					return err
+				}
+			}
+
 			if strm.headersFinished && strm.pendingEndStream {
+				if err := validateContentLengthState(strm, true); err != nil {
+					return err
+				}
 				strm.SetState(StreamStateHalfClosed)
 				strm.pendingEndStream = false
 			}
@@ -1258,6 +1267,11 @@ func (sc *serverConn) handleFrame(strm *Stream, fr *FrameHeader) error {
 		payloadLen := fr.Len()
 
 		if err := sc.consumeStreamWindow(strm, payloadLen); err != nil {
+			return err
+		}
+
+		strm.bodyBytesReceived += int64(payloadLen)
+		if err := validateContentLengthState(strm, fr.Flags().Has(FlagEndStream)); err != nil {
 			return err
 		}
 
@@ -1385,6 +1399,10 @@ func (sc *serverConn) handleHeaderFrame(strm *Stream, fr *FrameHeader) error {
 		}
 
 		k, v := hf.KeyBytes(), hf.ValueBytes()
+		if !isLowercaseHeaderName(k) {
+			return NewResetStreamError(ProtocolError, "header field name must be lowercase")
+		}
+
 		if hf.IsPseudo() {
 			// Pseudo-headers MUST NOT appear in trailers (RFC 7540 §8.1.2.1).
 			if strm.isTrailer {
@@ -1414,6 +1432,10 @@ func (sc *serverConn) handleHeaderFrame(strm *Stream, fr *FrameHeader) error {
 
 				if strm.isConnect {
 					return NewResetStreamError(ProtocolError, "CONNECT must not include :path or :scheme")
+				}
+
+				if len(v) == 0 {
+					return NewResetStreamError(ProtocolError, "empty :path pseudo-header")
 				}
 
 				strm.seenPath = true
@@ -1452,6 +1474,19 @@ func (sc *serverConn) handleHeaderFrame(strm *Stream, fr *FrameHeader) error {
 				req.Header.SetUserAgentBytes(v)
 			case bytes.Equal(k, StringContentType):
 				req.Header.SetContentTypeBytes(v)
+			case bytes.Equal(k, StringContentLength):
+				n, parseErr := strconv.ParseInt(hf.Value(), 10, 64)
+				if parseErr != nil || n < 0 {
+					return NewResetStreamError(ProtocolError, "invalid content-length header")
+				}
+				if n > int64(int(^uint(0)>>1)) {
+					return NewResetStreamError(ProtocolError, "content-length header exceeds implementation limit")
+				}
+				if strm.contentLength >= 0 && strm.contentLength != n {
+					return NewResetStreamError(ProtocolError, "conflicting content-length header")
+				}
+				strm.contentLength = n
+				req.Header.SetContentLength(int(n))
 			default:
 				req.Header.AddBytesKV(k, v)
 			}
@@ -1489,6 +1524,31 @@ func (sc *serverConn) handleHeaderFrame(strm *Stream, fr *FrameHeader) error {
 	}
 
 	return err
+}
+
+func validateContentLengthState(strm *Stream, endStream bool) error {
+	if strm.contentLength < 0 {
+		return nil
+	}
+	if strm.bodyBytesReceived > strm.contentLength {
+		return NewResetStreamError(ProtocolError, "content-length does not match body size")
+	}
+	if endStream && strm.bodyBytesReceived != strm.contentLength {
+		return NewResetStreamError(ProtocolError, "content-length does not match body size")
+	}
+	return nil
+}
+
+func isLowercaseHeaderName(name []byte) bool {
+	if len(name) == 0 {
+		return false
+	}
+	for _, ch := range name {
+		if ch >= 'A' && ch <= 'Z' {
+			return false
+		}
+	}
+	return true
 }
 
 func isForbiddenHeader(key, value []byte) (bool, string) {
