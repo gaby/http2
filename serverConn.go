@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"os"
 	"runtime/debug"
@@ -1483,16 +1484,11 @@ func (sc *serverConn) handleHeaderFrame(strm *Stream, fr *FrameHeader) error {
 				if strm.contentLength >= 0 && strm.contentLength != contentLength {
 					return NewResetStreamError(ProtocolError, "conflicting content-length header")
 				}
-				maxPlatformInt := int64(^uint(0) >> 1)
-				if contentLength > maxPlatformInt {
-					return NewResetStreamError(ProtocolError, "invalid content-length header")
-				}
-				contentLengthInt := int(contentLength)
-				if int64(contentLengthInt) != contentLength {
+				if contentLength > int64(math.MaxInt) {
 					return NewResetStreamError(ProtocolError, "invalid content-length header")
 				}
 				strm.contentLength = contentLength
-				req.Header.SetContentLength(contentLengthInt)
+				req.Header.SetContentLength(int(contentLength))
 			default:
 				req.Header.AddBytesKV(k, v)
 			}

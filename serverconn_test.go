@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"math"
 	"net"
 	"os"
 	"strconv"
@@ -1532,7 +1533,7 @@ func TestHandleFrameRejectsContentLengthExceededBeforeEndStream(t *testing.T) {
 func TestHandleHeaderFrameAcceptsMaxIntContentLength(t *testing.T) {
 	sc := newTestServerConn()
 	strm := newTestStream(1)
-	maxPlatformInt := int64(^uint(0) >> 1)
+	maxPlatformInt := int64(math.MaxInt)
 
 	fr := buildHeadersFrame(t, strm.ID(), [][2]string{
 		{":method", "POST"},
@@ -1551,7 +1552,7 @@ func TestHandleHeaderFrameAcceptsMaxIntContentLength(t *testing.T) {
 func TestHandleHeaderFrameRejectsContentLengthAboveMaxInt(t *testing.T) {
 	sc := newTestServerConn()
 	strm := newTestStream(1)
-	contentLengthAboveMaxInt := strconv.FormatUint(uint64(^uint(0)>>1)+1, 10)
+	contentLengthAboveMaxInt := strconv.FormatUint(uint64(math.MaxInt)+1, 10)
 
 	fr := buildHeadersFrame(t, strm.ID(), [][2]string{
 		{":method", "POST"},
