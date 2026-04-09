@@ -1265,12 +1265,13 @@ func (sc *serverConn) handleFrame(strm *Stream, fr *FrameHeader) error {
 
 		data := fr.Body().(*Data)
 		payloadLen := fr.Len()
+		bodyLen := len(data.Data())
 
 		if err := sc.consumeStreamWindow(strm, payloadLen); err != nil {
 			return err
 		}
 
-		strm.bodyBytesReceived += int64(payloadLen)
+		strm.bodyBytesReceived += int64(bodyLen)
 		if err := validateContentLengthState(strm, fr.Flags().Has(FlagEndStream)); err != nil {
 			return err
 		}
@@ -1475,16 +1476,18 @@ func (sc *serverConn) handleHeaderFrame(strm *Stream, fr *FrameHeader) error {
 			case bytes.Equal(k, StringContentType):
 				req.Header.SetContentTypeBytes(v)
 			case bytes.Equal(k, StringContentLength):
-				contentLength, parseErr := strconv.Atoi(hf.Value())
+				contentLength, parseErr := strconv.ParseInt(hf.Value(), 10, 64)
 				if parseErr != nil || contentLength < 0 {
 					return NewResetStreamError(ProtocolError, "invalid content-length header")
 				}
-				n := int64(contentLength)
-				if strm.contentLength >= 0 && strm.contentLength != n {
+				if contentLength > int64(^uint(0)>>1) {
+					return NewResetStreamError(ProtocolError, "invalid content-length header")
+				}
+				if strm.contentLength >= 0 && strm.contentLength != contentLength {
 					return NewResetStreamError(ProtocolError, "conflicting content-length header")
 				}
-				strm.contentLength = n
-				req.Header.SetContentLength(contentLength)
+				strm.contentLength = contentLength
+				req.Header.SetContentLength(int(contentLength))
 			default:
 				req.Header.AddBytesKV(k, v)
 			}

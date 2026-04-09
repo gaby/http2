@@ -1477,6 +1477,39 @@ func TestHandleFrameAllowsMatchingContentLength(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestHandleFrameAllowsMatchingContentLengthWithPaddedData(t *testing.T) {
+	sc := newTestServerConn()
+	strm := newTestStream(1)
+	strm.SetWindow(65535)
+
+	headers := buildHeadersFrameWithOptions(t, strm.ID(), [][2]string{
+		{":method", "POST"},
+		{":scheme", "https"},
+		{":path", "/"},
+		{"content-length", "4"},
+	}, true, false)
+	defer ReleaseFrameHeader(headers)
+
+	err := sc.handleFrame(strm, headers)
+	require.NoError(t, err)
+	strm.SetState(StreamStateOpen)
+
+	data := AcquireFrame(FrameData).(*Data)
+	data.SetData([]byte("test"))
+	data.SetPadding(true)
+	data.SetEndStream(true)
+
+	fr := AcquireFrameHeader()
+	fr.SetStream(strm.ID())
+	fr.SetFlags(FrameFlags(0).Add(FlagEndStream).Add(FlagPadded))
+	fr.SetBody(data)
+	fr.length = len(data.Data()) + 1 + 10
+	defer ReleaseFrameHeader(fr)
+
+	err = sc.handleFrame(strm, fr)
+	require.NoError(t, err)
+}
+
 func TestHandleFrameRejectsContentLengthExceededBeforeEndStream(t *testing.T) {
 	sc := newTestServerConn()
 	strm := newTestStream(1)
@@ -1494,6 +1527,25 @@ func TestHandleFrameRejectsContentLengthExceededBeforeEndStream(t *testing.T) {
 	require.ErrorAs(t, err, &h2Err)
 	require.Equal(t, ProtocolError, h2Err.Code())
 	require.Equal(t, FrameResetStream, h2Err.frameType)
+}
+
+func TestHandleHeaderFrameAcceptsMaxIntContentLength(t *testing.T) {
+	sc := newTestServerConn()
+	strm := newTestStream(1)
+	maxInt64 := int64(^uint(0) >> 1)
+
+	fr := buildHeadersFrame(t, strm.ID(), [][2]string{
+		{":method", "POST"},
+		{":scheme", "https"},
+		{":path", "/"},
+		{"content-length", strconv.FormatInt(maxInt64, 10)},
+	})
+	defer ReleaseFrameHeader(fr)
+
+	err := sc.handleHeaderFrame(strm, fr)
+	require.NoError(t, err)
+	require.Equal(t, maxInt64, strm.contentLength)
+	require.Equal(t, int(maxInt64), strm.ctx.Request.Header.ContentLength())
 }
 
 func TestIsValidHTTP2HeaderName(t *testing.T) {
