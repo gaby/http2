@@ -25,8 +25,6 @@ const (
 	connStateClosed
 )
 
-const maxInt64ForPlatform = int64(1<<(strconv.IntSize-1) - 1)
-
 type serverConn struct {
 	c net.Conn
 	h fasthttp.RequestHandler
@@ -1399,8 +1397,8 @@ func (sc *serverConn) handleHeaderFrame(strm *Stream, fr *FrameHeader) error {
 		}
 
 		k, v := hf.KeyBytes(), hf.ValueBytes()
-		if !isLowercaseHeaderName(k) {
-			return NewResetStreamError(ProtocolError, "header field name must be lowercase")
+		if !isValidHTTP2HeaderName(k) {
+			return NewResetStreamError(ProtocolError, "invalid header field name")
 		}
 
 		if hf.IsPseudo() {
@@ -1475,18 +1473,16 @@ func (sc *serverConn) handleHeaderFrame(strm *Stream, fr *FrameHeader) error {
 			case bytes.Equal(k, StringContentType):
 				req.Header.SetContentTypeBytes(v)
 			case bytes.Equal(k, StringContentLength):
-				n, parseErr := strconv.ParseInt(hf.Value(), 10, 64)
-				if parseErr != nil || n < 0 {
+				contentLength, parseErr := strconv.Atoi(hf.Value())
+				if parseErr != nil || contentLength < 0 {
 					return NewResetStreamError(ProtocolError, "invalid content-length header")
 				}
-				if n > maxInt64ForPlatform {
-					return NewResetStreamError(ProtocolError, "content-length header exceeds implementation limit")
-				}
+				n := int64(contentLength)
 				if strm.contentLength >= 0 && strm.contentLength != n {
 					return NewResetStreamError(ProtocolError, "conflicting content-length header")
 				}
 				strm.contentLength = n
-				req.Header.SetContentLength(int(n))
+				req.Header.SetContentLength(contentLength)
 			default:
 				req.Header.AddBytesKV(k, v)
 			}
@@ -1539,12 +1535,22 @@ func validateContentLengthState(strm *Stream, endStream bool) error {
 	return nil
 }
 
-func isLowercaseHeaderName(name []byte) bool {
+func isValidHTTP2HeaderName(name []byte) bool {
 	if len(name) == 0 {
 		return false
 	}
-	for _, ch := range name {
+	for i, ch := range name {
+		if i == 0 && ch == ':' {
+			continue
+		}
 		if ch >= 'A' && ch <= 'Z' {
+			return false
+		}
+		switch {
+		case ch >= 'a' && ch <= 'z':
+		case ch >= '0' && ch <= '9':
+		case bytes.IndexByte([]byte("!#$%&'*+-.^_`|~"), ch) >= 0:
+		default:
 			return false
 		}
 	}
