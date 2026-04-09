@@ -25,6 +25,8 @@ const (
 	connStateClosed
 )
 
+var validHTTP2HeaderNamePunctuation = []byte("!#$%&'*+-.^_`|~")
+
 type serverConn struct {
 	c net.Conn
 	h fasthttp.RequestHandler
@@ -1549,7 +1551,7 @@ func isValidHTTP2HeaderName(name []byte) bool {
 		switch {
 		case ch >= 'a' && ch <= 'z':
 		case ch >= '0' && ch <= '9':
-		case bytes.IndexByte([]byte("!#$%&'*+-.^_`|~"), ch) >= 0:
+		case bytes.IndexByte(validHTTP2HeaderNamePunctuation, ch) >= 0:
 		default:
 			return false
 		}
