@@ -542,3 +542,83 @@ func TestPushPromiseDeserializeWithInsufficientPadding(t *testing.T) {
 	err := pp.Deserialize(fr)
 	require.ErrorIs(t, err, ErrMissingBytes)
 }
+
+func TestPushPromiseAccessorsAndReset(t *testing.T) {
+	pp := &PushPromise{}
+
+	pp.SetStream((1 << 31) - 1)
+	require.Equal(t, uint32((1<<31)-1), pp.Stream())
+
+	pp.SetStream((1 << 31) + 123)
+	require.Equal(t, uint32(123), pp.Stream())
+	require.Zero(t, pp.stream&(1<<31))
+
+	pp.SetEndHeaders(true)
+	require.True(t, pp.EndHeaders())
+	pp.SetEndHeaders(false)
+	require.False(t, pp.EndHeaders())
+
+	pp.SetPadding(true)
+	require.True(t, pp.Padding())
+	pp.SetPadding(false)
+	require.False(t, pp.Padding())
+
+	pp.SetHeader([]byte("header"))
+	_, err := pp.Write([]byte("-value"))
+	require.NoError(t, err)
+	require.Equal(t, []byte("header-value"), pp.header)
+
+	pp.SetPadding(true)
+	pp.SetEndHeaders(true)
+	pp.Reset()
+	require.False(t, pp.Padding())
+	require.False(t, pp.EndHeaders())
+	require.Zero(t, pp.Stream())
+	require.Empty(t, pp.header)
+}
+
+func TestPushPromiseSerializeDeserializeWithPadding(t *testing.T) {
+	original := &PushPromise{}
+	original.SetStream(44)
+	original.SetHeader([]byte("encoded"))
+	original.SetPadding(true)
+	original.SetEndHeaders(true)
+
+	fr := AcquireFrameHeader()
+	defer ReleaseFrameHeader(fr)
+
+	fr.SetBody(original)
+	original.Serialize(fr)
+	fr.length = len(fr.payload)
+
+	require.True(t, fr.Flags().Has(FlagPadded))
+	require.True(t, fr.Flags().Has(FlagEndHeaders))
+
+	var decoded PushPromise
+	require.NoError(t, decoded.Deserialize(fr))
+	require.True(t, decoded.Padding())
+	require.True(t, decoded.EndHeaders())
+	require.Equal(t, uint32(44), decoded.Stream())
+	require.Equal(t, []byte("encoded"), decoded.header)
+}
+
+func TestFrameTypeString(t *testing.T) {
+	cases := map[FrameType]string{
+		FrameData:         "FrameData",
+		FrameHeaders:      "FrameHeaders",
+		FramePriority:     "FramePriority",
+		FrameResetStream:  "FrameResetStream",
+		FrameSettings:     "FrameSettings",
+		FramePushPromise:  "FramePushPromise",
+		FramePing:         "FramePing",
+		FrameGoAway:       "FrameGoAway",
+		FrameWindowUpdate: "FrameWindowUpdate",
+		FrameContinuation: "FrameContinuation",
+	}
+
+	for typ, expected := range cases {
+		require.Equal(t, expected, typ.String())
+	}
+
+	require.Equal(t, "99", FrameType(99).String())
+}
