@@ -1480,14 +1480,15 @@ func (sc *serverConn) handleHeaderFrame(strm *Stream, fr *FrameHeader) error {
 				if parseErr != nil || contentLength < 0 {
 					return NewResetStreamError(ProtocolError, "invalid content-length header")
 				}
-				if contentLength > int64(^uint(0)>>1) {
-					return NewResetStreamError(ProtocolError, "invalid content-length header")
-				}
 				if strm.contentLength >= 0 && strm.contentLength != contentLength {
 					return NewResetStreamError(ProtocolError, "conflicting content-length header")
 				}
+				contentLengthInt := int(contentLength)
+				if int64(contentLengthInt) != contentLength {
+					return NewResetStreamError(ProtocolError, "invalid content-length header")
+				}
 				strm.contentLength = contentLength
-				req.Header.SetContentLength(int(contentLength))
+				req.Header.SetContentLength(contentLengthInt)
 			default:
 				req.Header.AddBytesKV(k, v)
 			}

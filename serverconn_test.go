@@ -1532,20 +1532,41 @@ func TestHandleFrameRejectsContentLengthExceededBeforeEndStream(t *testing.T) {
 func TestHandleHeaderFrameAcceptsMaxIntContentLength(t *testing.T) {
 	sc := newTestServerConn()
 	strm := newTestStream(1)
-	maxInt64 := int64(^uint(0) >> 1)
+	maxInt := int64(^uint(0) >> 1)
 
 	fr := buildHeadersFrame(t, strm.ID(), [][2]string{
 		{":method", "POST"},
 		{":scheme", "https"},
 		{":path", "/"},
-		{"content-length", strconv.FormatInt(maxInt64, 10)},
+		{"content-length", strconv.FormatInt(maxInt, 10)},
 	})
 	defer ReleaseFrameHeader(fr)
 
 	err := sc.handleHeaderFrame(strm, fr)
 	require.NoError(t, err)
-	require.Equal(t, maxInt64, strm.contentLength)
-	require.Equal(t, int(maxInt64), strm.ctx.Request.Header.ContentLength())
+	require.Equal(t, maxInt, strm.contentLength)
+	require.Equal(t, int(maxInt), strm.ctx.Request.Header.ContentLength())
+}
+
+func TestHandleHeaderFrameRejectsContentLengthAboveMaxInt(t *testing.T) {
+	sc := newTestServerConn()
+	strm := newTestStream(1)
+	tooLarge := strconv.FormatUint(uint64(^uint(0)>>1)+1, 10)
+
+	fr := buildHeadersFrame(t, strm.ID(), [][2]string{
+		{":method", "POST"},
+		{":scheme", "https"},
+		{":path", "/"},
+		{"content-length", tooLarge},
+	})
+	defer ReleaseFrameHeader(fr)
+
+	err := sc.handleHeaderFrame(strm, fr)
+	require.Error(t, err)
+	var h2Err Error
+	require.ErrorAs(t, err, &h2Err)
+	require.Equal(t, ProtocolError, h2Err.Code())
+	require.Equal(t, FrameResetStream, h2Err.frameType)
 }
 
 func TestIsValidHTTP2HeaderName(t *testing.T) {
