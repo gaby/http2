@@ -1488,7 +1488,7 @@ func (sc *serverConn) handleHeaderFrame(strm *Stream, fr *FrameHeader) error {
 					return NewResetStreamError(ProtocolError, "invalid content-length header")
 				}
 				strm.contentLength = contentLength
-				req.Header.SetContentLength(int(contentLength))
+				req.Header.SetBytesKV(k, v)
 			default:
 				req.Header.AddBytesKV(k, v)
 			}

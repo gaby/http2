@@ -1479,6 +1479,8 @@ func TestHandleFrameAllowsMatchingContentLength(t *testing.T) {
 }
 
 func TestHandleFrameAllowsMatchingContentLengthWithPaddedData(t *testing.T) {
+	const paddingLength = 10
+
 	sc := newTestServerConn()
 	strm := newTestStream(1)
 	strm.SetWindow(65535)
@@ -1504,7 +1506,7 @@ func TestHandleFrameAllowsMatchingContentLengthWithPaddedData(t *testing.T) {
 	fr.SetStream(strm.ID())
 	fr.SetFlags(FrameFlags(0).Add(FlagEndStream).Add(FlagPadded))
 	fr.SetBody(data)
-	fr.length = len(data.Data()) + 1 + 10
+	fr.length = len(data.Data()) + 1 + paddingLength
 	defer ReleaseFrameHeader(fr)
 
 	err = sc.handleFrame(strm, fr)
