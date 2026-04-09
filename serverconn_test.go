@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"math"
 	"net"
 	"os"
 	"strconv"
@@ -127,6 +128,21 @@ func buildHeadersFrameWithOptions(t *testing.T, streamID uint32, headers [][2]st
 	fr.SetFlags(flags)
 	fr.SetBody(h)
 	fr.length = len(h.Headers())
+	return fr
+}
+
+func buildDataFrame(streamID uint32, payload []byte, endStream bool) *FrameHeader {
+	data := AcquireFrame(FrameData).(*Data)
+	data.SetData(payload)
+	data.SetEndStream(endStream)
+
+	fr := AcquireFrameHeader()
+	fr.SetStream(streamID)
+	if endStream {
+		fr.SetFlags(FrameFlags(0).Add(FlagEndStream))
+	}
+	fr.SetBody(data)
+	fr.length = len(payload)
 	return fr
 }
 
@@ -1349,6 +1365,238 @@ func TestHandleHeaderFrameUnknownPseudo(t *testing.T) {
 	require.ErrorAs(t, err, &h2Err)
 	require.Equal(t, ProtocolError, h2Err.Code())
 	require.Equal(t, FrameResetStream, h2Err.frameType)
+}
+
+func TestHandleHeaderFrameRejectsUppercaseHeaderName(t *testing.T) {
+	sc := newTestServerConn()
+	strm := newTestStream(1)
+
+	fr := buildHeadersFrame(t, strm.ID(), [][2]string{
+		{":method", "GET"},
+		{":scheme", "https"},
+		{":path", "/"},
+		{"X-TEST", "ok"},
+	})
+	defer ReleaseFrameHeader(fr)
+
+	err := sc.handleHeaderFrame(strm, fr)
+	require.Error(t, err)
+	var h2Err Error
+	require.ErrorAs(t, err, &h2Err)
+	require.Equal(t, ProtocolError, h2Err.Code())
+	require.Equal(t, FrameResetStream, h2Err.frameType)
+}
+
+func TestHandleHeaderFrameRejectsEmptyPath(t *testing.T) {
+	sc := newTestServerConn()
+	strm := newTestStream(1)
+
+	fr := buildHeadersFrame(t, strm.ID(), [][2]string{
+		{":method", "GET"},
+		{":scheme", "https"},
+		{":path", ""},
+	})
+	defer ReleaseFrameHeader(fr)
+
+	err := sc.handleHeaderFrame(strm, fr)
+	require.Error(t, err)
+	var h2Err Error
+	require.ErrorAs(t, err, &h2Err)
+	require.Equal(t, ProtocolError, h2Err.Code())
+	require.Equal(t, FrameResetStream, h2Err.frameType)
+}
+
+func TestHandleFrameRejectsContentLengthMismatchOnHeadersEndStream(t *testing.T) {
+	sc := newTestServerConn()
+	strm := newTestStream(1)
+
+	fr := buildHeadersFrameWithOptions(t, strm.ID(), [][2]string{
+		{":method", "POST"},
+		{":scheme", "https"},
+		{":path", "/"},
+		{"content-length", "1"},
+	}, true, true)
+	defer ReleaseFrameHeader(fr)
+
+	err := sc.handleFrame(strm, fr)
+	require.Error(t, err)
+	var h2Err Error
+	require.ErrorAs(t, err, &h2Err)
+	require.Equal(t, ProtocolError, h2Err.Code())
+	require.Equal(t, FrameResetStream, h2Err.frameType)
+}
+
+func TestHandleFrameRejectsContentLengthMismatchOnDataEndStream(t *testing.T) {
+	sc := newTestServerConn()
+	strm := newTestStream(1)
+	strm.SetWindow(65535)
+
+	headers := buildHeadersFrameWithOptions(t, strm.ID(), [][2]string{
+		{":method", "POST"},
+		{":scheme", "https"},
+		{":path", "/"},
+		{"content-length", "1"},
+	}, true, false)
+	defer ReleaseFrameHeader(headers)
+
+	err := sc.handleFrame(strm, headers)
+	require.NoError(t, err)
+	strm.SetState(StreamStateOpen)
+
+	data := buildDataFrame(strm.ID(), []byte("test"), true)
+	defer ReleaseFrameHeader(data)
+
+	err = sc.handleFrame(strm, data)
+	require.Error(t, err)
+	var h2Err Error
+	require.ErrorAs(t, err, &h2Err)
+	require.Equal(t, ProtocolError, h2Err.Code())
+	require.Equal(t, FrameResetStream, h2Err.frameType)
+}
+
+func TestHandleFrameAllowsMatchingContentLength(t *testing.T) {
+	sc := newTestServerConn()
+	strm := newTestStream(1)
+	strm.SetWindow(65535)
+
+	headers := buildHeadersFrameWithOptions(t, strm.ID(), [][2]string{
+		{":method", "POST"},
+		{":scheme", "https"},
+		{":path", "/"},
+		{"content-length", "4"},
+	}, true, false)
+	defer ReleaseFrameHeader(headers)
+
+	err := sc.handleFrame(strm, headers)
+	require.NoError(t, err)
+	strm.SetState(StreamStateOpen)
+
+	data := buildDataFrame(strm.ID(), []byte("test"), true)
+	defer ReleaseFrameHeader(data)
+
+	err = sc.handleFrame(strm, data)
+	require.NoError(t, err)
+}
+
+func TestHandleFrameAllowsMatchingContentLengthWithPaddedData(t *testing.T) {
+	const paddingLength = 10
+
+	sc := newTestServerConn()
+	strm := newTestStream(1)
+	strm.SetWindow(65535)
+
+	headers := buildHeadersFrameWithOptions(t, strm.ID(), [][2]string{
+		{":method", "POST"},
+		{":scheme", "https"},
+		{":path", "/"},
+		{"content-length", "4"},
+	}, true, false)
+	defer ReleaseFrameHeader(headers)
+
+	err := sc.handleFrame(strm, headers)
+	require.NoError(t, err)
+	strm.SetState(StreamStateOpen)
+
+	data := AcquireFrame(FrameData).(*Data)
+	data.SetData([]byte("test"))
+	data.SetPadding(true)
+	data.SetEndStream(true)
+
+	fr := AcquireFrameHeader()
+	fr.SetStream(strm.ID())
+	fr.SetFlags(FrameFlags(0).Add(FlagEndStream).Add(FlagPadded))
+	fr.SetBody(data)
+	fr.length = len(data.Data()) + 1 + paddingLength
+	defer ReleaseFrameHeader(fr)
+
+	err = sc.handleFrame(strm, fr)
+	require.NoError(t, err)
+}
+
+func TestHandleFrameRejectsContentLengthExceededBeforeEndStream(t *testing.T) {
+	sc := newTestServerConn()
+	strm := newTestStream(1)
+	strm.SetWindow(65535)
+	strm.SetState(StreamStateOpen)
+	strm.headersFinished = true
+	strm.contentLength = 3
+
+	data := buildDataFrame(strm.ID(), []byte("test"), false)
+	defer ReleaseFrameHeader(data)
+
+	err := sc.handleFrame(strm, data)
+	require.Error(t, err)
+	var h2Err Error
+	require.ErrorAs(t, err, &h2Err)
+	require.Equal(t, ProtocolError, h2Err.Code())
+	require.Equal(t, FrameResetStream, h2Err.frameType)
+}
+
+func TestHandleHeaderFrameAcceptsMaxIntContentLength(t *testing.T) {
+	sc := newTestServerConn()
+	strm := newTestStream(1)
+	maxPlatformInt := int64(math.MaxInt)
+
+	fr := buildHeadersFrame(t, strm.ID(), [][2]string{
+		{":method", "POST"},
+		{":scheme", "https"},
+		{":path", "/"},
+		{"content-length", strconv.FormatInt(maxPlatformInt, 10)},
+	})
+	defer ReleaseFrameHeader(fr)
+
+	err := sc.handleHeaderFrame(strm, fr)
+	require.NoError(t, err)
+	require.Equal(t, maxPlatformInt, strm.contentLength)
+	require.Equal(t, int(maxPlatformInt), strm.ctx.Request.Header.ContentLength())
+}
+
+func TestHandleHeaderFrameRejectsContentLengthAboveMaxInt(t *testing.T) {
+	sc := newTestServerConn()
+	strm := newTestStream(1)
+	contentLengthAboveMaxInt := strconv.FormatUint(uint64(math.MaxInt)+1, 10)
+
+	fr := buildHeadersFrame(t, strm.ID(), [][2]string{
+		{":method", "POST"},
+		{":scheme", "https"},
+		{":path", "/"},
+		{"content-length", contentLengthAboveMaxInt},
+	})
+	defer ReleaseFrameHeader(fr)
+
+	err := sc.handleHeaderFrame(strm, fr)
+	require.Error(t, err)
+	var h2Err Error
+	require.ErrorAs(t, err, &h2Err)
+	require.Equal(t, ProtocolError, h2Err.Code())
+	require.Equal(t, FrameResetStream, h2Err.frameType)
+}
+
+func TestIsValidHTTP2HeaderName(t *testing.T) {
+	t.Run("accepts valid names", func(t *testing.T) {
+		for _, name := range [][]byte{
+			[]byte("content-length"),
+			[]byte("x_custom.header"),
+			[]byte(":method"),
+			[]byte("!#$%&'*+-.^_`|~"),
+		} {
+			require.Truef(t, isValidHTTP2HeaderName(name), "expected valid name %q", name)
+		}
+	})
+
+	t.Run("rejects invalid names", func(t *testing.T) {
+		for _, name := range [][]byte{
+			nil,
+			[]byte(""),
+			[]byte("Content-Length"),
+			[]byte("bad name"),
+			[]byte("bad\tname"),
+			[]byte(":"),
+			[]byte("héader"),
+		} {
+			require.Falsef(t, isValidHTTP2HeaderName(name), "expected invalid name %q", name)
+		}
+	})
 }
 
 func TestHandleHeaderFrameInvalidCompressionIsConnectionError(t *testing.T) {

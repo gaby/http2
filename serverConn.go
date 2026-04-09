@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"os"
 	"runtime/debug"
@@ -24,6 +25,8 @@ const (
 	connStateOpen connState = iota
 	connStateClosed
 )
+
+var validHTTP2HeaderNamePunctuation = []byte("!#$%&'*+-.^_`|~")
 
 type serverConn struct {
 	c net.Conn
@@ -1237,6 +1240,13 @@ func (sc *serverConn) handleFrame(strm *Stream, fr *FrameHeader) error {
 				return NewGoAwayError(CompressionError, "END_HEADERS received on an incomplete stream")
 			}
 
+			requestEnds := fr.Flags().Has(FlagEndStream) || strm.pendingEndStream
+			if requestEnds {
+				if err := validateContentLengthState(strm, true); err != nil {
+					return err
+				}
+			}
+
 			if strm.headersFinished && strm.pendingEndStream {
 				strm.SetState(StreamStateHalfClosed)
 				strm.pendingEndStream = false
@@ -1256,8 +1266,14 @@ func (sc *serverConn) handleFrame(strm *Stream, fr *FrameHeader) error {
 
 		data := fr.Body().(*Data)
 		payloadLen := fr.Len()
+		bodyLen := len(data.Data())
 
 		if err := sc.consumeStreamWindow(strm, payloadLen); err != nil {
+			return err
+		}
+
+		strm.bodyBytesReceived += int64(bodyLen)
+		if err := validateContentLengthState(strm, fr.Flags().Has(FlagEndStream)); err != nil {
 			return err
 		}
 
@@ -1385,6 +1401,10 @@ func (sc *serverConn) handleHeaderFrame(strm *Stream, fr *FrameHeader) error {
 		}
 
 		k, v := hf.KeyBytes(), hf.ValueBytes()
+		if !isValidHTTP2HeaderName(k) {
+			return NewResetStreamError(ProtocolError, "invalid header field name")
+		}
+
 		if hf.IsPseudo() {
 			// Pseudo-headers MUST NOT appear in trailers (RFC 7540 §8.1.2.1).
 			if strm.isTrailer {
@@ -1414,6 +1434,10 @@ func (sc *serverConn) handleHeaderFrame(strm *Stream, fr *FrameHeader) error {
 
 				if strm.isConnect {
 					return NewResetStreamError(ProtocolError, "CONNECT must not include :path or :scheme")
+				}
+
+				if len(v) == 0 {
+					return NewResetStreamError(ProtocolError, ":path pseudo-header must not be empty")
 				}
 
 				strm.seenPath = true
@@ -1452,6 +1476,19 @@ func (sc *serverConn) handleHeaderFrame(strm *Stream, fr *FrameHeader) error {
 				req.Header.SetUserAgentBytes(v)
 			case bytes.Equal(k, StringContentType):
 				req.Header.SetContentTypeBytes(v)
+			case bytes.Equal(k, StringContentLength):
+				contentLength, parseErr := strconv.ParseInt(hf.Value(), 10, 64)
+				if parseErr != nil || contentLength < 0 {
+					return NewResetStreamError(ProtocolError, "invalid content-length header")
+				}
+				if strm.contentLength >= 0 && strm.contentLength != contentLength {
+					return NewResetStreamError(ProtocolError, "conflicting content-length header")
+				}
+				if contentLength > int64(math.MaxInt) {
+					return NewResetStreamError(ProtocolError, "invalid content-length header")
+				}
+				strm.contentLength = contentLength
+				req.Header.SetBytesKV(k, v)
 			default:
 				req.Header.AddBytesKV(k, v)
 			}
@@ -1489,6 +1526,44 @@ func (sc *serverConn) handleHeaderFrame(strm *Stream, fr *FrameHeader) error {
 	}
 
 	return err
+}
+
+func validateContentLengthState(strm *Stream, endStream bool) error {
+	if strm.contentLength < 0 {
+		return nil
+	}
+	if strm.bodyBytesReceived > strm.contentLength {
+		return NewResetStreamError(ProtocolError, "received body exceeds declared content-length")
+	}
+	if endStream && strm.bodyBytesReceived != strm.contentLength {
+		return NewResetStreamError(ProtocolError, "received body size does not match declared content-length")
+	}
+	return nil
+}
+
+func isValidHTTP2HeaderName(name []byte) bool {
+	if len(name) == 0 {
+		return false
+	}
+	if len(name) == 1 && name[0] == ':' {
+		return false
+	}
+	for i, ch := range name {
+		if i == 0 && ch == ':' {
+			continue
+		}
+		if ch >= 'A' && ch <= 'Z' {
+			return false
+		}
+		switch {
+		case ch >= 'a' && ch <= 'z':
+		case ch >= '0' && ch <= '9':
+		case bytes.IndexByte(validHTTP2HeaderNamePunctuation, ch) >= 0:
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func isForbiddenHeader(key, value []byte) (bool, string) {
