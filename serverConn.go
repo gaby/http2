@@ -1435,7 +1435,7 @@ func (sc *serverConn) handleHeaderFrame(strm *Stream, fr *FrameHeader) error {
 				}
 
 				if len(v) == 0 {
-					return NewResetStreamError(ProtocolError, "empty :path pseudo-header")
+					return NewResetStreamError(ProtocolError, ":path pseudo-header must not be empty")
 				}
 
 				strm.seenPath = true
@@ -1529,10 +1529,10 @@ func validateContentLengthState(strm *Stream, endStream bool) error {
 		return nil
 	}
 	if strm.bodyBytesReceived > strm.contentLength {
-		return NewResetStreamError(ProtocolError, "content-length does not match body size")
+		return NewResetStreamError(ProtocolError, "received body exceeds declared content-length")
 	}
 	if endStream && strm.bodyBytesReceived != strm.contentLength {
-		return NewResetStreamError(ProtocolError, "content-length does not match body size")
+		return NewResetStreamError(ProtocolError, "received body size does not match declared content-length")
 	}
 	return nil
 }
