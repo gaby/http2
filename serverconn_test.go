@@ -1482,6 +1482,7 @@ func TestHandleFrameRejectsContentLengthExceededBeforeEndStream(t *testing.T) {
 	strm := newTestStream(1)
 	strm.SetWindow(65535)
 	strm.SetState(StreamStateOpen)
+	strm.headersFinished = true
 	strm.contentLength = 3
 
 	data := buildDataFrame(strm.ID(), []byte("test"), false)
