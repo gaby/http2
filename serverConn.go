@@ -186,10 +186,9 @@ func (sc *serverConn) signalConnClose() {
 	if sc.closing.CompareAndSwap(false, true) {
 		if sc.c != nil {
 			_ = sc.c.SetReadDeadline(time.Now())
-			go func(c net.Conn) {
-				time.Sleep(50 * time.Millisecond)
-				_ = c.Close()
-			}(sc.c)
+			time.AfterFunc(50*time.Millisecond, func() {
+				_ = sc.c.Close()
+			})
 		}
 	}
 }
@@ -456,10 +455,7 @@ func (sc *serverConn) handlePing(ping *Ping) {
 
 	if violations >= pingMaxViolation {
 		sc.writeGoAway(0, EnhanceYourCalm, "too many pings")
-		go func() {
-			time.Sleep(goawayFlushDelay)
-			sc.signalConnError()
-		}()
+		time.AfterFunc(goawayFlushDelay, sc.signalConnError)
 		return
 	}
 
@@ -699,10 +695,7 @@ func (sc *serverConn) readLoop() (err error) {
 			if isConnectionError(frameErr) {
 				// Delay signaling close very slightly so the GOAWAY has a chance
 				// to flush before we tear down the socket.
-				go func() {
-					time.Sleep(goawayFlushDelay)
-					sc.signalConnError()
-				}()
+				time.AfterFunc(goawayFlushDelay, sc.signalConnError)
 			}
 			err = frameErr
 		}
@@ -1067,9 +1060,8 @@ func (sc *serverConn) writeReset(strm uint32, code ErrorCode) {
 	}
 }
 
-func (sc *serverConn) writeGoAway(strm uint32, code ErrorCode, message string) {
+func buildGoAwayFrame(strm uint32, code ErrorCode, message string) *FrameHeader {
 	ga := AcquireFrame(FrameGoAway).(*GoAway)
-
 	fr := AcquireFrameHeader()
 
 	ga.SetStream(strm)
@@ -1077,7 +1069,11 @@ func (sc *serverConn) writeGoAway(strm uint32, code ErrorCode, message string) {
 	ga.SetData([]byte(message))
 
 	fr.SetBody(ga)
+	return fr
+}
 
+func (sc *serverConn) writeGoAway(strm uint32, code ErrorCode, message string) {
+	fr := buildGoAwayFrame(strm, code, message)
 	sc.enqueueFrame(fr)
 
 	if strm != 0 {
@@ -1095,17 +1091,9 @@ func (sc *serverConn) writeGoAway(strm uint32, code ErrorCode, message string) {
 }
 
 func (sc *serverConn) writeGoAwayWithTimeout(strm uint32, code ErrorCode, message string, timeout time.Duration) bool {
-	ga := AcquireFrame(FrameGoAway).(*GoAway)
-
-	fr := AcquireFrameHeader()
-
-	ga.SetStream(strm)
-	ga.SetCode(code)
-	ga.SetData([]byte(message))
-
-	fr.SetBody(ga)
-
+	fr := buildGoAwayFrame(strm, code, message)
 	sent := sc.enqueueFrameWithTimeout(fr, timeout)
+
 	if sent && strm != 0 {
 		atomic.StoreUint32(&sc.closeRef, sc.lastID)
 	}
@@ -1566,20 +1554,30 @@ func isValidHTTP2HeaderName(name []byte) bool {
 	return true
 }
 
+var (
+	forbiddenConnection      = []byte("connection")
+	forbiddenProxyConnection = []byte("proxy-connection")
+	forbiddenTransferEnc     = []byte("transfer-encoding")
+	forbiddenUpgrade         = []byte("upgrade")
+	forbiddenKeepAlive       = []byte("keep-alive")
+	forbiddenTE              = []byte("te")
+	teTrailers               = []byte("trailers")
+)
+
 func isForbiddenHeader(key, value []byte) (bool, string) {
 	switch {
-	case bytes.EqualFold(key, []byte("connection")):
+	case bytes.EqualFold(key, forbiddenConnection):
 		return true, "connection"
-	case bytes.EqualFold(key, []byte("proxy-connection")):
+	case bytes.EqualFold(key, forbiddenProxyConnection):
 		return true, "proxy-connection"
-	case bytes.EqualFold(key, []byte("transfer-encoding")):
+	case bytes.EqualFold(key, forbiddenTransferEnc):
 		return true, "transfer-encoding"
-	case bytes.EqualFold(key, []byte("upgrade")):
+	case bytes.EqualFold(key, forbiddenUpgrade):
 		return true, "upgrade"
-	case bytes.EqualFold(key, []byte("keep-alive")):
+	case bytes.EqualFold(key, forbiddenKeepAlive):
 		return true, "keep-alive"
-	case bytes.EqualFold(key, []byte("te")):
-		if !bytes.EqualFold(bytes.TrimSpace(value), []byte("trailers")) {
+	case bytes.EqualFold(key, forbiddenTE):
+		if !bytes.EqualFold(bytes.TrimSpace(value), teTrailers) {
 			return true, "te"
 		}
 	}
@@ -1774,7 +1772,7 @@ func (s *streamWrite) ReadFrom(r io.Reader) (num int64, err error) {
 			data.SetData(buf[:n])
 			fr.SetBody(data)
 
-			s.writer <- fr
+			s.sendFrame(fr)
 		} else {
 			s.sc.queueData(
 				s.strm,
@@ -2075,18 +2073,12 @@ func (sc *serverConn) appendPendingData(strm *Stream, data []byte, endStream boo
 	// Don't spawn goroutine if connection is already closing to avoid interfering
 	// with shutdown sequences (e.g., idle timeout sending GOAWAY).
 	if !hadPending && len(data) > 0 && !sc.closing.Load() && !sc.isClosed() {
-		go func() {
-			// Small delay to batch multiple rapid queueData calls
-			select {
-			case <-sc.closer:
-				return
-			case <-time.After(5 * time.Millisecond):
-			}
-			// Double-check flags before flushing
+		// Schedule an async flush after a small delay to batch rapid queueData calls.
+		time.AfterFunc(5*time.Millisecond, func() {
 			if !sc.isClosed() && !sc.closing.Load() {
 				sc.flushPendingData(strm)
 			}
-		}()
+		})
 	}
 }
 
@@ -2158,9 +2150,10 @@ func (sc *serverConn) queueData(strm *Stream, data []byte, endStream bool) {
 func (sc *serverConn) flushPendingData(strm *Stream) {
 	strm.pendingMu.Lock()
 	hasPending := len(strm.pendingData) > 0 || strm.pendingDataEndStream
-	data := append([]byte(nil), strm.pendingData...)
+	// Swap the slice out instead of copying to avoid an allocation.
+	data := strm.pendingData
+	strm.pendingData = nil
 	endStream := strm.pendingDataEndStream
-	strm.pendingData = strm.pendingData[:0]
 	strm.pendingDataEndStream = false
 	strm.pendingMu.Unlock()
 

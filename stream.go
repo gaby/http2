@@ -100,7 +100,7 @@ func NewStream(id uint32, recvWin, sendWin int32) *Stream {
 	strm.startedAt = time.Time{}
 	strm.previousHeaderBytes = strm.previousHeaderBytes[:0]
 	strm.ctx = nil
-	strm.scheme = []byte("https")
+	strm.scheme = append(strm.scheme[:0], "https"...)
 	strm.origType = 0
 	strm.headerBlockNum = 0
 	strm.headerListSize = 0

@@ -131,7 +131,7 @@ var (
 		InternalError:        "Internal error",
 		FlowControlError:     "Flow control error",
 		SettingsTimeoutError: "Settings timeout",
-		StreamClosedError:    "Stream have been closed",
+		StreamClosedError:    "Stream has been closed",
 		FrameSizeError:       "FrameHeader size error",
 		RefusedStreamError:   "Refused Stream",
 		StreamCanceled:       "Stream canceled",

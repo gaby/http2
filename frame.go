@@ -48,7 +48,7 @@ func (flags FrameFlags) Add(f FrameFlags) FrameFlags {
 
 // Del deletes f from frame flags.
 func (flags FrameFlags) Del(f FrameFlags) FrameFlags {
-	return flags ^ f
+	return flags &^ f
 }
 
 type Frame interface {

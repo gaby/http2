@@ -27,8 +27,6 @@ const (
 	FlagPriority   FrameFlags = 0x20
 )
 
-// TODO: Develop methods for FrameFlags
-
 var frameHeaderPool = sync.Pool{
 	New: func() any {
 		return &FrameHeader{}
@@ -182,7 +180,6 @@ func (f *FrameHeader) ReadFrom(br *bufio.Reader) (int64, error) {
 	return f.readFrom(br)
 }
 
-// TODO: Delete rb?
 func (f *FrameHeader) readFrom(br *bufio.Reader) (int64, error) {
 	header, err := br.Peek(DefaultFrameSize)
 	if err != nil {
@@ -212,8 +209,6 @@ func (f *FrameHeader) readFrom(br *bufio.Reader) (int64, error) {
 	}
 	f.fr = AcquireFrame(f.kind)
 
-	// if max > 0 && frh.length > max {
-	// TODO: Discard bytes and return an error
 	if f.length > 0 {
 		n := f.length
 		if n < 0 {

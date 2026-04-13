@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
 	"slices"
 	"strconv"
 	"sync"
@@ -41,10 +40,8 @@ type ConnOpts struct {
 	WindowWaitTimeout time.Duration
 }
 
-// Handshake performs an HTTP/2 handshake. That means, it will send
-// the preface if `preface` is true, send a settings frame and a
-// window update frame (for the connection's window).
-// TODO: explain more
+// Handshake performs an HTTP/2 handshake. It sends the preface (if requested),
+// followed by a SETTINGS frame and a WINDOW_UPDATE frame for the connection window.
 func Handshake(preface bool, bw *bufio.Writer, st *Settings, maxWin int32) error {
 	if preface {
 		err := WritePreface(bw)
@@ -57,10 +54,10 @@ func Handshake(preface bool, bw *bufio.Writer, st *Settings, maxWin int32) error
 	defer ReleaseFrameHeader(fr)
 
 	// write the settings
-	st2 := &Settings{}
-	st.CopyTo(st2)
+	var st2 Settings
+	st.CopyTo(&st2)
 
-	fr.SetBody(st2)
+	fr.SetBody(&st2)
 
 	_, err := fr.WriteTo(bw)
 	if err == nil {
@@ -128,6 +125,7 @@ type Conn struct {
 	onDisconnect func(*Conn)
 
 	closed uint64
+	done   chan struct{} // closed when writeLoop exits
 
 	windowWaitTimeout time.Duration
 }
@@ -146,11 +144,12 @@ func NewConn(c net.Conn, opts ConnOpts) *Conn {
 		enc:               AcquireHPACK(),
 		dec:               AcquireHPACK(),
 		nextID:            1,
-		serverWindow:      65535, // RFC 7540 default initial window
+		serverWindow:      int32(defaultWindowSize), // RFC 7540 default initial window
 		maxWindow:         1 << 20,
 		currentWindow:     1 << 20,
 		in:                make(chan *Ctx, 128),
 		out:               make(chan *FrameHeader, 128),
+		done:              make(chan struct{}),
 		pingInterval:      opts.PingInterval,
 		disableAcks:       opts.DisablePingChecking,
 		onDisconnect:      opts.OnDisconnect,
@@ -185,9 +184,7 @@ type Dialer struct {
 }
 
 func (d *Dialer) tryDial() (net.Conn, error) {
-	if d.TLSConfig == nil || !func() bool {
-		return slices.Contains(d.TLSConfig.NextProtos, "h2")
-	}() {
+	if d.TLSConfig == nil || !slices.Contains(d.TLSConfig.NextProtos, "h2") {
 		configureDialer(d)
 	}
 
@@ -387,6 +384,9 @@ func (c *Conn) Closed() bool {
 
 // Close closes the connection gracefully, sending a GoAway message
 // and then closing the underlying TCP connection.
+//
+// Close is safe to call from any goroutine. The GoAway frame and TCP
+// teardown are handled by the writeLoop to avoid concurrent writes.
 func (c *Conn) Close() error {
 	if !atomic.CompareAndSwapUint64(&c.closed, 0, 1) {
 		return io.EOF
@@ -396,34 +396,50 @@ func (c *Conn) Close() error {
 
 	close(c.in)
 
-	fr := AcquireFrameHeader()
-	defer ReleaseFrameHeader(fr)
-
-	ga := AcquireFrame(FrameGoAway).(*GoAway)
-	ga.SetStream(0)
-	ga.SetCode(NoError)
-	ga.SetData([]byte(NoError.String()))
-
-	fr.SetBody(ga)
-
-	_, err := fr.WriteTo(c.bw)
-	if err == nil {
-		err = c.bw.Flush()
+	// If writeLoop was never started (e.g. Handshake not called, or direct
+	// struct construction in tests), handle cleanup directly.
+	if c.done == nil {
+		_ = c.c.Close()
+		if c.onDisconnect != nil {
+			c.onDisconnect(c)
+		}
+		return nil
 	}
 
-	_ = c.c.Close()
-
-	if c.onDisconnect != nil {
-		c.onDisconnect(c)
+	// writeLoop is (or was) running — it handles GoAway + TCP close.
+	// Use a backstop to force-close if writeLoop is stuck.
+	select {
+	case <-c.done:
+		// writeLoop already exited and cleaned up
+	default:
+		go func() {
+			select {
+			case <-c.done:
+			case <-time.After(100 * time.Millisecond):
+				_ = c.c.Close()
+			}
+		}()
 	}
 
-	return err
+	return nil
 }
 
 // Write queues the request to be sent to the server.
 //
-// Check if `c` has been previously closed before accessing this function.
+// If the connection is already closed, the request is resolved with
+// net.ErrClosed instead of panicking.
 func (c *Conn) Write(r *Ctx) {
+	if atomic.LoadUint64(&c.closed) == 1 {
+		r.resolve(net.ErrClosed)
+		return
+	}
+
+	defer func() {
+		if recover() != nil {
+			r.resolve(net.ErrClosed)
+		}
+	}()
+
 	c.in <- r
 }
 
@@ -444,15 +460,14 @@ func (c *Conn) Cancel(ctx *Ctx) error {
 
 func (c *Conn) cancel(ctx *Ctx) {
 	h := AcquireFrameHeader()
-	h.SetStream( // TODO: use atomic here??
-		atomic.LoadUint32(&ctx.streamID))
+	h.SetStream(atomic.LoadUint32(&ctx.streamID))
 
 	fr := AcquireFrame(FrameResetStream).(*RstStream)
 	fr.SetCode(StreamCanceled)
 
 	h.SetBody(fr)
 
-	c.out <- h
+	c.trySendOut(h)
 }
 
 type WriteError struct {
@@ -475,11 +490,63 @@ func (we WriteError) As(target any) bool {
 	return errors.As(we.err, target)
 }
 
+// trySendOut sends a frame to the outgoing channel without blocking if the
+// connection is shutting down. This prevents goroutine leaks when writeLoop
+// has already exited.
+func (c *Conn) trySendOut(fr *FrameHeader) {
+	if c.done == nil {
+		// writeLoop was never started; best-effort non-blocking send.
+		select {
+		case c.out <- fr:
+		default:
+			ReleaseFrameHeader(fr)
+		}
+		return
+	}
+	select {
+	case c.out <- fr:
+	case <-c.done:
+		ReleaseFrameHeader(fr)
+	}
+}
+
 func (c *Conn) writeLoop() {
 	var lastErr error
 
+	// 4. Signal that writeLoop has fully exited (runs last).
+	defer func() {
+		if c.done != nil {
+			close(c.done)
+		}
+	}()
+
+	// 3. Write GoAway and close the TCP connection (runs third).
+	defer func() {
+		if c.bw != nil {
+			fr := AcquireFrameHeader()
+			ga := AcquireFrame(FrameGoAway).(*GoAway)
+			ga.SetStream(0)
+			ga.SetCode(NoError)
+			ga.SetData([]byte(NoError.String()))
+			fr.SetBody(ga)
+			_, _ = fr.WriteTo(c.bw)
+			_ = c.bw.Flush()
+			ReleaseFrameHeader(fr)
+		}
+
+		if c.c != nil {
+			_ = c.c.Close()
+		}
+
+		if c.onDisconnect != nil {
+			c.onDisconnect(c)
+		}
+	}()
+
+	// 2. Set the closed flag and close the in channel (runs second).
 	defer func() { _ = c.Close() }()
 
+	// 1. Handle panics and resolve all pending requests (runs first).
 	defer func() {
 		if err := recover(); err != nil {
 			if lastErr == nil {
@@ -593,7 +660,6 @@ func (c *Conn) readLoop() {
 			break
 		}
 
-		// TODO: panic otherwise?
 		if ri, ok := c.reqQueued.Load(fr.Stream()); ok {
 			r := ri.(*Ctx)
 
@@ -604,8 +670,6 @@ func (c *Conn) readLoop() {
 				}
 			} else {
 				c.finish(r, fr.Stream(), err)
-
-				fmt.Fprintf(os.Stderr, "%s. payload=%v\n", err, fr.payload)
 
 				if errors.Is(err, FlowControlError) {
 					break
@@ -715,7 +779,7 @@ func (c *Conn) writeRequest(ctx *Ctx) error {
 }
 
 func (c *Conn) writeData(fh *FrameHeader, ctx *Ctx, body []byte) (err error) {
-	maxFrame := 1 << 14
+	maxFrame := int(defaultDataFrameSize)
 
 	cond := c.windowCondition()
 	data := AcquireFrame(FrameData).(*Data)
@@ -725,6 +789,13 @@ func (c *Conn) writeData(fh *FrameHeader, ctx *Ctx, body []byte) (err error) {
 	if wwt <= 0 {
 		wwt = windowWaitTimeout
 	}
+
+	// Reuse a single AfterFunc timer across iterations to avoid per-wait allocations.
+	// The timer calls notifyWindowAvailable which broadcasts on the cond variable
+	// to wake up the waiting goroutine.
+	waitTimer := time.AfterFunc(time.Hour, c.notifyWindowAvailable)
+	waitTimer.Stop()
+	defer waitTimer.Stop()
 
 	for i := 0; err == nil && i < len(body); {
 		remaining := len(body) - i
@@ -742,9 +813,9 @@ func (c *Conn) writeData(fh *FrameHeader, ctx *Ctx, body []byte) (err error) {
 				break
 			}
 
-			timer := time.AfterFunc(wwt, c.notifyWindowAvailable)
+			waitTimer.Reset(wwt)
 			cond.Wait()
-			if !timer.Stop() {
+			if !waitTimer.Stop() {
 				connWin = atomic.LoadInt32(&c.serverWindow)
 				streamWin = atomic.LoadInt32(&ctx.sendWindow)
 
@@ -867,7 +938,7 @@ func (c *Conn) handleSettings(st *Settings) {
 
 	fr.SetBody(stRes)
 
-	c.out <- fr
+	c.trySendOut(fr)
 }
 
 func (c *Conn) handlePing(ping *Ping) {
@@ -878,7 +949,7 @@ func (c *Conn) handlePing(ping *Ping) {
 
 	fr.SetBody(ping)
 
-	c.out <- fr
+	c.trySendOut(fr)
 }
 
 func (c *Conn) readStream(fr *FrameHeader, res *fasthttp.Response) (err error) {
@@ -893,7 +964,7 @@ func (c *Conn) readStream(fr *FrameHeader, res *fasthttp.Response) (err error) {
 		c.currentWindow -= int32(bytesConsumed)
 		currentWin := c.currentWindow
 
-		c.serverWindow -= int32(bytesConsumed)
+		atomic.AddInt32(&c.serverWindow, -int32(bytesConsumed))
 
 		if data.Len() != 0 {
 			res.AppendBody(data.Data())
@@ -934,7 +1005,7 @@ func (c *Conn) updateWindow(streamID uint32, size int) {
 
 	fr.SetBody(wu)
 
-	c.out <- fr
+	c.trySendOut(fr)
 }
 
 func (c *Conn) readHeader(b []byte, res *fasthttp.Response) error {

@@ -342,6 +342,10 @@ func TestIdleConnection(t *testing.T) {
 		FrameHeaders, FrameData,
 	}
 
+	// Set a deadline to prevent hanging if the server doesn't close the connection.
+	require.NoError(t, c.c.SetReadDeadline(time.Now().Add(10*time.Second)))
+	defer c.c.SetReadDeadline(time.Time{})
+
 	for i := 0; i < 2; i++ {
 		fr, err := c.readNext()
 		require.NoError(t, err)
