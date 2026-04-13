@@ -149,7 +149,6 @@ func NewConn(c net.Conn, opts ConnOpts) *Conn {
 		currentWindow:     1 << 20,
 		in:                make(chan *Ctx, 128),
 		out:               make(chan *FrameHeader, 128),
-		done:              make(chan struct{}),
 		pingInterval:      opts.PingInterval,
 		disableAcks:       opts.DisablePingChecking,
 		onDisconnect:      opts.OnDisconnect,
@@ -264,6 +263,7 @@ func (c *Conn) LastErr() error {
 func (c *Conn) Handshake() error {
 	err := c.doHandshake()
 	if err == nil {
+		c.done = make(chan struct{})
 		go c.writeLoop()
 		go c.readLoop()
 	}
@@ -394,12 +394,16 @@ func (c *Conn) Close() error {
 
 	c.notifyWindowAvailable()
 
-	close(c.in)
+	if c.in != nil {
+		close(c.in)
+	}
 
 	// If writeLoop was never started (e.g. Handshake not called, or direct
 	// struct construction in tests), handle cleanup directly.
 	if c.done == nil {
-		_ = c.c.Close()
+		if c.c != nil {
+			_ = c.c.Close()
+		}
 		if c.onDisconnect != nil {
 			c.onDisconnect(c)
 		}
@@ -416,7 +420,9 @@ func (c *Conn) Close() error {
 			select {
 			case <-c.done:
 			case <-time.After(100 * time.Millisecond):
-				_ = c.c.Close()
+				if c.c != nil {
+					_ = c.c.Close()
+				}
 			}
 		}()
 	}

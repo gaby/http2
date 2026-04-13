@@ -650,6 +650,10 @@ func TestSettingsInitialWindowIncreaseFlushesPendingData(t *testing.T) {
 		ln.Close()
 	})
 
+	// Set a read deadline to prevent the test from hanging indefinitely.
+	require.NoError(t, c.c.SetReadDeadline(time.Now().Add(5*time.Second)))
+	defer c.c.SetReadDeadline(time.Time{})
+
 	sendSettings := func(val uint32) {
 		fr := AcquireFrameHeader()
 		st := AcquireFrame(FrameSettings).(*Settings)
