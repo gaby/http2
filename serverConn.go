@@ -186,7 +186,12 @@ func (sc *serverConn) signalConnClose() {
 	if sc.closing.CompareAndSwap(false, true) {
 		if sc.c != nil {
 			_ = sc.c.SetReadDeadline(time.Now())
-			time.AfterFunc(50*time.Millisecond, func() {
+			// Safety-net close: the normal shutdown path (writeLoop's defer)
+			// closes the connection after flushing all queued frames. This
+			// timer only fires when the writeLoop is stuck. Use a generous
+			// delay so that GOAWAY frames have time to be flushed to the
+			// TCP stack even on slow CI platforms (e.g., Windows runners).
+			time.AfterFunc(250*time.Millisecond, func() {
 				_ = sc.c.Close()
 			})
 		}
