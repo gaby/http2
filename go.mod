@@ -7,7 +7,7 @@ require (
 	github.com/summerwind/h2spec v2.2.1+incompatible
 	github.com/valyala/fasthttp v1.70.0
 	github.com/valyala/fastrand v1.1.0
-	golang.org/x/net v0.52.0
+	golang.org/x/net v0.53.0
 )
 
 require (
