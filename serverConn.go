@@ -2060,26 +2060,18 @@ func (sc *serverConn) queueDataFrame(strm *Stream, data []byte, endStream bool) 
 
 func (sc *serverConn) appendPendingData(strm *Stream, data []byte, endStream bool) {
 	strm.pendingMu.Lock()
-	hadPending := len(strm.pendingData) > 0
 	strm.pendingData = append(strm.pendingData, data...)
 	if endStream {
 		strm.pendingDataEndStream = true
 	}
 	strm.pendingMu.Unlock()
 
-	// If this is the first pending data added (transition from empty to non-empty),
-	// schedule an async flush attempt. This handles the race where SETTINGS increases
-	// window before the handler queues data.
-	// Don't spawn goroutine if connection is already closing to avoid interfering
-	// with shutdown sequences (e.g., idle timeout sending GOAWAY).
-	if !hadPending && len(data) > 0 && !sc.closing.Load() && !sc.isClosed() {
-		// Schedule an async flush after a small delay to batch rapid queueData calls.
-		time.AfterFunc(5*time.Millisecond, func() {
-			if !sc.isClosed() && !sc.closing.Load() {
-				sc.flushPendingData(strm)
-			}
-		})
-	}
+	// No async retry timer is needed here. All code paths that increase the
+	// flow-control window (handleSettings for SETTINGS_INITIAL_WINDOW_SIZE,
+	// and WINDOW_UPDATE handling for both stream and connection levels) already
+	// call flushPendingData after adjusting the window. If the handler queues
+	// data after the window was already opened, queueData sees the updated
+	// window and sends directly.
 }
 
 func (sc *serverConn) markResponseEnded(strm *Stream) {
