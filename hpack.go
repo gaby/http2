@@ -35,6 +35,10 @@ type HPACK struct {
 	// dynamic_length - (input_index - 62) - 1
 	dynamic []*HeaderField
 
+	// dynamicSize tracks the cumulative size of all entries in the dynamic
+	// table, avoiding O(n) recomputation on every insert/shrink.
+	dynamicSize uint32
+
 	maxTableSize uint32
 	// maxTableSize comming from the settings frame
 	maxTableSizeSettings uint32
@@ -81,6 +85,7 @@ func (hp *HPACK) releaseDynamic() {
 	}
 
 	hp.dynamic = nil
+	hp.dynamicSize = 0
 }
 
 // Reset deletes and releases all dynamic header fields.
@@ -100,22 +105,18 @@ func (hp *HPACK) SetMaxTableSize(size uint32) {
 // DynamicSize returns the size of the dynamic table.
 //
 // https://tools.ietf.org/html/rfc7541#section-4.1
-func (hp *HPACK) DynamicSize() (n uint32) {
-	for _, hf := range hp.dynamic {
-		n += hf.Size()
-	}
-	return
+func (hp *HPACK) DynamicSize() uint32 {
+	return hp.dynamicSize
 }
 
 // add header field to the dynamic table.
 func (hp *HPACK) addDynamic(hf *HeaderField) {
-	// TODO: Optimize using reverse indexes.
-
 	// append a copy
 	hf2 := AcquireHeaderField()
 	hf.CopyTo(hf2)
 
 	hp.dynamic = append(hp.dynamic, hf2)
+	hp.dynamicSize += hf2.Size()
 
 	// checking table size
 	hp.shrink()
@@ -124,17 +125,14 @@ func (hp *HPACK) addDynamic(hf *HeaderField) {
 // shrink the dynamic table if needed.
 func (hp *HPACK) shrink() {
 	var n int // elements to remove
-	tableSize := hp.DynamicSize()
 
-	for n = 0; n < len(hp.dynamic) && tableSize > hp.maxTableSize; n++ {
-		tableSize -= hp.dynamic[n].Size()
+	for n = 0; n < len(hp.dynamic) && hp.dynamicSize > hp.maxTableSize; n++ {
+		hp.dynamicSize -= hp.dynamic[n].Size()
 	}
 
 	if n != 0 {
 		for i := 0; i < n; i++ {
-			// release the header field
 			ReleaseHeaderField(hp.dynamic[i])
-			// shrinking slice
 		}
 
 		hp.dynamic = append(hp.dynamic[:0], hp.dynamic[n:]...)

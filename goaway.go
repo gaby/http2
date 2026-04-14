@@ -75,7 +75,6 @@ func (ga *GoAway) Deserialize(fr *FrameHeader) (err error) {
 	} else {
 		ga.stream = http2utils.BytesToUint32(fr.payload)
 		ga.code = ErrorCode(http2utils.BytesToUint32(fr.payload[4:]))
-		// TODO: what?
 
 		if len(fr.payload[8:]) != 0 {
 			ga.data = append(ga.data[:0], fr.payload[8:]...)

@@ -650,6 +650,10 @@ func TestSettingsInitialWindowIncreaseFlushesPendingData(t *testing.T) {
 		ln.Close()
 	})
 
+	// Set a read deadline to prevent the test from hanging indefinitely.
+	require.NoError(t, c.c.SetReadDeadline(time.Now().Add(10*time.Second)))
+	defer c.c.SetReadDeadline(time.Time{})
+
 	sendSettings := func(val uint32) {
 		fr := AcquireFrameHeader()
 		st := AcquireFrame(FrameSettings).(*Settings)
@@ -669,10 +673,27 @@ func TestSettingsInitialWindowIncreaseFlushesPendingData(t *testing.T) {
 	})
 	require.NoError(t, c.writeFrame(headers))
 
-	deadline := time.Now().Add(time.Second)
+	readNextWithRetry := func() (*FrameHeader, error) {
+		require.NoError(t, c.c.SetReadDeadline(time.Now().Add(200*time.Millisecond)))
+		fr, err := c.readNext()
+		if err != nil {
+			var timeoutErr interface{ Timeout() bool }
+			if (errors.As(err, &timeoutErr) && timeoutErr.Timeout()) ||
+				errors.Is(err, os.ErrDeadlineExceeded) {
+				return nil, nil
+			}
+			return nil, err
+		}
+		return fr, nil
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
 	var gotHeaders bool
 	for time.Now().Before(deadline) && !gotHeaders {
-		fr, err := c.readNext()
+		fr, err := readNextWithRetry()
+		if fr == nil && err == nil {
+			continue
+		}
 		require.NoError(t, err)
 
 		if fr.Stream() != 1 {
@@ -692,10 +713,13 @@ func TestSettingsInitialWindowIncreaseFlushesPendingData(t *testing.T) {
 
 	sendSettings(1)
 
-	deadline = time.Now().Add(time.Second)
+	deadline = time.Now().Add(10 * time.Second)
 	var dataFrame *FrameHeader
 	for time.Now().Before(deadline) && dataFrame == nil {
-		fr, err := c.readNext()
+		fr, err := readNextWithRetry()
+		if fr == nil && err == nil {
+			continue
+		}
 		require.NoError(t, err)
 
 		if fr.Stream() != 1 {

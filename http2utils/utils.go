@@ -49,8 +49,18 @@ func EqualsFold(a, b []byte) bool {
 		return false
 	}
 	for i := range n {
-		if a[i]|0x20 != b[i]|0x20 {
-			return false
+		ai, bi := a[i], b[i]
+		if ai != bi {
+			// ASCII case-fold only for letters
+			if ai >= 'A' && ai <= 'Z' {
+				ai += 'a' - 'A'
+			}
+			if bi >= 'A' && bi <= 'Z' {
+				bi += 'a' - 'A'
+			}
+			if ai != bi {
+				return false
+			}
 		}
 	}
 	return true

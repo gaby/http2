@@ -20,7 +20,9 @@ var (
 
 func ToLower(b []byte) []byte {
 	for i := range b {
-		b[i] |= 32
+		if b[i] >= 'A' && b[i] <= 'Z' {
+			b[i] += 'a' - 'A'
+		}
 	}
 
 	return b
