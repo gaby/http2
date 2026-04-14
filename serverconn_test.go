@@ -676,8 +676,15 @@ func TestSettingsInitialWindowIncreaseFlushesPendingData(t *testing.T) {
 	deadline := time.Now().Add(time.Second)
 	var gotHeaders bool
 	for time.Now().Before(deadline) && !gotHeaders {
+		require.NoError(t, c.c.SetReadDeadline(time.Now().Add(200*time.Millisecond)))
 		fr, err := c.readNext()
-		require.NoError(t, err)
+		if err != nil {
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() {
+				continue
+			}
+			require.NoError(t, err)
+		}
 
 		if fr.Stream() != 1 {
 			ReleaseFrameHeader(fr)
@@ -699,8 +706,15 @@ func TestSettingsInitialWindowIncreaseFlushesPendingData(t *testing.T) {
 	deadline = time.Now().Add(time.Second)
 	var dataFrame *FrameHeader
 	for time.Now().Before(deadline) && dataFrame == nil {
+		require.NoError(t, c.c.SetReadDeadline(time.Now().Add(200*time.Millisecond)))
 		fr, err := c.readNext()
-		require.NoError(t, err)
+		if err != nil {
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() {
+				continue
+			}
+			require.NoError(t, err)
+		}
 
 		if fr.Stream() != 1 {
 			ReleaseFrameHeader(fr)
