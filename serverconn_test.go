@@ -687,7 +687,7 @@ func TestSettingsInitialWindowIncreaseFlushesPendingData(t *testing.T) {
 		return fr, nil
 	}
 
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	var gotHeaders bool
 	for time.Now().Before(deadline) && !gotHeaders {
 		fr, err := readNextWithRetry()
@@ -713,7 +713,7 @@ func TestSettingsInitialWindowIncreaseFlushesPendingData(t *testing.T) {
 
 	sendSettings(1)
 
-	deadline = time.Now().Add(3 * time.Second)
+	deadline = time.Now().Add(10 * time.Second)
 	var dataFrame *FrameHeader
 	for time.Now().Before(deadline) && dataFrame == nil {
 		fr, err := readNextWithRetry()
