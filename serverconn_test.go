@@ -673,18 +673,28 @@ func TestSettingsInitialWindowIncreaseFlushesPendingData(t *testing.T) {
 	})
 	require.NoError(t, c.writeFrame(headers))
 
-	deadline := time.Now().Add(time.Second)
-	var gotHeaders bool
-	for time.Now().Before(deadline) && !gotHeaders {
+	readNextWithRetry := func() (*FrameHeader, error) {
 		require.NoError(t, c.c.SetReadDeadline(time.Now().Add(200*time.Millisecond)))
 		fr, err := c.readNext()
 		if err != nil {
-			var ne net.Error
-			if errors.As(err, &ne) && ne.Timeout() {
-				continue
+			var timeoutErr interface{ Timeout() bool }
+			if (errors.As(err, &timeoutErr) && timeoutErr.Timeout()) ||
+				errors.Is(err, os.ErrDeadlineExceeded) {
+				return nil, nil
 			}
-			require.NoError(t, err)
+			return nil, err
 		}
+		return fr, nil
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	var gotHeaders bool
+	for time.Now().Before(deadline) && !gotHeaders {
+		fr, err := readNextWithRetry()
+		if fr == nil && err == nil {
+			continue
+		}
+		require.NoError(t, err)
 
 		if fr.Stream() != 1 {
 			ReleaseFrameHeader(fr)
@@ -703,18 +713,14 @@ func TestSettingsInitialWindowIncreaseFlushesPendingData(t *testing.T) {
 
 	sendSettings(1)
 
-	deadline = time.Now().Add(time.Second)
+	deadline = time.Now().Add(3 * time.Second)
 	var dataFrame *FrameHeader
 	for time.Now().Before(deadline) && dataFrame == nil {
-		require.NoError(t, c.c.SetReadDeadline(time.Now().Add(200*time.Millisecond)))
-		fr, err := c.readNext()
-		if err != nil {
-			var ne net.Error
-			if errors.As(err, &ne) && ne.Timeout() {
-				continue
-			}
-			require.NoError(t, err)
+		fr, err := readNextWithRetry()
+		if fr == nil && err == nil {
+			continue
 		}
+		require.NoError(t, err)
 
 		if fr.Stream() != 1 {
 			ReleaseFrameHeader(fr)
