@@ -60,6 +60,46 @@ func TestSettingsReadWindowSizeOverflow(t *testing.T) {
 	require.Contains(t, err.Error(), "SETTINGS_INITIAL_WINDOW_SIZE above maximum")
 }
 
+func TestSettingsRoundTripAllFields(t *testing.T) {
+	// Verify that all settings survive a serialize/deserialize round-trip
+	original := &Settings{}
+	original.SetHeaderTableSize(8192)
+	original.SetPush(true)
+	original.SetMaxConcurrentStreams(50)
+	original.SetMaxWindowSize(1 << 20)
+	original.SetMaxFrameSize(1 << 16)
+	original.SetMaxHeaderListSize(4096)
+
+	fr := AcquireFrameHeader()
+	defer ReleaseFrameHeader(fr)
+	fr.SetBody(original)
+	original.Serialize(fr)
+	fr.length = len(fr.payload)
+
+	decoded := &Settings{}
+	err := decoded.Deserialize(fr)
+	require.NoError(t, err)
+	require.Equal(t, original.HeaderTableSize(), decoded.HeaderTableSize())
+	require.Equal(t, original.Push(), decoded.Push())
+	require.Equal(t, original.MaxConcurrentStreams(), decoded.MaxConcurrentStreams())
+	require.Equal(t, original.MaxWindowSize(), decoded.MaxWindowSize())
+	require.Equal(t, original.MaxFrameSize(), decoded.MaxFrameSize())
+	require.Equal(t, original.MaxHeaderListSize(), decoded.MaxHeaderListSize())
+}
+
+func TestSettingsAckSerialize(t *testing.T) {
+	st := &Settings{}
+	st.SetAck(true)
+
+	fr := AcquireFrameHeader()
+	defer ReleaseFrameHeader(fr)
+	fr.SetBody(st)
+	st.Serialize(fr)
+
+	require.True(t, fr.Flags().Has(FlagAck))
+	require.Empty(t, fr.payload, "ACK settings should have empty payload")
+}
+
 func TestSettingsInvalidValues(t *testing.T) {
 	fr := AcquireFrameHeader()
 	defer ReleaseFrameHeader(fr)
