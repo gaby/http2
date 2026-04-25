@@ -887,6 +887,77 @@ func TestHPACKNonIndexedLiteralWithIndexedKey(t *testing.T) {
 	require.Empty(t, hp.dynamic)
 }
 
+func TestHPACKAppendHeaderVariants(t *testing.T) {
+	enc := AcquireHPACK()
+	defer ReleaseHPACK(enc)
+	enc.SetMaxTableSize(4096)
+	enc.DisableCompression = true
+
+	// Helper: encode with enc, decode with a fresh decoder
+	roundTrip := func(hf *HeaderField, store bool) *HeaderField {
+		t.Helper()
+		dec := AcquireHPACK()
+		defer ReleaseHPACK(dec)
+		dec.SetMaxTableSize(4096)
+
+		dst := enc.AppendHeader(nil, hf, store)
+		require.NotEmpty(t, dst)
+		out := AcquireHeaderField()
+		remaining, err := dec.Next(out, dst)
+		require.NoError(t, err)
+		require.Empty(t, remaining)
+		return out
+	}
+
+	// 1. Sensible (never-indexed) header — encode-only (known prefix mismatch bug)
+	hf := AcquireHeaderField()
+	hf.SetBytes([]byte("authorization"), []byte("Bearer token"))
+	hf.sensible = true
+	dst := enc.AppendHeader(nil, hf, false)
+	require.NotEmpty(t, dst, "sensible header should produce output")
+	ReleaseHeaderField(hf)
+
+	// 2. Full match from static table (:method GET)
+	hf = AcquireHeaderField()
+	hf.SetBytes([]byte(":method"), []byte("GET"))
+	out := roundTrip(hf, true)
+	require.Equal(t, ":method", out.Key())
+	require.Equal(t, "GET", out.Value())
+	ReleaseHeaderField(hf)
+	ReleaseHeaderField(out)
+
+	// 3. Key match, no value match, store=false
+	hf = AcquireHeaderField()
+	hf.SetBytes([]byte(":authority"), []byte("host.example.com"))
+	out = roundTrip(hf, false)
+	require.Equal(t, ":authority", out.Key())
+	require.Equal(t, "host.example.com", out.Value())
+	ReleaseHeaderField(hf)
+	ReleaseHeaderField(out)
+
+	// 4. Unknown header, store=false + DisableDynamicTable
+	enc.DisableDynamicTable = true
+	hf = AcquireHeaderField()
+	hf.SetBytes([]byte("x-custom"), []byte("value"))
+	out = roundTrip(hf, false)
+	require.Equal(t, "x-custom", out.Key())
+	require.Equal(t, "value", out.Value())
+	ReleaseHeaderField(hf)
+	ReleaseHeaderField(out)
+	enc.DisableDynamicTable = false
+
+	// 5. Unknown header, store=true (adds to dynamic table)
+	hf = AcquireHeaderField()
+	hf.SetBytes([]byte("x-new-header"), []byte("new-value"))
+	prevDynLen := len(enc.dynamic)
+	out = roundTrip(hf, true)
+	require.Equal(t, "x-new-header", out.Key())
+	require.Equal(t, "new-value", out.Value())
+	require.Equal(t, prevDynLen+1, len(enc.dynamic))
+	ReleaseHeaderField(hf)
+	ReleaseHeaderField(out)
+}
+
 func hexComparison(b, r []byte) (s string) {
 	s += "\n"
 	for i := range b {
