@@ -87,6 +87,28 @@ func TestHuffmanEncodeReusingLittle(t *testing.T) {
 }
 */
 
+func TestHuffmanRoundTripProperty(t *testing.T) {
+	// Property: for any valid byte slice, Decode(Encode(b)) == b
+	inputs := [][]byte{
+		{0},
+		{255},
+		[]byte("hello"),
+		[]byte("GET"),
+		[]byte("/index.html"),
+		[]byte("accept-encoding"),
+		[]byte("gzip, deflate, br"),
+		[]byte("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"),
+		{0, 1, 2, 3, 4, 5, 127, 128, 254, 255},
+	}
+
+	for _, input := range inputs {
+		encoded := HuffmanEncode(nil, input)
+		decoded, err := HuffmanDecode(nil, encoded)
+		require.NoError(t, err, "failed to decode for input %q", input)
+		require.Equal(t, input, decoded, "round-trip mismatch for input %q", input)
+	}
+}
+
 func TestHuffmanDecodeInvalidPadding(t *testing.T) {
 	// Encode "a" (huffman code 0x18c, 6 bits: 000110 00 → 0x18 padded with zeros not ones)
 	// Valid encoding of "a": 0x18 with padding 0x1f → 0001_1000 | 0001_1111 = 0001_1111
