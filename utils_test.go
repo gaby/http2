@@ -299,3 +299,51 @@ func TestErrorCodeErrorFallback(t *testing.T) {
 	// Unknown code should fall back to numeric string
 	require.Equal(t, "999", ErrorCode(999).Error())
 }
+
+func TestGoAwayDeserialize(t *testing.T) {
+	ga := &GoAway{}
+	fr := AcquireFrameHeader()
+	defer ReleaseFrameHeader(fr)
+
+	// Too-short payload should fail
+	fr.payload = make([]byte, 4)
+	require.ErrorIs(t, ga.Deserialize(fr), ErrMissingBytes)
+
+	// Exactly 8 bytes (no debug data)
+	fr.payload = make([]byte, 8)
+	require.NoError(t, ga.Deserialize(fr))
+	require.Empty(t, ga.Data())
+
+	// With additional debug data
+	fr.payload = make([]byte, 12)
+	copy(fr.payload[8:], []byte("test"))
+	require.NoError(t, ga.Deserialize(fr))
+	require.Equal(t, []byte("test"), ga.Data())
+}
+
+func TestDataDeserializePadded(t *testing.T) {
+	d := &Data{}
+	fr := AcquireFrameHeader()
+	defer ReleaseFrameHeader(fr)
+
+	// Without padding
+	fr.payload = []byte("hello")
+	fr.length = 5
+	fr.flags = 0
+	require.NoError(t, d.Deserialize(fr))
+	require.Equal(t, []byte("hello"), d.Data())
+
+	// With padding flag but invalid padding
+	fr.flags = FlagPadded
+	fr.payload = []byte{0xFF}
+	fr.length = 1
+	err := d.Deserialize(fr)
+	require.Error(t, err)
+}
+
+func TestFrameHeaderSetBodyNilPanics(t *testing.T) {
+	fr := AcquireFrameHeader()
+	defer ReleaseFrameHeader(fr)
+
+	require.Panics(t, func() { fr.SetBody(nil) })
+}
