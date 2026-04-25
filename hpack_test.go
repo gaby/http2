@@ -989,6 +989,29 @@ func TestHPACKNonIndexedLiteralWithStringKey(t *testing.T) {
 	require.Empty(t, hp.dynamic)
 }
 
+func TestHPACKShrinkEviction(t *testing.T) {
+	hp := AcquireHPACK()
+	defer ReleaseHPACK(hp)
+	hp.SetMaxTableSize(4096)
+
+	// Add several entries to fill the dynamic table
+	for i := range 10 {
+		hf := AcquireHeaderField()
+		hf.Set(fmt.Sprintf("x-key-%d", i), "some-value-that-takes-space")
+		hp.addDynamic(hf)
+		ReleaseHeaderField(hf)
+	}
+	require.Equal(t, 10, len(hp.dynamic))
+	prevSize := hp.dynamicSize
+
+	// Shrink to a small size — should evict oldest entries
+	hp.maxTableSize = 100
+	hp.shrink()
+	require.Less(t, len(hp.dynamic), 10)
+	require.LessOrEqual(t, hp.dynamicSize, uint32(100))
+	require.Less(t, hp.dynamicSize, prevSize)
+}
+
 func TestHPACKEncodeDecodeRoundTrip(t *testing.T) {
 	headers := []struct{ key, value string }{
 		{":method", "GET"},
