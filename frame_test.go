@@ -348,6 +348,51 @@ func TestWindowUpdateRoundTrip(t *testing.T) {
 	require.EqualValues(t, 123, decoded.Increment(), "increment mismatch")
 }
 
+func TestPrioritySerializeDeserialize(t *testing.T) {
+	pry := &Priority{}
+	pry.SetStream(7)
+	pry.SetWeight(128)
+
+	fr := AcquireFrameHeader()
+	defer ReleaseFrameHeader(fr)
+	fr.SetBody(pry)
+	pry.Serialize(fr)
+	fr.length = len(fr.payload)
+
+	var decoded Priority
+	err := decoded.Deserialize(fr)
+	require.NoError(t, err)
+	require.Equal(t, uint32(7), decoded.Stream())
+	require.Equal(t, byte(128), decoded.Weight())
+}
+
+func TestPriorityDeserializeInvalidLength(t *testing.T) {
+	pry := &Priority{}
+	fr := AcquireFrameHeader()
+	defer ReleaseFrameHeader(fr)
+	fr.SetBody(pry)
+
+	fr.payload = make([]byte, 3) // need 5
+	fr.length = 3
+	err := pry.Deserialize(fr)
+	require.Error(t, err)
+}
+
+func TestPriorityCopyTo(t *testing.T) {
+	pry := &Priority{}
+	pry.SetStream(99)
+	pry.SetWeight(255)
+
+	var p2 Priority
+	pry.CopyTo(&p2)
+	require.Equal(t, uint32(99), p2.Stream())
+	require.Equal(t, byte(255), p2.Weight())
+
+	pry.Reset()
+	require.Zero(t, pry.Stream())
+	require.Zero(t, pry.Weight())
+}
+
 func TestWindowUpdateSerializeDeserialize(t *testing.T) {
 	increments := []int{1, 100, 1 << 15, 1<<31 - 1}
 
