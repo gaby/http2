@@ -702,6 +702,92 @@ func TestHPACKWriteResponseWithHuffman(t *testing.T) { // WithHuffman
 	ReleaseHPACK(hpack)
 }
 
+func TestHPACKDynamicTableSizeUpdate(t *testing.T) {
+	hp := AcquireHPACK()
+	defer ReleaseHPACK(hp)
+	hp.SetMaxTableSize(4096)
+
+	// Dynamic table size update: encode size=256 with 5-bit prefix
+	// 001xxxxx where xxxxx encodes the new size
+	// Size 256 doesn't fit in 5 bits (max 31), so: 0x3f (001 11111) + continuation
+	// 0x3f = 0010_0000 | 0x1f = 0x3f, then 256 - 31 = 225 → 0xe1, 0x01
+	b := []byte{0x3f, 0xe1, 0x01}
+
+	hf := AcquireHeaderField()
+	defer ReleaseHeaderField(hf)
+
+	remaining, err := hp.Next(hf, b)
+	require.NoError(t, err)
+	require.Empty(t, remaining)
+	require.Equal(t, uint32(256), hp.maxTableSize)
+}
+
+func TestHPACKDynamicTableSizeUpdateErrors(t *testing.T) {
+	hp := AcquireHPACK()
+	defer ReleaseHPACK(hp)
+	hp.SetMaxTableSize(4096)
+
+	hf := AcquireHeaderField()
+	defer ReleaseHeaderField(hf)
+
+	// Dynamic table size update NOT at beginning of header block should fail
+	// First encode a regular indexed field, then a size update
+	// 0x82 = indexed header field, index 2 (:method GET)
+	// 0x20 = dynamic table size update to 0
+	b := []byte{0x82, 0x20}
+
+	b2, err := hp.Next(hf, b)
+	require.NoError(t, err) // first field ok
+
+	_, err = hp.nextField(hf, 0, 1, b2) // fieldsProcessed=1, so size update should fail
+	require.ErrorIs(t, err, ErrDynamicUpdate)
+}
+
+func TestHPACKDynamicTableSizeUpdateMaxExceeded(t *testing.T) {
+	hp := AcquireHPACK()
+	defer ReleaseHPACK(hp)
+	hp.SetMaxTableSize(100) // small limit
+
+	hf := AcquireHeaderField()
+	defer ReleaseHeaderField(hf)
+
+	// Try to set dynamic table size to 200 (exceeds maxTableSizeSettings=100)
+	// Encode 200 with 5-bit prefix: 0x3f (31) + 169 (0xa9, 0x01)
+	b := []byte{0x3f, 0xa9, 0x01}
+	_, err := hp.Next(hf, b)
+	require.ErrorIs(t, err, ErrDynamicUpdateMaxTableSize)
+}
+
+func TestHPACKNeverIndexedField(t *testing.T) {
+	hp := AcquireHPACK()
+	defer ReleaseHPACK(hp)
+	hp.SetMaxTableSize(4096)
+
+	hf := AcquireHeaderField()
+	defer ReleaseHeaderField(hf)
+
+	// Never-indexed literal header field: 0001xxxx
+	// 0x10 = never indexed, new name
+	// key: "secret-key" (len=10)
+	// value: "secret-val" (len=10)
+	key := []byte("secret-key")
+	val := []byte("secret-val")
+	b := []byte{0x10, byte(len(key))}
+	b = append(b, key...)
+	b = append(b, byte(len(val)))
+	b = append(b, val...)
+
+	remaining, err := hp.Next(hf, b)
+	require.NoError(t, err)
+	require.Empty(t, remaining)
+	require.True(t, hf.IsSensible(), "never-indexed field should be sensible")
+	require.Equal(t, "secret-key", hf.Key())
+	require.Equal(t, "secret-val", hf.Value())
+
+	// Should NOT be added to dynamic table
+	require.Empty(t, hp.dynamic)
+}
+
 func hexComparison(b, r []byte) (s string) {
 	s += "\n"
 	for i := range b {
