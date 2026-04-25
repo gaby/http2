@@ -915,18 +915,21 @@ func TestHPACKAppendHeaderVariants(t *testing.T) {
 		return out
 	}
 
-	// 1. Sensible (never-indexed) header — encode-only (known prefix mismatch bug)
+	// 1. Sensible (never-indexed) header — full round-trip
 	hf := AcquireHeaderField()
 	hf.SetBytes([]byte("authorization"), []byte("Bearer token"))
 	hf.sensible = true
-	dst := enc.AppendHeader(nil, hf, false)
-	require.NotEmpty(t, dst, "sensible header should produce output")
+	out := roundTrip(hf, false)
+	require.Equal(t, "authorization", out.Key())
+	require.Equal(t, "Bearer token", out.Value())
+	require.True(t, out.IsSensible())
 	ReleaseHeaderField(hf)
+	ReleaseHeaderField(out)
 
 	// 2. Full match from static table (:method GET)
 	hf = AcquireHeaderField()
 	hf.SetBytes([]byte(":method"), []byte("GET"))
-	out := roundTrip(hf, true)
+	out = roundTrip(hf, true)
 	require.Equal(t, ":method", out.Key())
 	require.Equal(t, "GET", out.Value())
 	ReleaseHeaderField(hf)

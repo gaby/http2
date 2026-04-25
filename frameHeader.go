@@ -224,6 +224,7 @@ func (f *FrameHeader) readFrom(br *bufio.Reader) (int64, error) {
 		n, err = io.ReadFull(br, f.payload[:n])
 		if err != nil {
 			ReleaseFrame(f.fr)
+			f.fr = nil
 			return 0, err
 		}
 

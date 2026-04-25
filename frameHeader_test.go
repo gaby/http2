@@ -125,8 +125,9 @@ func TestReadFrameFromWithSizeOversizePayload(t *testing.T) {
 	// Set max to 50 — payload of 100 should exceed
 	fr, err := ReadFrameFromWithSize(br, 50)
 	require.ErrorIs(t, err, ErrPayloadExceeds)
-	// fr is returned for payload-exceeds errors
-	_ = fr
+	if fr != nil {
+		ReleaseFrameHeader(fr)
+	}
 }
 
 func TestReadFromPayloadReadError(t *testing.T) {
@@ -141,7 +142,7 @@ func TestReadFromPayloadReadError(t *testing.T) {
 
 	fr := AcquireFrameHeader()
 	defer func() {
-		if fr != nil && fr.Body() != nil {
+		if fr != nil {
 			ReleaseFrameHeader(fr)
 		}
 	}()
@@ -164,6 +165,7 @@ func TestReadFrameFromUnknownType(t *testing.T) {
 
 	fr, err := ReadFrameFromWithSize(br, 16384)
 	require.ErrorIs(t, err, ErrUnknownFrameType)
-	// fr is returned for inspection on unknown type
-	_ = fr
+	if fr != nil {
+		ReleaseFrameHeader(fr)
+	}
 }

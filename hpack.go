@@ -503,6 +503,7 @@ func (hp *HPACK) AppendHeader(dst []byte, hf *HeaderField, store bool) []byte {
 	index, fullMatch = hp.search(hf)
 	if hf.sensible {
 		c = false
+		bits = 4
 		dst = append(dst, 16)
 	} else {
 		if index > 0 { // key and/or value can be used as index

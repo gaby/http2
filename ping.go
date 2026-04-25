@@ -46,7 +46,7 @@ func (p *Ping) CopyTo(other *Ping) {
 
 // Write copies b into the PING data field, implementing io.Writer.
 func (p *Ping) Write(b []byte) (n int, err error) {
-	copy(p.data[:], b)
+	n = copy(p.data[:], b)
 	return
 }
 

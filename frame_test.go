@@ -418,8 +418,9 @@ func TestPingTimeRoundTrip(t *testing.T) {
 
 	// Write via io.Writer interface
 	p3 := &Ping{}
-	_, err := p3.Write([]byte{10, 20, 30, 40, 50, 60, 70, 80})
+	n, err := p3.Write([]byte{10, 20, 30, 40, 50, 60, 70, 80})
 	require.NoError(t, err)
+	require.Equal(t, 8, n)
 	require.Equal(t, byte(10), p3.Data()[0])
 
 	// Reset
