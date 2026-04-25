@@ -797,6 +797,12 @@ func TestReadStringEdgeCases(t *testing.T) {
 	b := []byte{10, 'a', 'b', 'c'}
 	_, _, err = readString(nil, b)
 	require.ErrorIs(t, err, ErrUnexpectedSize)
+
+	// Huffman-encoded but with invalid data that HuffmanDecode rejects
+	// 0x80 | 0x02 = huffman flag + length 2, followed by garbage bytes
+	b = []byte{0x82, 0x00, 0x00} // 0x82 = huffman + len=2, data = [0x00, 0x00]
+	_, _, err = readString(nil, b)
+	require.Error(t, err, "should fail on invalid huffman data")
 }
 
 func TestHPACKPeekOutOfRange(t *testing.T) {
