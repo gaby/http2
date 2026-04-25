@@ -86,3 +86,19 @@ func TestHuffmanEncodeReusingLittle(t *testing.T) {
 	encodeHuffman(t, b, b, littleEncodedBytes)
 }
 */
+
+func TestHuffmanDecodeInvalidPadding(t *testing.T) {
+	// Encode "a" (huffman code 0x18c, 6 bits: 000110 00 → 0x18 padded with zeros not ones)
+	// Valid encoding of "a": 0x18 with padding 0x1f → 0001_1000 | 0001_1111 = 0001_1111
+	// Invalid: padding bits are zero instead of one
+	_, err := HuffmanDecode(nil, []byte{0x18})
+	require.Error(t, err, "should reject zero-padded huffman data")
+}
+
+func TestHuffmanDecodeTooManyBitsLeft(t *testing.T) {
+	// Craft data that leaves >7 bits unconsumed after decoding
+	// This is tricky to trigger, but we can try with a partial multi-byte code
+	// Feed a byte that starts a multi-byte huffman sequence but isn't complete
+	_, err := HuffmanDecode(nil, []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF})
+	require.Error(t, err, "should error with too many bits left")
+}
