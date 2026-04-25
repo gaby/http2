@@ -21,10 +21,12 @@ type Data struct {
 	hasPadding bool
 }
 
+// Type returns FrameData.
 func (data *Data) Type() FrameType {
 	return FrameData
 }
 
+// Reset clears the data payload and all flags.
 func (data *Data) Reset() {
 	data.endStream = false
 	data.hasPadding = false
@@ -38,10 +40,12 @@ func (data *Data) CopyTo(d *Data) {
 	d.b = append(d.b[:0], data.b...)
 }
 
+// SetEndStream sets or clears the END_STREAM flag.
 func (data *Data) SetEndStream(value bool) {
 	data.endStream = value
 }
 
+// EndStream reports whether the END_STREAM flag is set.
 func (data *Data) EndStream() bool {
 	return data.endStream
 }
@@ -56,12 +60,12 @@ func (data *Data) SetData(b []byte) {
 	data.b = append(data.b[:0], b...)
 }
 
-// Padding returns true if the data will be/was hasPaddingded.
+// Padding reports whether the data frame uses padding.
 func (data *Data) Padding() bool {
 	return data.hasPadding
 }
 
-// SetPadding sets hasPaddingding to the data if true. If false the data won't be hasPaddingded.
+// SetPadding enables or disables padding for the data frame.
 func (data *Data) SetPadding(value bool) {
 	data.hasPadding = value
 }
@@ -71,6 +75,7 @@ func (data *Data) Append(b []byte) {
 	data.b = append(data.b, b...)
 }
 
+// Len returns the length of the data payload.
 func (data *Data) Len() int {
 	return len(data.b)
 }
@@ -83,6 +88,7 @@ func (data *Data) Write(b []byte) (int, error) {
 	return n, nil
 }
 
+// Deserialize reads a DATA frame from the given frame header payload.
 func (data *Data) Deserialize(fr *FrameHeader) error {
 	payload := fr.payload
 
@@ -100,6 +106,7 @@ func (data *Data) Deserialize(fr *FrameHeader) error {
 	return nil
 }
 
+// Serialize writes the DATA payload into the frame header.
 func (data *Data) Serialize(fr *FrameHeader) {
 	// TODO: generate hasPadding and set to the frame payload
 	if data.endStream {
