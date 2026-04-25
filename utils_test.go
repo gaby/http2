@@ -469,9 +469,9 @@ func TestHeadersDeserializePaddedWithPriority(t *testing.T) {
 	fr.payload = []byte{
 		1,          // pad length
 		0, 0, 0, 5, // stream dependency
-		128,       // weight
-		0x82,      // header data (indexed :method GET)
-		0,         // padding byte
+		128,  // weight
+		0x82, // header data (indexed :method GET)
+		0,    // padding byte
 	}
 	fr.length = len(fr.payload)
 
