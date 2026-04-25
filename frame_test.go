@@ -348,6 +348,28 @@ func TestWindowUpdateRoundTrip(t *testing.T) {
 	require.EqualValues(t, 123, decoded.Increment(), "increment mismatch")
 }
 
+func TestRstStreamSerializeDeserialize(t *testing.T) {
+	codes := []ErrorCode{NoError, ProtocolError, InternalError, StreamCanceled, EnhanceYourCalm}
+
+	for _, code := range codes {
+		rst := &RstStream{}
+		rst.SetCode(code)
+
+		fr := AcquireFrameHeader()
+		fr.SetBody(rst)
+		rst.Serialize(fr)
+		fr.length = len(fr.payload)
+
+		var decoded RstStream
+		err := decoded.Deserialize(fr)
+		require.NoError(t, err)
+		require.Equal(t, code, decoded.Code(), "code mismatch for %s", code)
+		require.ErrorIs(t, decoded.Error(), code)
+
+		ReleaseFrameHeader(fr)
+	}
+}
+
 func TestDataWriteAndAppend(t *testing.T) {
 	d := &Data{}
 	n, err := d.Write([]byte("hello"))
