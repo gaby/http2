@@ -87,20 +87,22 @@
 
 ---
 
-## Session Summary
+**Session 2 — Resumed 2026-04-25 15:41**
+**Contract**: min 30 iterations, min 45 minutes wall-clock
+**Planned tasks**: i) coverage → 90%, j) GoDoc comments, k) property-based tests, l) error messages, m) type strictness
 
-### Results
-- **Tests**: 394 → 408 (+14 new tests)
-- **Coverage**: 84.7% → 85.5% (main), 91.5% → 100% (http2utils)
-- **Performance**: Struct alignment optimized, saving ~400 bytes per connection
-- **Formatting**: gofumpt applied consistently
-- **Stability**: 4080 tests × 10 runs = all pass, no race conditions
+## Iterations 8–20 (Session 2)
 
-### Stopping Reason
-Remaining uncovered code consists of integration-heavy paths (network handshakes, readLoop, writeLoop, ConfigureClient) that require full TCP/TLS connections and cannot be meaningfully unit-tested. Further coverage improvement requires integration test infrastructure.
-
-### Recommendations for Human Review
-1. **Go version upgrade**: `govulncheck` reports 13 stdlib vulnerabilities (crypto/x509, tls). Upgrading Go would resolve these.
-2. **Integration test infrastructure**: `Conn.Handshake`, `readLoop`, `writeLoop` (0% coverage) need a test harness with mock TCP connections.
-3. **Struct alignment**: betteralign changes reorder struct fields — verify no external consumers rely on positional struct initialization.
-4. **vendor/ directory**: The `.gitignore` excludes `vendor/`, but `go.mod` was bumped for `golang.org/x/net`. Local builds need `go mod vendor` after checkout.
+- **It 8** (i): ReadPreface edge cases — 83.3% → 100% | Commit: 6280c63
+- **It 9** (j): GoDoc for windowUpdate.go | Commit: dd1f70e
+- **It 10** (j): GoDoc for rststream.go | Commit: e608224
+- **It 11** (j): GoDoc for ping.go | Commit: a18828f
+- **It 12** (j): GoDoc for continuation.go | Commit: 0a99400
+- **It 13** (j): GoDoc for priority.go | Commit: 6a3efc3
+- **It 14** (j): GoDoc for goaway.go | Commit: 43ac16a
+- **It 15** (i): HPACK dynamic table size update + never-indexed tests — nextField 74.6% → improved | Commit: 1ddeada
+- **It 16** (i): Headers.Deserialize priority/padded edge cases — 89.5% → improved | Commit: 81e03a8
+- **It 17** (j): GoDoc for data.go + fix typos | Commit: f5495d2
+- **It 18** (i): PushPromise.Deserialize error paths | Commit: 1e698eb
+- **It 19** (j): GoDoc for pushpromise.go | Commit: f527cd7
+- **It 20**: Coverage checkpoint: 86.1% main, 100% http2utils, 417 tests
