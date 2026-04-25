@@ -153,3 +153,48 @@
 1. **Go version upgrade**: Resolves 13 stdlib security vulnerabilities
 2. **Integration test harness**: Create net.Pipe-based test infrastructure for Conn/serverConn coverage
 3. **FrameType int8 issue**: `AcquireFrame` panics on frame type 0xFF (wraps to -1 as int8) — consider bounds check or uint8
+
+---
+
+**Session 3 — Resumed 2026-04-25 17:23**
+**Contract**: 30 minutes wall-clock
+
+## Iterations 34–47 (Session 3)
+
+- **It 34** (i): HPACK AppendHeader round-trip tests for 5 encoding variants | Commit: c5f5577
+  - Discovered latent bug: sensible header encoder uses 6-bit prefix, decoder expects 4-bit
+- **It 35** (j): GoDoc for hpack.go AppendHeaderField | Commit: 0716b5d
+- **It 36** (k): Property-based Huffman encode/decode round-trip test | Commit: 6ba92f7
+- **It 37** (k): Property-based HPACK encode/decode round-trip test | Commit: 6134ec5
+- **It 38** (i): checkLen 0% → 100%, ReadFrameFromWithSize oversize payload | Commit: 5646c76
+- **It 39**: Coverage checkpoint: 86.5%, modernize: nothing to do
+- **It 40** (j): GoDoc for settings.go | Commit: debedbe
+- **It 41** (j): GoDoc for strings.go ToLower | Commit: 0d24927
+- **It 42** (i): readFrom incomplete payload read | Commit: 6a15168
+- **It 43** (k): Streams collection operations test | Commit: c88e50c
+- **It 44** (k): Settings round-trip all fields + ACK serialize | Commit: 398ed8f
+- **It 45** (k): HeaderField property-based test | Commit: 70472e7
+- **It 46** (h): gofumpt formatting | Commit: da45ede
+- **It 47**: Final coverage: 86.6%, 10x stability: 4390 tests PASS
+
+---
+
+## Cumulative Summary (Sessions 1-3)
+
+### Stats
+- **Total iterations**: 47
+- **Total commits**: 48
+- **Rollbacks**: 0
+- **Tests**: 394 → 439 (+45 new tests)
+- **Coverage**: 84.7% → 86.6% (main), 91.5% → 100% (http2utils)
+- **Stability**: 4390 tests × 10 runs = all pass, no race conditions
+
+### Bugs discovered
+1. **HPACK sensible header encoding prefix mismatch**: Encoder uses 6-bit prefix for never-indexed fields, decoder expects 4-bit. Latent bug that doesn't trigger in practice because sensible headers with static table key matches aren't used.
+2. **FrameType int8 overflow**: `AcquireFrame` panics on frame type 0xFF (wraps to -1 as int8).
+
+### Remaining recommendations
+1. **Go version upgrade**: 13 stdlib vulnerabilities (crypto/x509, tls)
+2. **Integration tests**: `Conn.Handshake`, `readLoop`, `writeLoop` need mock TCP
+3. **Fix HPACK sensible prefix**: Change `bits` to 4 when `hf.sensible` is true
+4. **Fix FrameType range**: Add bounds check in `AcquireFrame` or change to uint8
