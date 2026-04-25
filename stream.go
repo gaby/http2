@@ -35,27 +35,33 @@ func (ss StreamState) String() string {
 }
 
 type Stream struct {
-	id                   uint32
-	window               int64
-	recvWindowSize       int32
-	sendWindow           int64
-	pendingData          []byte
-	pendingDataEndStream bool
-	pendingMu            sync.Mutex
-	responseStarted      bool
-	responseEnded        bool
-	state                StreamState
-	ctx                  *fasthttp.RequestCtx
-	scheme               []byte
-	previousHeaderBytes  []byte
+	startedAt           time.Time
+	ctx                 *fasthttp.RequestCtx
+	pendingData         []byte
+	scheme              []byte
+	previousHeaderBytes []byte
+
+	window     int64
+	sendWindow int64
 
 	// keeps track of the number of header blocks received
 	headerBlockNum int
+
+	contentLength     int64
+	bodyBytesReceived int64
+	pendingMu         sync.Mutex
+	id                uint32
+	recvWindowSize    int32
 
 	// headerListSize accumulates the decoded header list size (name + value + 32
 	// per field, per RFC 7541 §4.1) across the current header block.
 	// It is reset at the start of every new complete header block.
 	headerListSize uint32
+
+	pendingDataEndStream bool
+	responseStarted      bool
+	responseEnded        bool
+	state                StreamState
 
 	// isTrailer is true once we have already finished the initial request
 	// headers and are now processing a trailing HEADERS frame.
@@ -63,7 +69,6 @@ type Stream struct {
 
 	// original type
 	origType         FrameType
-	startedAt        time.Time
 	headersFinished  bool
 	pendingEndStream bool
 
@@ -74,8 +79,6 @@ type Stream struct {
 	seenPath          bool
 	seenAuthority     bool
 	isConnect         bool
-	contentLength     int64
-	bodyBytesReceived int64
 }
 
 var streamPool = sync.Pool{

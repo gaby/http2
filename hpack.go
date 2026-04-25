@@ -15,17 +15,6 @@ import (
 //
 // Use AcquireHPACK to acquire new HPACK structure.
 type HPACK struct {
-	// DisableCompression disables compression for literal header fields.
-	DisableCompression bool
-
-	// DisableDynamicTable disables the usage of the dynamic table for
-	// the HPACK structure. If this option is true the HPACK won't add any
-	// field to the dynamic table unless it was sent by the peer.
-	//
-	// This field was implemented because in many ways the server could modify
-	// the fields established by the client losing performance calculated by client.
-	DisableDynamicTable bool
-
 	// the dynamic table is in an inverse order.
 	//
 	// the insertion point should be the beginning. But we are going to do
@@ -42,6 +31,16 @@ type HPACK struct {
 	maxTableSize uint32
 	// maxTableSize comming from the settings frame
 	maxTableSizeSettings uint32
+	// DisableCompression disables compression for literal header fields.
+	DisableCompression bool
+
+	// DisableDynamicTable disables the usage of the dynamic table for
+	// the HPACK structure. If this option is true the HPACK won't add any
+	// field to the dynamic table unless it was sent by the peer.
+	//
+	// This field was implemented because in many ways the server could modify
+	// the fields established by the client losing performance calculated by client.
+	DisableDynamicTable bool
 }
 
 func headerFieldsToString(hfs []*HeaderField, indexOffset int) string {
@@ -484,7 +483,7 @@ func appendString(dst, src []byte, encode bool) []byte {
 	return dst
 }
 
-// TODO: Change naming.
+// AppendHeaderField encodes hf and appends the result to h's raw header buffer.
 func (hp *HPACK) AppendHeaderField(h *Headers, hf *HeaderField, store bool) {
 	h.rawHeaders = hp.AppendHeader(h.rawHeaders, hf, store)
 }
@@ -504,6 +503,7 @@ func (hp *HPACK) AppendHeader(dst []byte, hf *HeaderField, store bool) []byte {
 	index, fullMatch = hp.search(hf)
 	if hf.sensible {
 		c = false
+		bits = 4
 		dst = append(dst, 16)
 	} else {
 		if index > 0 { // key and/or value can be used as index

@@ -26,8 +26,8 @@ func TestFrameWrite(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, len(testStr), n, "unexpected size")
 
-	var bf = bytes.NewBuffer(nil)
-	var bw = bufio.NewWriter(bf)
+	bf := bytes.NewBuffer(nil)
+	bw := bufio.NewWriter(bf)
 	fr.WriteTo(bw)
 	bw.Flush()
 
@@ -65,4 +65,107 @@ func TestFrameRead(t *testing.T) {
 	require.Equal(t, testStr, string(data.Data()), "payload mismatch")
 }
 
-// TODO: continue
+func TestReadFrameFromPayloadError(t *testing.T) {
+	// Valid 9-byte header declares 50 bytes payload, but only 5 available.
+	// This exercises the fr.Body() != nil branch in ReadFrameFrom.
+	var h [9]byte
+	http2utils.Uint24ToBytes(h[:3], 50) // length = 50
+	h[3] = 0                            // type = DATA (valid)
+
+	buf := append(h[:], make([]byte, 5)...) // only 5 of 50
+	bf := bytes.NewBuffer(buf)
+	br := bufio.NewReader(bf)
+
+	fr, err := ReadFrameFrom(br)
+	require.Error(t, err)
+	require.Nil(t, fr)
+}
+
+func TestReadFrameFromShortRead(t *testing.T) {
+	// Feed only 5 bytes when 9 are needed for the header
+	bf := bytes.NewBuffer([]byte{0, 0, 0, 0, 0})
+	br := bufio.NewReader(bf)
+
+	fr, err := ReadFrameFrom(br)
+	require.Error(t, err)
+	require.Nil(t, fr)
+}
+
+func TestCheckLenRejectsOversizePayload(t *testing.T) {
+	fr := AcquireFrameHeader()
+	defer ReleaseFrameHeader(fr)
+
+	// Within limit: should pass
+	fr.maxLen = 100
+	fr.length = 50
+	require.NoError(t, fr.checkLen())
+
+	// Exceeds limit: should fail
+	fr.length = 200
+	require.ErrorIs(t, fr.checkLen(), ErrPayloadExceeds)
+
+	// maxLen=0 disables check
+	fr.maxLen = 0
+	fr.length = 99999
+	require.NoError(t, fr.checkLen())
+}
+
+func TestReadFrameFromWithSizeOversizePayload(t *testing.T) {
+	// Build a valid DATA frame with payload length > max
+	var h [9]byte
+	http2utils.Uint24ToBytes(h[:3], 100) // length = 100 bytes
+	h[3] = 0                             // type = DATA
+	h[4] = 0                             // flags
+
+	payload := make([]byte, 100)
+	buf := append(h[:], payload...)
+	bf := bytes.NewBuffer(buf)
+	br := bufio.NewReader(bf)
+
+	// Set max to 50 — payload of 100 should exceed
+	fr, err := ReadFrameFromWithSize(br, 50)
+	require.ErrorIs(t, err, ErrPayloadExceeds)
+	if fr != nil {
+		ReleaseFrameHeader(fr)
+	}
+}
+
+func TestReadFromPayloadReadError(t *testing.T) {
+	// Frame header declares 100 bytes payload, but only 5 bytes available
+	var h [9]byte
+	http2utils.Uint24ToBytes(h[:3], 100) // length = 100
+	h[3] = 0                             // type = DATA
+
+	buf := append(h[:], make([]byte, 5)...) // only 5 of 100 bytes
+	bf := bytes.NewBuffer(buf)
+	br := bufio.NewReader(bf)
+
+	fr := AcquireFrameHeader()
+	defer func() {
+		if fr != nil {
+			ReleaseFrameHeader(fr)
+		}
+	}()
+
+	_, err := fr.ReadFrom(br)
+	require.Error(t, err, "should error on incomplete payload read")
+}
+
+func TestReadFrameFromUnknownType(t *testing.T) {
+	// Build a frame header with unknown type (0x0A > FrameContinuation=0x9)
+	// FrameType is int8, so must use value in range [0, 127]
+	var h [9]byte
+	http2utils.Uint24ToBytes(h[:3], 0) // length = 0
+	h[3] = 0x0A                        // type = unknown (10)
+	h[4] = 0                           // flags
+	// stream = 0
+
+	bf := bytes.NewBuffer(h[:])
+	br := bufio.NewReader(bf)
+
+	fr, err := ReadFrameFromWithSize(br, 16384)
+	require.ErrorIs(t, err, ErrUnknownFrameType)
+	if fr != nil {
+		ReleaseFrameHeader(fr)
+	}
+}

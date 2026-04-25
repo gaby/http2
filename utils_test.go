@@ -3,7 +3,10 @@ package http2
 import (
 	"bytes"
 	"crypto/tls"
+	"errors"
 	"io"
+	"math/bits"
+	"strings"
 	"testing"
 
 	"github.com/dgrr/http2/http2utils"
@@ -87,6 +90,11 @@ func TestConfigureDialerSetsDefaults(t *testing.T) {
 	}
 	require.True(t, found, "h2 not injected in NextProtos")
 
+	// Addr without port: SplitHostPort fails, fallback uses full Addr
+	d3 := &Dialer{Addr: "example.com"}
+	configureDialer(d3)
+	require.Equal(t, "example.com", d3.TLSConfig.ServerName, "should use full addr when no port")
+
 	// ServerName should not be overridden when already present
 	cfg := &tls.Config{ServerName: "custom"}
 	d2 := &Dialer{Addr: "ignored:443", TLSConfig: cfg}
@@ -115,4 +123,421 @@ func TestConnCancelErrors(t *testing.T) {
 	ctx := &Ctx{Err: make(chan error, 1)}
 	err := c.Cancel(ctx)
 	require.ErrorIs(t, err, ErrStreamNotReady)
+}
+
+func TestWriteErrorUnwrap(t *testing.T) {
+	inner := io.ErrClosedPipe
+	we := WriteError{err: inner}
+
+	require.Equal(t, inner, we.Unwrap(), "Unwrap should return the inner error")
+	require.ErrorIs(t, we, inner, "errors.Is should match through Unwrap")
+	require.Contains(t, we.Error(), "closed pipe")
+}
+
+func TestWindowUpdateErrorMessage(t *testing.T) {
+	require.Equal(t, "invalid window size increment", windowUpdateErrorMessage(errInvalidWindowSizeIncrement))
+	require.Equal(t, "window is above limits", windowUpdateErrorMessage(errWindowSizeOverflow))
+	require.Equal(t, "window size increment is 0", windowUpdateErrorMessage(errWindowIncrementZero))
+	require.Equal(t, "some other error", windowUpdateErrorMessage(errors.New("some other error")))
+}
+
+func TestPingDeserializeInvalidPayload(t *testing.T) {
+	p := &Ping{}
+	fr := AcquireFrameHeader()
+	defer ReleaseFrameHeader(fr)
+
+	// Valid 8-byte payload should succeed
+	fr.payload = make([]byte, 8)
+	require.NoError(t, p.Deserialize(fr))
+
+	// Invalid payload length should return error
+	fr.payload = make([]byte, 4)
+	err := p.Deserialize(fr)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid ping payload")
+}
+
+func TestReleaseFrameHeaderNil(t *testing.T) {
+	// Should not panic when nil is passed
+	ReleaseFrameHeader(nil)
+}
+
+func TestCheckFrameWithStream(t *testing.T) {
+	sc := &serverConn{}
+
+	// Even stream ID should be rejected
+	fr := AcquireFrameHeader()
+	fr.SetStream(2)
+	fr.SetBody(AcquireFrame(FrameData))
+	err := sc.checkFrameWithStream(fr)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid stream id")
+	ReleaseFrameHeader(fr)
+
+	// Ping with stream ID should be rejected
+	fr = AcquireFrameHeader()
+	fr.SetStream(1)
+	fr.SetBody(AcquireFrame(FramePing))
+	err = sc.checkFrameWithStream(fr)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "ping is carrying a stream id")
+	ReleaseFrameHeader(fr)
+
+	// PushPromise from client should be rejected
+	fr = AcquireFrameHeader()
+	fr.SetStream(1)
+	fr.SetBody(AcquireFrame(FramePushPromise))
+	err = sc.checkFrameWithStream(fr)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "push_promise")
+	ReleaseFrameHeader(fr)
+
+	// Valid odd stream with data frame should succeed
+	fr = AcquireFrameHeader()
+	fr.SetStream(3)
+	fr.SetBody(AcquireFrame(FrameData))
+	err = sc.checkFrameWithStream(fr)
+	require.NoError(t, err)
+	ReleaseFrameHeader(fr)
+}
+
+func TestVerifyState(t *testing.T) {
+	sc := &serverConn{}
+
+	// Idle stream: Headers frame should be allowed
+	strm := NewStream(1, 65535, 65535)
+	strm.SetState(StreamStateIdle)
+	fr := AcquireFrameHeader()
+	fr.SetBody(AcquireFrame(FrameHeaders))
+	require.NoError(t, sc.verifyState(strm, fr))
+	ReleaseFrameHeader(fr)
+
+	// Idle stream: Priority frame should be allowed
+	fr = AcquireFrameHeader()
+	fr.SetBody(AcquireFrame(FramePriority))
+	require.NoError(t, sc.verifyState(strm, fr))
+	ReleaseFrameHeader(fr)
+
+	// Idle stream: Data frame should be rejected
+	fr = AcquireFrameHeader()
+	fr.SetBody(AcquireFrame(FrameData))
+	err := sc.verifyState(strm, fr)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "wrong frame on idle stream")
+	ReleaseFrameHeader(fr)
+
+	// HalfClosed stream: WindowUpdate should be allowed
+	strm.SetState(StreamStateHalfClosed)
+	fr = AcquireFrameHeader()
+	fr.SetBody(AcquireFrame(FrameWindowUpdate))
+	require.NoError(t, sc.verifyState(strm, fr))
+	ReleaseFrameHeader(fr)
+
+	// HalfClosed stream: ResetStream should be allowed
+	fr = AcquireFrameHeader()
+	fr.SetBody(AcquireFrame(FrameResetStream))
+	require.NoError(t, sc.verifyState(strm, fr))
+	ReleaseFrameHeader(fr)
+
+	// HalfClosed stream: Data frame should be rejected
+	fr = AcquireFrameHeader()
+	fr.SetBody(AcquireFrame(FrameData))
+	err = sc.verifyState(strm, fr)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "wrong frame on half-closed stream")
+	ReleaseFrameHeader(fr)
+
+	// Open stream: any frame type should be allowed
+	strm.SetState(StreamStateOpen)
+	fr = AcquireFrameHeader()
+	fr.SetBody(AcquireFrame(FrameData))
+	require.NoError(t, sc.verifyState(strm, fr))
+	ReleaseFrameHeader(fr)
+}
+
+func TestRstStreamDeserializeShortPayload(t *testing.T) {
+	rst := &RstStream{}
+	fr := AcquireFrameHeader()
+	defer ReleaseFrameHeader(fr)
+
+	// Payload too short should fail
+	fr.payload = make([]byte, 2)
+	require.ErrorIs(t, rst.Deserialize(fr), ErrMissingBytes)
+
+	// Valid 4-byte payload should succeed
+	fr.payload = make([]byte, 4)
+	require.NoError(t, rst.Deserialize(fr))
+}
+
+func TestWindowUpdateDeserializeAndSetIncrement(t *testing.T) {
+	wu := &WindowUpdate{}
+	fr := AcquireFrameHeader()
+	defer ReleaseFrameHeader(fr)
+
+	// Invalid payload length should fail
+	fr.payload = make([]byte, 2)
+	err := wu.Deserialize(fr)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "window_update frame payload must be 4 bytes")
+
+	// Valid payload should succeed
+	fr.payload = make([]byte, 4)
+	require.NoError(t, wu.Deserialize(fr))
+
+	// SetIncrement with 0 should panic
+	require.Panics(t, func() { wu.SetIncrement(0) })
+
+	// SetIncrement with negative should panic
+	require.Panics(t, func() { wu.SetIncrement(-1) })
+
+	// SetIncrement with overflow should panic on 64-bit platforms.
+	// On 32-bit, 1<<31 overflows int and this branch is unreachable.
+	if bits.UintSize == 64 {
+		require.Panics(t, func() { wu.SetIncrement(1 << 31) })
+	}
+
+	// Valid increment should work
+	wu.SetIncrement(100)
+	require.Equal(t, 100, wu.Increment())
+}
+
+func TestErrorCodeErrorFallback(t *testing.T) {
+	// Known code should return human-readable string
+	require.Equal(t, "No errors", NoError.Error())
+	require.Equal(t, "Protocol error", ProtocolError.Error())
+
+	// Unknown code should fall back to numeric string
+	require.Equal(t, "999", ErrorCode(999).Error())
+}
+
+func TestGoAwayDeserialize(t *testing.T) {
+	ga := &GoAway{}
+	fr := AcquireFrameHeader()
+	defer ReleaseFrameHeader(fr)
+
+	// Too-short payload should fail
+	fr.payload = make([]byte, 4)
+	require.ErrorIs(t, ga.Deserialize(fr), ErrMissingBytes)
+
+	// Exactly 8 bytes (no debug data)
+	fr.payload = make([]byte, 8)
+	require.NoError(t, ga.Deserialize(fr))
+	require.Empty(t, ga.Data())
+
+	// With additional debug data
+	fr.payload = make([]byte, 12)
+	copy(fr.payload[8:], []byte("test"))
+	require.NoError(t, ga.Deserialize(fr))
+	require.Equal(t, []byte("test"), ga.Data())
+}
+
+func TestDataDeserializePadded(t *testing.T) {
+	d := &Data{}
+	fr := AcquireFrameHeader()
+	defer ReleaseFrameHeader(fr)
+
+	// Without padding
+	fr.payload = []byte("hello")
+	fr.length = 5
+	fr.flags = 0
+	require.NoError(t, d.Deserialize(fr))
+	require.Equal(t, []byte("hello"), d.Data())
+
+	// With padding flag but invalid padding
+	fr.flags = FlagPadded
+	fr.payload = []byte{0xFF}
+	fr.length = 1
+	err := d.Deserialize(fr)
+	require.Error(t, err)
+}
+
+func TestFrameHeaderSetBodyNilPanics(t *testing.T) {
+	fr := AcquireFrameHeader()
+	defer ReleaseFrameHeader(fr)
+
+	require.Panics(t, func() { fr.SetBody(nil) })
+}
+
+func TestReadPrefaceEdgeCases(t *testing.T) {
+	// Valid preface
+	valid := strings.NewReader("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+	require.True(t, ReadPreface(valid))
+
+	// Wrong content
+	wrong := strings.NewReader("GET / HTTP/1.1\r\n\r\nXX\r\n\r\n")
+	require.False(t, ReadPreface(wrong))
+
+	// Short read (error from reader)
+	short := strings.NewReader("PRI")
+	require.False(t, ReadPreface(short))
+
+	// Error reader
+	require.False(t, ReadPreface(&errReader{}))
+}
+
+type errReader struct{}
+
+func (e *errReader) Read([]byte) (int, error) {
+	return 0, io.ErrUnexpectedEOF
+}
+
+func TestErrorCodeAllKnownCodes(t *testing.T) {
+	codes := []struct {
+		code ErrorCode
+		str  string
+		err  string
+	}{
+		{NoError, "NoError", "No errors"},
+		{ProtocolError, "ProtocolError", "Protocol error"},
+		{InternalError, "InternalError", "Internal error"},
+		{FlowControlError, "FlowControlError", "Flow control error"},
+		{SettingsTimeoutError, "SettingsTimeoutError", "Settings timeout"},
+		{StreamClosedError, "StreamClosedError", "Stream has been closed"},
+		{FrameSizeError, "FrameSizeError", "FrameHeader size error"},
+		{RefusedStreamError, "RefusedStreamError", "Refused Stream"},
+		{StreamCanceled, "StreamCanceled", "Stream canceled"},
+		{CompressionError, "CompressionError", "Compression error"},
+		{ConnectionError, "ConnectionError", "Connection error"},
+		{EnhanceYourCalm, "EnhanceYourCalm", "Enhance your calm"},
+		{InadequateSecurity, "InadequateSecurity", "Inadequate security"},
+		{HTTP11Required, "HTTP11Required", "HTTP/1.1 required"},
+	}
+
+	for _, tc := range codes {
+		require.Equal(t, tc.str, tc.code.String(), "String() for %d", tc.code)
+		require.Equal(t, tc.err, tc.code.Error(), "Error() for %d", tc.code)
+	}
+}
+
+func TestNewFrameSizeError(t *testing.T) {
+	// stream=0 → GoAway
+	err := newFrameSizeError(0, "test goaway")
+	require.Equal(t, FrameSizeError, err.Code())
+	require.Equal(t, FrameGoAway, err.frameType)
+	require.Equal(t, "test goaway", err.Debug())
+
+	// stream>0 → ResetStream
+	err = newFrameSizeError(5, "test reset")
+	require.Equal(t, FrameSizeError, err.Code())
+	require.Equal(t, FrameResetStream, err.frameType)
+	require.Equal(t, "test reset", err.Debug())
+}
+
+func TestHeaderFieldPropertyBased(t *testing.T) {
+	fields := []struct{ key, value string }{
+		{":method", "GET"},
+		{":path", "/"},
+		{"content-type", "text/html"},
+		{"x-custom", "value"},
+		{"", ""},
+	}
+
+	for _, f := range fields {
+		hf := AcquireHeaderField()
+		hf.Set(f.key, f.value)
+
+		// String round-trip
+		s := hf.String()
+		require.Contains(t, s, f.key)
+
+		// AppendBytes
+		b := hf.AppendBytes(nil)
+		require.Contains(t, string(b), f.key)
+
+		// Size = len(key) + len(value) + 32
+		require.Equal(t, uint32(len(f.key)+len(f.value)+32), hf.Size())
+
+		// IsPseudo
+		if len(f.key) > 0 && f.key[0] == ':' {
+			require.True(t, hf.IsPseudo())
+		} else {
+			require.False(t, hf.IsPseudo())
+		}
+
+		// CopyTo preserves all fields
+		hf2 := AcquireHeaderField()
+		hf.CopyTo(hf2)
+		require.Equal(t, hf.Key(), hf2.Key())
+		require.Equal(t, hf.Value(), hf2.Value())
+
+		// SetBytes equivalent
+		hf3 := AcquireHeaderField()
+		hf3.SetBytes(hf.KeyBytes(), hf.ValueBytes())
+		require.Equal(t, hf.Key(), hf3.Key())
+		require.Equal(t, hf.Value(), hf3.Value())
+
+		ReleaseHeaderField(hf)
+		ReleaseHeaderField(hf2)
+		ReleaseHeaderField(hf3)
+	}
+}
+
+func TestPushPromiseDeserializeEdgeCases(t *testing.T) {
+	pp := &PushPromise{}
+	fr := AcquireFrameHeader()
+	defer ReleaseFrameHeader(fr)
+
+	// Too-short payload (< 4 bytes)
+	fr.payload = make([]byte, 2)
+	fr.flags = 0
+	fr.length = 2
+	require.ErrorIs(t, pp.Deserialize(fr), ErrMissingBytes)
+
+	// Padded with invalid padding
+	fr.flags = FlagPadded
+	fr.payload = []byte{0xFF}
+	fr.length = 1
+	err := pp.Deserialize(fr)
+	require.Error(t, err)
+}
+
+func TestHeadersDeserializePriorityTooShort(t *testing.T) {
+	h := &Headers{}
+	fr := AcquireFrameHeader()
+	defer ReleaseFrameHeader(fr)
+
+	// Priority flag set but payload too short
+	fr.flags = FlagPriority
+	fr.payload = make([]byte, 3) // need at least 5
+	fr.length = 3
+	err := h.Deserialize(fr)
+	require.ErrorIs(t, err, ErrMissingBytes)
+}
+
+func TestHeadersDeserializePaddedWithPriority(t *testing.T) {
+	h := &Headers{}
+	fr := AcquireFrameHeader()
+	defer ReleaseFrameHeader(fr)
+
+	// Build a padded + priority payload:
+	// [pad_len=1] [4 bytes stream dep] [1 byte weight] [header data] [1 byte padding]
+	fr.flags = FlagPadded | FlagPriority | FlagEndHeaders | FlagEndStream
+	fr.payload = []byte{
+		1,          // pad length
+		0, 0, 0, 5, // stream dependency
+		128,  // weight
+		0x82, // header data (indexed :method GET)
+		0,    // padding byte
+	}
+	fr.length = len(fr.payload)
+
+	err := h.Deserialize(fr)
+	require.NoError(t, err)
+	require.True(t, h.EndHeaders())
+	require.True(t, h.EndStream())
+	require.True(t, h.Priority())
+	require.Equal(t, byte(128), h.Weight())
+}
+
+func TestHeadersDeserializePaddedError(t *testing.T) {
+	h := &Headers{}
+	fr := AcquireFrameHeader()
+	defer ReleaseFrameHeader(fr)
+
+	// Padded flag with invalid padding
+	fr.flags = FlagPadded
+	fr.payload = []byte{0xFF} // pad length exceeds payload
+	fr.length = 1
+	err := h.Deserialize(fr)
+	require.Error(t, err)
 }

@@ -38,6 +38,32 @@ func TestPaddingHelpers(t *testing.T) {
 	require.True(t, bytes.Equal(trimmed, src), "unexpected trimmed payload: %q", trimmed)
 }
 
+func TestCutPaddingErrors(t *testing.T) {
+	// Empty payload should error
+	_, err := CutPadding(nil, 0)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "empty payload")
+
+	// Out of range: pad value exceeds payload
+	_, err = CutPadding([]byte{0xFF, 0x01, 0x02}, 3)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "out of range")
+}
+
+func TestEqualsFoldEdgeCases(t *testing.T) {
+	// Different lengths
+	require.False(t, EqualsFold([]byte("ab"), []byte("abc")))
+
+	// Non-letter characters that differ
+	require.False(t, EqualsFold([]byte("a1"), []byte("a2")))
+
+	// Empty slices
+	require.True(t, EqualsFold([]byte{}, []byte{}))
+
+	// Case fold only applies to ASCII letters
+	require.True(t, EqualsFold([]byte("aB"), []byte("Ab")))
+}
+
 func TestFastBytesToString(t *testing.T) {
 	b := []byte("hello")
 	require.Equal(t, "hello", FastBytesToString(b), "unexpected string conversion")
@@ -52,8 +78,8 @@ func TestAppendUint32Bytes(t *testing.T) {
 type recordingTB struct {
 	*testing.T
 	name        string
-	fatalCalled bool
 	fatalMsg    string
+	fatalCalled bool
 }
 
 func (tb *recordingTB) Name() string { return tb.name }

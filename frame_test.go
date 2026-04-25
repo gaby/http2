@@ -2,6 +2,7 @@ package http2
 
 import (
 	"bytes"
+	"io"
 	"testing"
 	"time"
 
@@ -348,6 +349,173 @@ func TestWindowUpdateRoundTrip(t *testing.T) {
 	require.EqualValues(t, 123, decoded.Increment(), "increment mismatch")
 }
 
+func TestRstStreamSerializeDeserialize(t *testing.T) {
+	codes := []ErrorCode{NoError, ProtocolError, InternalError, StreamCanceled, EnhanceYourCalm}
+
+	for _, code := range codes {
+		rst := &RstStream{}
+		rst.SetCode(code)
+
+		fr := AcquireFrameHeader()
+		fr.SetBody(rst)
+		rst.Serialize(fr)
+		fr.length = len(fr.payload)
+
+		var decoded RstStream
+		err := decoded.Deserialize(fr)
+		require.NoError(t, err)
+		require.Equal(t, code, decoded.Code(), "code mismatch for %s", code)
+		require.ErrorIs(t, decoded.Error(), code)
+
+		ReleaseFrameHeader(fr)
+	}
+}
+
+func TestDataWriteAndAppend(t *testing.T) {
+	d := &Data{}
+	n, err := d.Write([]byte("hello"))
+	require.NoError(t, err)
+	require.Equal(t, 5, n)
+
+	d.Append([]byte(" world"))
+	require.Equal(t, []byte("hello world"), d.Data())
+	require.Equal(t, 11, d.Len())
+
+	require.Equal(t, FrameData, d.Type())
+}
+
+func TestPingSerializeDeserialize(t *testing.T) {
+	p := &Ping{}
+	p.SetData([]byte{1, 2, 3, 4, 5, 6, 7, 8})
+	p.SetAck(true)
+
+	fr := AcquireFrameHeader()
+	defer ReleaseFrameHeader(fr)
+	fr.SetBody(p)
+	p.Serialize(fr)
+	fr.length = len(fr.payload)
+
+	require.True(t, fr.Flags().Has(FlagAck))
+
+	var decoded Ping
+	err := decoded.Deserialize(fr)
+	require.NoError(t, err)
+	require.True(t, decoded.IsAck())
+	require.Equal(t, p.Data(), decoded.Data())
+}
+
+func TestPingTimeRoundTrip(t *testing.T) {
+	p := &Ping{}
+	p.SetCurrentTime()
+
+	ts := p.DataAsTime()
+	require.False(t, ts.IsZero())
+
+	// Write/CopyTo
+	p2 := &Ping{}
+	p.CopyTo(p2)
+	require.Equal(t, p.Data(), p2.Data())
+	require.Equal(t, p.IsAck(), p2.IsAck())
+
+	// Write via io.Writer interface — exactly 8 bytes
+	p3 := &Ping{}
+	n, err := p3.Write([]byte{10, 20, 30, 40, 50, 60, 70, 80})
+	require.NoError(t, err)
+	require.Equal(t, 8, n)
+	require.Equal(t, byte(10), p3.Data()[0])
+
+	// Write with >8 bytes should return io.ErrShortWrite
+	p4 := &Ping{}
+	n, err = p4.Write([]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10})
+	require.ErrorIs(t, err, io.ErrShortWrite)
+	require.Equal(t, 8, n)
+
+	// Reset clears ack and data
+	p.SetAck(true)
+	p.SetData([]byte{1, 2, 3, 4, 5, 6, 7, 8})
+	p.Reset()
+	require.False(t, p.IsAck())
+	require.Equal(t, make([]byte, 8), p.Data())
+}
+
+func TestPrioritySerializeDeserialize(t *testing.T) {
+	pry := &Priority{}
+	pry.SetStream(7)
+	pry.SetWeight(128)
+
+	fr := AcquireFrameHeader()
+	defer ReleaseFrameHeader(fr)
+	fr.SetBody(pry)
+	pry.Serialize(fr)
+	fr.length = len(fr.payload)
+
+	var decoded Priority
+	err := decoded.Deserialize(fr)
+	require.NoError(t, err)
+	require.Equal(t, uint32(7), decoded.Stream())
+	require.Equal(t, byte(128), decoded.Weight())
+}
+
+func TestPriorityDeserializeInvalidLength(t *testing.T) {
+	pry := &Priority{}
+	fr := AcquireFrameHeader()
+	defer ReleaseFrameHeader(fr)
+	fr.SetBody(pry)
+
+	fr.payload = make([]byte, 3) // need 5
+	fr.length = 3
+	err := pry.Deserialize(fr)
+	require.Error(t, err)
+}
+
+func TestPriorityCopyTo(t *testing.T) {
+	pry := &Priority{}
+	pry.SetStream(99)
+	pry.SetWeight(255)
+
+	var p2 Priority
+	pry.CopyTo(&p2)
+	require.Equal(t, uint32(99), p2.Stream())
+	require.Equal(t, byte(255), p2.Weight())
+
+	pry.Reset()
+	require.Zero(t, pry.Stream())
+	require.Zero(t, pry.Weight())
+}
+
+func TestWindowUpdateSerializeDeserialize(t *testing.T) {
+	increments := []int{1, 100, 1 << 15, 1<<31 - 1}
+
+	for _, inc := range increments {
+		wu := &WindowUpdate{}
+		wu.SetIncrement(inc)
+
+		fr := AcquireFrameHeader()
+		fr.SetBody(wu)
+		wu.Serialize(fr)
+		fr.length = len(fr.payload)
+
+		var decoded WindowUpdate
+		err := decoded.Deserialize(fr)
+		require.NoError(t, err)
+		require.Equal(t, inc, decoded.Increment(), "increment mismatch for %d", inc)
+
+		ReleaseFrameHeader(fr)
+	}
+}
+
+func TestWindowUpdateCopyTo(t *testing.T) {
+	wu := &WindowUpdate{}
+	wu.SetIncrement(42)
+
+	var wu2 WindowUpdate
+	wu.CopyTo(&wu2)
+	require.Equal(t, 42, wu2.Increment())
+
+	wu.Reset()
+	require.Zero(t, wu.Increment())
+}
+
 func TestWindowUpdateRejectsZeroIncrement(t *testing.T) {
 	fr := AcquireFrameHeader()
 	defer ReleaseFrameHeader(fr)
@@ -365,8 +533,8 @@ func TestWindowUpdateRejectsZeroIncrement(t *testing.T) {
 func TestWindowUpdateDeserializeRejectsInvalidPayloadLength(t *testing.T) {
 	testCases := []struct {
 		name              string
-		stream            uint32
 		payload           []byte
+		stream            uint32
 		expectedFrameType FrameType
 	}{
 		{
@@ -527,6 +695,47 @@ func TestPushPromiseAndRstStreamHelpers(t *testing.T) {
 	require.Equal(t, StreamCanceled, rstCopy.Error())
 
 	ReleaseFrameHeader(fr)
+}
+
+func TestContinuationSerializeDeserialize(t *testing.T) {
+	fr := AcquireFrameHeader()
+	defer ReleaseFrameHeader(fr)
+
+	c := AcquireFrame(FrameContinuation).(*Continuation)
+	c.SetHeader([]byte("raw-headers"))
+	c.SetEndHeaders(true)
+	fr.SetBody(c)
+	c.Serialize(fr)
+
+	require.True(t, fr.Flags().Has(FlagEndHeaders))
+	fr.length = len(fr.payload)
+
+	var decoded Continuation
+	err := decoded.Deserialize(fr)
+	require.NoError(t, err)
+	require.True(t, decoded.EndHeaders())
+	require.Equal(t, []byte("raw-headers"), decoded.Headers())
+}
+
+func TestContinuationCopyAndAppend(t *testing.T) {
+	c := &Continuation{}
+	c.SetHeader([]byte("initial"))
+	c.AppendHeader([]byte("-more"))
+	require.Equal(t, []byte("initial-more"), c.Headers())
+
+	n, err := c.Write([]byte("-write"))
+	require.NoError(t, err)
+	require.Equal(t, 6, n)
+	require.Equal(t, []byte("initial-more-write"), c.Headers())
+
+	var c2 Continuation
+	c.CopyTo(&c2)
+	require.Equal(t, c.Headers(), c2.Headers())
+	require.Equal(t, c.EndHeaders(), c2.EndHeaders())
+
+	c.Reset()
+	require.Empty(t, c.Headers())
+	require.False(t, c.EndHeaders())
 }
 
 func TestPushPromiseDeserializeWithInsufficientPadding(t *testing.T) {

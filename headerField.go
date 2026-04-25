@@ -68,11 +68,13 @@ func (hf *HeaderField) CopyTo(other *HeaderField) {
 	other.sensible = hf.sensible
 }
 
+// Set sets the key and value of the header field from strings.
 func (hf *HeaderField) Set(k, v string) {
 	hf.SetKey(k)
 	hf.SetValue(v)
 }
 
+// SetBytes sets the key and value of the header field from byte slices.
 func (hf *HeaderField) SetBytes(k, v []byte) {
 	hf.SetKeyBytes(k)
 	hf.SetValueBytes(v)

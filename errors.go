@@ -47,6 +47,7 @@ var errStr = [...]string{
 	HTTP11Required:       "HTTP11Required",
 }
 
+// String returns the human-readable name of the error code.
 func (e ErrorCode) String() string {
 	if int(e) >= len(errStr) {
 		return "Unknown"
@@ -66,9 +67,9 @@ func (e ErrorCode) Error() string {
 
 // Error defines the HTTP/2 errors, composed by the code and debug data.
 type Error struct {
+	debug     string
 	code      ErrorCode
 	frameType FrameType
-	debug     string
 }
 
 // Is implements the interface for errors.Is.
@@ -95,6 +96,7 @@ func NewError(e ErrorCode, debug string) Error {
 	}
 }
 
+// NewGoAwayError creates a new Error with GOAWAY frame type.
 func NewGoAwayError(e ErrorCode, debug string) Error {
 	return Error{
 		code:      e,
@@ -103,6 +105,7 @@ func NewGoAwayError(e ErrorCode, debug string) Error {
 	}
 }
 
+// NewResetStreamError creates a new Error with RST_STREAM frame type.
 func NewResetStreamError(e ErrorCode, debug string) Error {
 	return Error{
 		code:      e,

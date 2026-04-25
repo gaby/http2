@@ -707,6 +707,7 @@ func (c *stubConn) SetDeadline(time.Time) error { return nil }
 func (c *stubConn) SetReadDeadline(time.Time) error {
 	return nil
 }
+
 func (c *stubConn) SetWriteDeadline(time.Time) error {
 	return nil
 }

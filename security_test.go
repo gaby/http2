@@ -366,10 +366,10 @@ func TestServerConfigDefaults(t *testing.T) {
 // not overridden by defaults().
 func TestServerConfigCustomValues(t *testing.T) {
 	cfg := ServerConfig{
-		MaxHeaderListSize:   64 * 1024,
-		EnqueueTimeout:      5 * time.Second,
+		MaxHeaderListSize:    64 * 1024,
+		EnqueueTimeout:       5 * time.Second,
 		MaxConcurrentStreams: 512,
-		PingInterval:        30 * time.Second,
+		PingInterval:         30 * time.Second,
 	}
 	cfg.defaults()
 

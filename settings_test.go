@@ -34,6 +34,72 @@ func TestSettingsSerializeDeserialize(t *testing.T) {
 	require.Equal(t, uint32(2048), decoded.MaxHeaderListSize())
 }
 
+func TestSettingsDeserializeWrongPayloadLength(t *testing.T) {
+	st := &Settings{}
+	fr := AcquireFrameHeader()
+	defer ReleaseFrameHeader(fr)
+	fr.SetBody(st)
+
+	// Payload not divisible by 6
+	fr.payload = make([]byte, 7)
+	err := st.Deserialize(fr)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "wrong payload")
+}
+
+func TestSettingsReadWindowSizeOverflow(t *testing.T) {
+	st := &Settings{}
+
+	// MaxWindowSize > 2^31 - 1
+	payload := []byte{
+		0, byte(MaxWindowSize),
+		0xFF, 0xFF, 0xFF, 0xFF, // value = 4294967295 > 2^31-1
+	}
+	err := st.Read(payload)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "SETTINGS_INITIAL_WINDOW_SIZE above maximum")
+}
+
+func TestSettingsRoundTripAllFields(t *testing.T) {
+	// Verify that all settings survive a serialize/deserialize round-trip
+	original := &Settings{}
+	original.SetHeaderTableSize(8192)
+	original.SetPush(true)
+	original.SetMaxConcurrentStreams(50)
+	original.SetMaxWindowSize(1 << 20)
+	original.SetMaxFrameSize(1 << 16)
+	original.SetMaxHeaderListSize(4096)
+
+	fr := AcquireFrameHeader()
+	defer ReleaseFrameHeader(fr)
+	fr.SetBody(original)
+	original.Serialize(fr)
+	fr.length = len(fr.payload)
+
+	decoded := &Settings{}
+	err := decoded.Deserialize(fr)
+	require.NoError(t, err)
+	require.Equal(t, original.HeaderTableSize(), decoded.HeaderTableSize())
+	require.Equal(t, original.Push(), decoded.Push())
+	require.Equal(t, original.MaxConcurrentStreams(), decoded.MaxConcurrentStreams())
+	require.Equal(t, original.MaxWindowSize(), decoded.MaxWindowSize())
+	require.Equal(t, original.MaxFrameSize(), decoded.MaxFrameSize())
+	require.Equal(t, original.MaxHeaderListSize(), decoded.MaxHeaderListSize())
+}
+
+func TestSettingsAckSerialize(t *testing.T) {
+	st := &Settings{}
+	st.SetAck(true)
+
+	fr := AcquireFrameHeader()
+	defer ReleaseFrameHeader(fr)
+	fr.SetBody(st)
+	st.Serialize(fr)
+
+	require.True(t, fr.Flags().Has(FlagAck))
+	require.Empty(t, fr.payload, "ACK settings should have empty payload")
+}
+
 func TestSettingsInvalidValues(t *testing.T) {
 	fr := AcquireFrameHeader()
 	defer ReleaseFrameHeader(fr)

@@ -17,6 +17,9 @@ const (
 
 // ClientOpts defines the client options for the HTTP/2 connection.
 type ClientOpts struct {
+	// OnRTT is assigned to every client after creation, and the handler
+	// will be called after every RTT measurement (after receiving a PONG message).
+	OnRTT func(time.Duration)
 	// PingInterval defines the interval in which the client will ping the server.
 	//
 	// An interval of 0 will make the library to use DefaultPingInterval. Because ping intervals can't be disabled.
@@ -28,10 +31,6 @@ type ClientOpts struct {
 	// If MaxResponseTime is 0, DefaultMaxResponseTime will be used.
 	// If MaxResponseTime is <0, the max response timeout check will be disabled.
 	MaxResponseTime time.Duration
-
-	// OnRTT is assigned to every client after creation, and the handler
-	// will be called after every RTT measurement (after receiving a PONG message).
-	OnRTT func(time.Duration)
 }
 
 func (opts *ClientOpts) sanitize() {
@@ -50,10 +49,11 @@ type Ctx struct {
 	Response *fasthttp.Response
 	Err      chan error
 
-	streamID    uint32
-	sendWindow  int32 // tracked send window for this stream
-	resolveOnce sync.Once
 	onResolve   func(error)
+	resolveOnce sync.Once
+
+	streamID   uint32
+	sendWindow int32 // tracked send window for this stream
 }
 
 // resolve will resolve the context, meaning that provided an error,
@@ -71,12 +71,13 @@ func (ctx *Ctx) resolve(err error) {
 }
 
 type Client struct {
-	d *Dialer
-
 	opts ClientOpts
 
-	lck   sync.Mutex
+	d *Dialer
+
 	conns list.List
+
+	lck sync.Mutex
 }
 
 func createClient(d *Dialer, opts ClientOpts) *Client {

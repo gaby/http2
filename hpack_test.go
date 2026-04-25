@@ -702,6 +702,410 @@ func TestHPACKWriteResponseWithHuffman(t *testing.T) { // WithHuffman
 	ReleaseHPACK(hpack)
 }
 
+func TestHPACKDynamicTableSizeUpdate(t *testing.T) {
+	hp := AcquireHPACK()
+	defer ReleaseHPACK(hp)
+	hp.SetMaxTableSize(4096)
+
+	// Dynamic table size update: encode size=256 with 5-bit prefix
+	// 001xxxxx where xxxxx encodes the new size
+	// Size 256 doesn't fit in 5 bits (max 31), so: 0x3f (001 11111) + continuation
+	// 0x3f = 0010_0000 | 0x1f = 0x3f, then 256 - 31 = 225 → 0xe1, 0x01
+	b := []byte{0x3f, 0xe1, 0x01}
+
+	hf := AcquireHeaderField()
+	defer ReleaseHeaderField(hf)
+
+	remaining, err := hp.Next(hf, b)
+	require.NoError(t, err)
+	require.Empty(t, remaining)
+	require.Equal(t, uint32(256), hp.maxTableSize)
+}
+
+func TestHPACKDynamicTableSizeUpdateErrors(t *testing.T) {
+	hp := AcquireHPACK()
+	defer ReleaseHPACK(hp)
+	hp.SetMaxTableSize(4096)
+
+	hf := AcquireHeaderField()
+	defer ReleaseHeaderField(hf)
+
+	// Dynamic table size update NOT at beginning of header block should fail
+	// First encode a regular indexed field, then a size update
+	// 0x82 = indexed header field, index 2 (:method GET)
+	// 0x20 = dynamic table size update to 0
+	b := []byte{0x82, 0x20}
+
+	b2, err := hp.Next(hf, b)
+	require.NoError(t, err) // first field ok
+
+	_, err = hp.nextField(hf, 0, 1, b2) // fieldsProcessed=1, so size update should fail
+	require.ErrorIs(t, err, ErrDynamicUpdate)
+}
+
+func TestHPACKDynamicTableSizeUpdateMaxExceeded(t *testing.T) {
+	hp := AcquireHPACK()
+	defer ReleaseHPACK(hp)
+	hp.SetMaxTableSize(100) // small limit
+
+	hf := AcquireHeaderField()
+	defer ReleaseHeaderField(hf)
+
+	// Try to set dynamic table size to 200 (exceeds maxTableSizeSettings=100)
+	// Encode 200 with 5-bit prefix: 0x3f (31) + 169 (0xa9, 0x01)
+	b := []byte{0x3f, 0xa9, 0x01}
+	_, err := hp.Next(hf, b)
+	require.ErrorIs(t, err, ErrDynamicUpdateMaxTableSize)
+}
+
+func TestHPACKNeverIndexedField(t *testing.T) {
+	hp := AcquireHPACK()
+	defer ReleaseHPACK(hp)
+	hp.SetMaxTableSize(4096)
+
+	hf := AcquireHeaderField()
+	defer ReleaseHeaderField(hf)
+
+	// Never-indexed literal header field: 0001xxxx
+	// 0x10 = never indexed, new name
+	// key: "secret-key" (len=10)
+	// value: "secret-val" (len=10)
+	key := []byte("secret-key")
+	val := []byte("secret-val")
+	b := []byte{0x10, byte(len(key))}
+	b = append(b, key...)
+	b = append(b, byte(len(val)))
+	b = append(b, val...)
+
+	remaining, err := hp.Next(hf, b)
+	require.NoError(t, err)
+	require.Empty(t, remaining)
+	require.True(t, hf.IsSensible(), "never-indexed field should be sensible")
+	require.Equal(t, "secret-key", hf.Key())
+	require.Equal(t, "secret-val", hf.Value())
+
+	// Should NOT be added to dynamic table
+	require.Empty(t, hp.dynamic)
+}
+
+func TestReadStringEdgeCases(t *testing.T) {
+	// Empty input should return error
+	_, _, err := readString(nil, nil)
+	require.Error(t, err)
+
+	// Truncated string: declare length 10 but provide only 3 bytes of data
+	b := []byte{10, 'a', 'b', 'c'}
+	_, _, err = readString(nil, b)
+	require.ErrorIs(t, err, ErrUnexpectedSize)
+
+	// Huffman-encoded but with invalid data that HuffmanDecode rejects
+	// 0x80 | 0x02 = huffman flag + length 2, followed by garbage bytes
+	b = []byte{0x82, 0x00, 0x00} // 0x82 = huffman + len=2, data = [0x00, 0x00]
+	_, _, err = readString(nil, b)
+	require.Error(t, err, "should fail on invalid huffman data")
+}
+
+func TestHPACKPeekOutOfRange(t *testing.T) {
+	hp := AcquireHPACK()
+	defer ReleaseHPACK(hp)
+
+	// Peek with index beyond dynamic table should return nil
+	result := hp.peek(maxIndex + 100)
+	require.Nil(t, result)
+}
+
+func TestHPACKIndexedFieldInvalid(t *testing.T) {
+	hp := AcquireHPACK()
+	defer ReleaseHPACK(hp)
+	hp.SetMaxTableSize(4096)
+
+	hf := AcquireHeaderField()
+	defer ReleaseHeaderField(hf)
+
+	// Indexed header field with index that doesn't exist in static or dynamic table
+	// 0xFF 0x00 = indexed field, index = 127 (way beyond static table)
+	b := []byte{0xFF, 0x00}
+	_, err := hp.Next(hf, b)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "index field not found")
+}
+
+func TestHPACKLiteralWithIndexedKey(t *testing.T) {
+	hp := AcquireHPACK()
+	defer ReleaseHPACK(hp)
+	hp.SetMaxTableSize(4096)
+
+	hf := AcquireHeaderField()
+	defer ReleaseHeaderField(hf)
+
+	// Literal with incremental indexing, key from static table index 1 (:authority)
+	// 0x41 = 0100_0001 → literal with incremental indexing, key index = 1
+	// Value: "example.com" (len=11, no huffman)
+	val := []byte("example.com")
+	b := []byte{0x41, byte(len(val))}
+	b = append(b, val...)
+
+	remaining, err := hp.Next(hf, b)
+	require.NoError(t, err)
+	require.Empty(t, remaining)
+	require.Equal(t, ":authority", hf.Key())
+	require.Equal(t, "example.com", hf.Value())
+	// Should be added to dynamic table
+	require.Len(t, hp.dynamic, 1)
+}
+
+func TestHPACKLiteralWithIndexedKeyInvalid(t *testing.T) {
+	hp := AcquireHPACK()
+	defer ReleaseHPACK(hp)
+	hp.SetMaxTableSize(4096)
+
+	hf := AcquireHeaderField()
+	defer ReleaseHeaderField(hf)
+
+	// Literal with incremental indexing, invalid key index
+	// 0x7F 0x40 = index = 63 + 64 = 127 (beyond static table, no dynamic entries)
+	b := []byte{0x7F, 0x40}
+	_, err := hp.Next(hf, b)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "literal indexed field not found")
+}
+
+func TestHPACKNonIndexedLiteralWithIndexedKey(t *testing.T) {
+	hp := AcquireHPACK()
+	defer ReleaseHPACK(hp)
+	hp.SetMaxTableSize(4096)
+
+	hf := AcquireHeaderField()
+	defer ReleaseHeaderField(hf)
+
+	// Non-indexed literal with key from static table index 1 (:authority)
+	// 0x01 = 0000_0001 → without indexing, key index = 1
+	val := []byte("test.com")
+	b := []byte{0x01, byte(len(val))}
+	b = append(b, val...)
+
+	remaining, err := hp.Next(hf, b)
+	require.NoError(t, err)
+	require.Empty(t, remaining)
+	require.Equal(t, ":authority", hf.Key())
+	require.Equal(t, "test.com", hf.Value())
+	// Should NOT be added to dynamic table
+	require.Empty(t, hp.dynamic)
+}
+
+func TestHPACKAppendHeaderVariants(t *testing.T) {
+	enc := AcquireHPACK()
+	defer ReleaseHPACK(enc)
+	enc.SetMaxTableSize(4096)
+	enc.DisableCompression = true
+
+	// Helper: encode with enc, decode with a fresh decoder
+	roundTrip := func(hf *HeaderField, store bool) *HeaderField {
+		t.Helper()
+		dec := AcquireHPACK()
+		defer ReleaseHPACK(dec)
+		dec.SetMaxTableSize(4096)
+
+		dst := enc.AppendHeader(nil, hf, store)
+		require.NotEmpty(t, dst)
+		out := AcquireHeaderField()
+		remaining, err := dec.Next(out, dst)
+		require.NoError(t, err)
+		require.Empty(t, remaining)
+		return out
+	}
+
+	// 1. Sensible (never-indexed) header — full round-trip
+	hf := AcquireHeaderField()
+	hf.SetBytes([]byte("authorization"), []byte("Bearer token"))
+	hf.sensible = true
+	out := roundTrip(hf, false)
+	require.Equal(t, "authorization", out.Key())
+	require.Equal(t, "Bearer token", out.Value())
+	require.True(t, out.IsSensible())
+	ReleaseHeaderField(hf)
+	ReleaseHeaderField(out)
+
+	// 2. Full match from static table (:method GET)
+	hf = AcquireHeaderField()
+	hf.SetBytes([]byte(":method"), []byte("GET"))
+	out = roundTrip(hf, true)
+	require.Equal(t, ":method", out.Key())
+	require.Equal(t, "GET", out.Value())
+	ReleaseHeaderField(hf)
+	ReleaseHeaderField(out)
+
+	// 3. Key match, no value match, store=false
+	hf = AcquireHeaderField()
+	hf.SetBytes([]byte(":authority"), []byte("host.example.com"))
+	out = roundTrip(hf, false)
+	require.Equal(t, ":authority", out.Key())
+	require.Equal(t, "host.example.com", out.Value())
+	ReleaseHeaderField(hf)
+	ReleaseHeaderField(out)
+
+	// 4. Unknown header, store=false + DisableDynamicTable
+	enc.DisableDynamicTable = true
+	hf = AcquireHeaderField()
+	hf.SetBytes([]byte("x-custom"), []byte("value"))
+	out = roundTrip(hf, false)
+	require.Equal(t, "x-custom", out.Key())
+	require.Equal(t, "value", out.Value())
+	ReleaseHeaderField(hf)
+	ReleaseHeaderField(out)
+	enc.DisableDynamicTable = false
+
+	// 5. Unknown header, store=true (adds to dynamic table)
+	hf = AcquireHeaderField()
+	hf.SetBytes([]byte("x-new-header"), []byte("new-value"))
+	prevDynLen := len(enc.dynamic)
+	out = roundTrip(hf, true)
+	require.Equal(t, "x-new-header", out.Key())
+	require.Equal(t, "new-value", out.Value())
+	require.Equal(t, prevDynLen+1, len(enc.dynamic))
+	ReleaseHeaderField(hf)
+	ReleaseHeaderField(out)
+}
+
+func TestHPACKNonIndexedLiteralWithStringKey(t *testing.T) {
+	hp := AcquireHPACK()
+	defer ReleaseHPACK(hp)
+	hp.SetMaxTableSize(4096)
+
+	hf := AcquireHeaderField()
+	defer ReleaseHeaderField(hf)
+
+	// Non-indexed literal with string key (c = 0x00, c&15 == 0)
+	// 0x00 = no indexing, new name (string literal key)
+	key := []byte("x-custom")
+	val := []byte("myval")
+	b := []byte{0x00, byte(len(key))}
+	b = append(b, key...)
+	b = append(b, byte(len(val)))
+	b = append(b, val...)
+
+	remaining, err := hp.Next(hf, b)
+	require.NoError(t, err)
+	require.Empty(t, remaining)
+	require.Equal(t, "x-custom", hf.Key())
+	require.Equal(t, "myval", hf.Value())
+	require.Empty(t, hp.dynamic)
+}
+
+func TestHPACKSearchDynamicTable(t *testing.T) {
+	hp := AcquireHPACK()
+	defer ReleaseHPACK(hp)
+	hp.SetMaxTableSize(4096)
+
+	// Add a custom header to the dynamic table
+	hf := AcquireHeaderField()
+	hf.Set("x-custom", "value1")
+	hp.addDynamic(hf)
+
+	// Search should find it with full match
+	idx, full := hp.search(hf)
+	require.True(t, full, "should find full match in dynamic table")
+	require.GreaterOrEqual(t, idx, uint64(maxIndex), "dynamic index should be >= maxIndex")
+
+	// Search with same key but different value → no match in dynamic (key-only not tracked)
+	hf2 := AcquireHeaderField()
+	hf2.Set("x-custom", "value2")
+	idx2, full2 := hp.search(hf2)
+	require.False(t, full2, "different value should not be full match")
+	require.Zero(t, idx2, "dynamic table only returns full matches")
+
+	// Search with unknown key → no match
+	hf3 := AcquireHeaderField()
+	hf3.Set("x-unknown", "nope")
+	idx3, full3 := hp.search(hf3)
+	require.Zero(t, idx3)
+	require.False(t, full3)
+
+	// Search static table: :method GET → full match
+	hf4 := AcquireHeaderField()
+	hf4.Set(":method", "GET")
+	idx4, full4 := hp.search(hf4)
+	require.True(t, full4)
+	require.Greater(t, idx4, uint64(0))
+	require.Less(t, idx4, uint64(maxIndex))
+
+	// Search static table: :authority with custom value → key-only match
+	hf5 := AcquireHeaderField()
+	hf5.Set(":authority", "my-server.com")
+	idx5, full5 := hp.search(hf5)
+	require.False(t, full5)
+	require.Greater(t, idx5, uint64(0))
+
+	ReleaseHeaderField(hf)
+	ReleaseHeaderField(hf2)
+	ReleaseHeaderField(hf3)
+	ReleaseHeaderField(hf4)
+	ReleaseHeaderField(hf5)
+}
+
+func TestHPACKShrinkEviction(t *testing.T) {
+	hp := AcquireHPACK()
+	defer ReleaseHPACK(hp)
+	hp.SetMaxTableSize(4096)
+
+	// Add several entries to fill the dynamic table
+	for i := range 10 {
+		hf := AcquireHeaderField()
+		hf.Set(fmt.Sprintf("x-key-%d", i), "some-value-that-takes-space")
+		hp.addDynamic(hf)
+		ReleaseHeaderField(hf)
+	}
+	require.Equal(t, 10, len(hp.dynamic))
+	prevSize := hp.dynamicSize
+
+	// Shrink to a small size — should evict oldest entries
+	hp.maxTableSize = 100
+	hp.shrink()
+	require.Less(t, len(hp.dynamic), 10)
+	require.LessOrEqual(t, hp.dynamicSize, uint32(100))
+	require.Less(t, hp.dynamicSize, prevSize)
+}
+
+func TestHPACKEncodeDecodeRoundTrip(t *testing.T) {
+	headers := []struct{ key, value string }{
+		{":method", "GET"},
+		{":method", "POST"},
+		{":path", "/"},
+		{":path", "/api/v1/users"},
+		{":scheme", "https"},
+		{":status", "200"},
+		{":status", "404"},
+		{"content-type", "application/json"},
+		{"x-custom-header", "custom-value"},
+		{"accept-encoding", "gzip, deflate, br"},
+	}
+
+	for _, hdr := range headers {
+		enc := AcquireHPACK()
+		dec := AcquireHPACK()
+		enc.SetMaxTableSize(4096)
+		dec.SetMaxTableSize(4096)
+
+		hf := AcquireHeaderField()
+		hf.Set(hdr.key, hdr.value)
+
+		encoded := enc.AppendHeader(nil, hf, true)
+		require.NotEmpty(t, encoded, "empty encoding for %s: %s", hdr.key, hdr.value)
+
+		out := AcquireHeaderField()
+		remaining, err := dec.Next(out, encoded)
+		require.NoError(t, err, "decode error for %s: %s", hdr.key, hdr.value)
+		require.Empty(t, remaining)
+		require.Equal(t, hdr.key, out.Key())
+		require.Equal(t, hdr.value, out.Value())
+
+		ReleaseHeaderField(hf)
+		ReleaseHeaderField(out)
+		ReleaseHPACK(enc)
+		ReleaseHPACK(dec)
+	}
+}
+
 func hexComparison(b, r []byte) (s string) {
 	s += "\n"
 	for i := range b {

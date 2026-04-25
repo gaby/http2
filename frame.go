@@ -34,6 +34,7 @@ func (ft FrameType) String() string {
 	return strconv.Itoa(int(ft))
 }
 
+// FrameFlags represents the flags set on an HTTP/2 frame.
 type FrameFlags int8
 
 // Has returns if `f` is in the frame flags or not.
@@ -51,6 +52,7 @@ func (flags FrameFlags) Del(f FrameFlags) FrameFlags {
 	return flags &^ f
 }
 
+// Frame is the interface implemented by all HTTP/2 frame body types.
 type Frame interface {
 	Type() FrameType
 	Reset()
@@ -116,6 +118,7 @@ var framePools = func() [FrameContinuation + 1]*sync.Pool {
 	return pools
 }()
 
+// AcquireFrame returns a Frame of the given type from the pool.
 func AcquireFrame(ftype FrameType) Frame {
 	fr := framePools[ftype].Get().(Frame)
 	fr.Reset()
@@ -123,6 +126,7 @@ func AcquireFrame(ftype FrameType) Frame {
 	return fr
 }
 
+// ReleaseFrame returns fr to the pool.
 func ReleaseFrame(fr Frame) {
 	framePools[fr.Type()].Put(fr)
 }

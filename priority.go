@@ -8,14 +8,16 @@ const FramePriority FrameType = 0x2
 
 var _ Frame = &Priority{}
 
-// Priority represents the Priority frame.
+// Priority represents a PRIORITY frame (RFC 7540 Section 6.3).
 //
-// https://tools.ietf.org/html/rfc7540#section-6.3
+// PRIORITY frames specify the sender-advised priority of a stream.
+// They carry a stream dependency and a weight value.
 type Priority struct {
 	stream uint32
 	weight byte
 }
 
+// Type returns FramePriority.
 func (pry *Priority) Type() FrameType {
 	return FramePriority
 }
@@ -26,6 +28,7 @@ func (pry *Priority) Reset() {
 	pry.weight = 0
 }
 
+// CopyTo copies the priority state into p.
 func (pry *Priority) CopyTo(p *Priority) {
 	p.stream = pry.stream
 	p.weight = pry.weight
@@ -51,6 +54,7 @@ func (pry *Priority) SetWeight(w byte) {
 	pry.weight = w
 }
 
+// Deserialize reads a PRIORITY frame from the given frame header payload.
 func (pry *Priority) Deserialize(fr *FrameHeader) (err error) {
 	if len(fr.payload) != 5 {
 		return newFrameSizeError(fr.Stream(), "priority frame payload must be 5 bytes")
@@ -61,6 +65,7 @@ func (pry *Priority) Deserialize(fr *FrameHeader) (err error) {
 	return nil
 }
 
+// Serialize writes the PRIORITY payload into the frame header.
 func (pry *Priority) Serialize(fr *FrameHeader) {
 	fr.payload = http2utils.AppendUint32Bytes(fr.payload[:0], pry.stream)
 	fr.payload = append(fr.payload, pry.weight)
