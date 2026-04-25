@@ -1962,8 +1962,10 @@ func (sc *serverConn) handleSettings(st *Settings) {
 	}
 }
 
-const maxWindowIncrement = 1<<31 - 1
-const maxWindowSize = maxWindowIncrement
+const (
+	maxWindowIncrement = 1<<31 - 1
+	maxWindowSize      = maxWindowIncrement
+)
 
 var (
 	errInvalidWindowSizeIncrement = errors.New("invalid window size increment")

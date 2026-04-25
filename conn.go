@@ -23,7 +23,6 @@ const windowWaitTimeout = 200 * time.Millisecond
 
 // ConnOpts defines the connection options.
 type ConnOpts struct {
-
 	// OnDisconnect is a callback that fires when the Conn disconnects.
 	OnDisconnect func(c *Conn)
 
@@ -169,7 +168,6 @@ func NewConn(c net.Conn, opts ConnOpts) *Conn {
 
 // Dialer allows creating HTTP/2 connections by specifying an address and tls configuration.
 type Dialer struct {
-
 	// TLSConfig is the tls configuration.
 	//
 	// If TLSConfig is nil, a default one will be defined on the Dial call.

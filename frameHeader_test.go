@@ -26,8 +26,8 @@ func TestFrameWrite(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, len(testStr), n, "unexpected size")
 
-	var bf = bytes.NewBuffer(nil)
-	var bw = bufio.NewWriter(bf)
+	bf := bytes.NewBuffer(nil)
+	bw := bufio.NewWriter(bf)
 	fr.WriteTo(bw)
 	bw.Flush()
 

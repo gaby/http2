@@ -15,7 +15,6 @@ import (
 //
 // Use AcquireHPACK to acquire new HPACK structure.
 type HPACK struct {
-
 	// the dynamic table is in an inverse order.
 	//
 	// the insertion point should be the beginning. But we are going to do
