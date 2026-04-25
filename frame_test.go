@@ -348,6 +348,19 @@ func TestWindowUpdateRoundTrip(t *testing.T) {
 	require.EqualValues(t, 123, decoded.Increment(), "increment mismatch")
 }
 
+func TestDataWriteAndAppend(t *testing.T) {
+	d := &Data{}
+	n, err := d.Write([]byte("hello"))
+	require.NoError(t, err)
+	require.Equal(t, 5, n)
+
+	d.Append([]byte(" world"))
+	require.Equal(t, []byte("hello world"), d.Data())
+	require.Equal(t, 11, d.Len())
+
+	require.Equal(t, FrameData, d.Type())
+}
+
 func TestPingSerializeDeserialize(t *testing.T) {
 	p := &Ping{}
 	p.SetData([]byte{1, 2, 3, 4, 5, 6, 7, 8})
