@@ -66,9 +66,9 @@ func (e ErrorCode) Error() string {
 
 // Error defines the HTTP/2 errors, composed by the code and debug data.
 type Error struct {
+	debug     string
 	code      ErrorCode
 	frameType FrameType
-	debug     string
 }
 
 // Is implements the interface for errors.Is.

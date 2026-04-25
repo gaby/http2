@@ -16,9 +16,9 @@ var _ Frame = &Data{}
 //
 // https://tools.ietf.org/html/rfc7540#section-6.1
 type Data struct {
+	b          []byte // data bytes
 	endStream  bool
 	hasPadding bool
-	b          []byte // data bytes
 }
 
 func (data *Data) Type() FrameType {

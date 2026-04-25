@@ -12,9 +12,9 @@ var _ Frame = &GoAway{}
 
 // GoAway https://tools.ietf.org/html/rfc7540#section-6.8
 type GoAway struct {
+	data   []byte // additional data
 	stream uint32
 	code   ErrorCode
-	data   []byte // additional data
 }
 
 func (ga *GoAway) Error() string {

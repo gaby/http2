@@ -15,16 +15,6 @@ import (
 //
 // Use AcquireHPACK to acquire new HPACK structure.
 type HPACK struct {
-	// DisableCompression disables compression for literal header fields.
-	DisableCompression bool
-
-	// DisableDynamicTable disables the usage of the dynamic table for
-	// the HPACK structure. If this option is true the HPACK won't add any
-	// field to the dynamic table unless it was sent by the peer.
-	//
-	// This field was implemented because in many ways the server could modify
-	// the fields established by the client losing performance calculated by client.
-	DisableDynamicTable bool
 
 	// the dynamic table is in an inverse order.
 	//
@@ -42,6 +32,16 @@ type HPACK struct {
 	maxTableSize uint32
 	// maxTableSize comming from the settings frame
 	maxTableSizeSettings uint32
+	// DisableCompression disables compression for literal header fields.
+	DisableCompression bool
+
+	// DisableDynamicTable disables the usage of the dynamic table for
+	// the HPACK structure. If this option is true the HPACK won't add any
+	// field to the dynamic table unless it was sent by the peer.
+	//
+	// This field was implemented because in many ways the server could modify
+	// the fields established by the client losing performance calculated by client.
+	DisableDynamicTable bool
 }
 
 func headerFieldsToString(hfs []*HeaderField, indexOffset int) string {

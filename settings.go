@@ -29,15 +29,15 @@ const (
 //
 // These options have been humanized.
 type Settings struct {
-	ack         bool
 	rawSettings []byte
 	tableSize   uint32
-	enablePush  bool
 	maxStreams  uint32
 	windowSize  uint32
-	windowSet   bool
 	frameSize   uint32
 	headerSize  uint32
+	ack         bool
+	enablePush  bool
+	windowSet   bool
 }
 
 func (st *Settings) Type() FrameType {

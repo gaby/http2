@@ -29,20 +29,32 @@ const (
 var validHTTP2HeaderNamePunctuation = []byte("!#$%&'*+-.^_`|~")
 
 type serverConn struct {
-	c net.Conn
+	pingWindowStart time.Time
+	rstWindowStart  time.Time
+	c               net.Conn
+	logger          fasthttp.Logger
+
 	h fasthttp.RequestHandler
 
 	br *bufio.Reader
 	bw *bufio.Writer
 
-	encMu sync.Mutex // guards enc
-	enc   HPACK
-	dec   HPACK
-	// clientSMu guards access to clientS
-	clientSMu sync.Mutex
+	writer  chan *FrameHeader
+	reader  chan *FrameHeader
+	streams map[uint32]*Stream
 
-	// last valid ID used as a reference for new IDs
-	lastID uint32
+	// pingTimer
+	pingTimer       *time.Timer
+	maxRequestTimer *time.Timer
+	maxIdleTimer    *time.Timer
+
+	closer chan struct{}
+
+	enc HPACK
+	dec HPACK
+
+	st      Settings
+	clientS Settings
 
 	// client's window
 	// should be int64 because the user can try to overflow it
@@ -52,16 +64,48 @@ type serverConn struct {
 	// client's max frame size
 	clientMaxFrameSize int64
 
+	// maxRequestTime is the max time of a request over one single stream
+	maxRequestTime time.Duration
+	pingInterval   time.Duration
+	// maxIdleTime is the max time a client can be connected without sending any REQUEST.
+	// As highlighted, PING/PONG frames are completely excluded.
+	//
+	// Therefore, a client that didn't send a request for more than `maxIdleTime` will see it's connection closed.
+	maxIdleTime time.Duration
+
+	// enqueueTimeout overrides defaultEnqueueTimeout when non-zero.
+	enqueueTimeout time.Duration
+
+	pingCount      int
+	pingViolations int
+
+	rstCount int
+	writerMu sync.RWMutex
+
+	closerOnce      sync.Once
+	writerCloseOnce sync.Once
+
+	encMu sync.Mutex // guards enc
+	// clientSMu guards access to clientS
+	clientSMu sync.Mutex
+
+	streamsMu   sync.Mutex
+	pingTimerMu sync.Mutex
+	timerMu     sync.Mutex
+
+	// PING rate-limiting state (guards with pingMu).
+	pingMu sync.Mutex
+
+	// RST_STREAM flood-detection state (guards with rstMu).
+	rstMu sync.Mutex
+
+	// last valid ID used as a reference for new IDs
+	lastID uint32
+
 	// our values
 	maxWindow     int32
 	currentWindow int32
-	writer        chan *FrameHeader
-	reader        chan *FrameHeader
-	writerMu      sync.RWMutex
 	writerClosed  atomic.Bool
-
-	streamsMu sync.Mutex
-	streams   map[uint32]*Stream
 
 	state connState
 	// connErr signals that a connection-level error has been triggered and the
@@ -76,46 +120,7 @@ type serverConn struct {
 	// to gracefully close the connection with a GOAWAY.
 	closeRef uint32
 
-	// maxRequestTime is the max time of a request over one single stream
-	maxRequestTime time.Duration
-	pingInterval   time.Duration
-	// maxIdleTime is the max time a client can be connected without sending any REQUEST.
-	// As highlighted, PING/PONG frames are completely excluded.
-	//
-	// Therefore, a client that didn't send a request for more than `maxIdleTime` will see it's connection closed.
-	maxIdleTime time.Duration
-
-	st      Settings
-	clientS Settings
-
-	// pingTimer
-	pingTimer       *time.Timer
-	maxRequestTimer *time.Timer
-	maxIdleTimer    *time.Timer
-	pingTimerMu     sync.Mutex
-	timerMu         sync.Mutex
-
-	closer chan struct{}
-
-	debug  bool
-	logger fasthttp.Logger
-
-	closerOnce      sync.Once
-	writerCloseOnce sync.Once
-
-	// enqueueTimeout overrides defaultEnqueueTimeout when non-zero.
-	enqueueTimeout time.Duration
-
-	// PING rate-limiting state (guards with pingMu).
-	pingMu          sync.Mutex
-	pingCount       int
-	pingWindowStart time.Time
-	pingViolations  int
-
-	// RST_STREAM flood-detection state (guards with rstMu).
-	rstMu          sync.Mutex
-	rstCount       int
-	rstWindowStart time.Time
+	debug bool
 }
 
 // defaultEnqueueTimeout bounds how long a sender will wait when the writer
@@ -1662,11 +1667,11 @@ var (
 )
 
 type streamWrite struct {
-	size    int64
-	written int64
 	strm    *Stream
 	sc      *serverConn
 	writer  chan<- *FrameHeader
+	size    int64
+	written int64
 }
 
 func acquireStreamWrite() *streamWrite {

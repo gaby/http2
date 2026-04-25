@@ -13,8 +13,8 @@ var (
 //
 // https://tools.ietf.org/html/rfc7540#section-6.10
 type Continuation struct {
-	endHeaders bool
 	rawHeaders []byte
+	endHeaders bool
 }
 
 func (c *Continuation) Type() FrameType {

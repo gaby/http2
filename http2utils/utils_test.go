@@ -52,8 +52,8 @@ func TestAppendUint32Bytes(t *testing.T) {
 type recordingTB struct {
 	*testing.T
 	name        string
-	fatalCalled bool
 	fatalMsg    string
+	fatalCalled bool
 }
 
 func (tb *recordingTB) Name() string { return tb.name }

@@ -10,10 +10,10 @@ var _ Frame = &PushPromise{}
 
 // PushPromise https://tools.ietf.org/html/rfc7540#section-6.6
 type PushPromise struct {
+	header []byte // header block fragment
+	stream uint32
 	pad    bool
 	ended  bool
-	stream uint32
-	header []byte // header block fragment
 }
 
 func (pp *PushPromise) Type() FrameType {

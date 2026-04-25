@@ -43,17 +43,17 @@ var frameHeaderPool = sync.Pool{
 //
 // https://tools.ietf.org/html/rfc7540#section-4.1
 type FrameHeader struct {
-	length int        // 24 bits
-	kind   FrameType  // 8 bits
-	flags  FrameFlags // 8 bits
-	stream uint32     // 31 bits
+	fr      Frame
+	payload []byte
+
+	length int    // 24 bits
+	stream uint32 // 31 bits
 
 	maxLen uint32
 
 	rawHeader [DefaultFrameSize]byte
-	payload   []byte
-
-	fr Frame
+	kind      FrameType  // 8 bits
+	flags     FrameFlags // 8 bits
 }
 
 // AcquireFrameHeader gets a FrameHeader from pool.

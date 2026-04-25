@@ -365,8 +365,8 @@ func TestWindowUpdateRejectsZeroIncrement(t *testing.T) {
 func TestWindowUpdateDeserializeRejectsInvalidPayloadLength(t *testing.T) {
 	testCases := []struct {
 		name              string
-		stream            uint32
 		payload           []byte
+		stream            uint32
 		expectedFrameType FrameType
 	}{
 		{

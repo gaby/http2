@@ -19,13 +19,13 @@ type FrameWithHeaders interface {
 //
 // https://tools.ietf.org/html/rfc7540#section-6.2
 type Headers struct {
-	hasPadding bool
+	rawHeaders []byte // this field is used to store uncompleted headers.
 	stream     uint32
+	hasPadding bool
 	weight     uint8
 	endStream  bool
 	endHeaders bool
 	priority   bool
-	rawHeaders []byte // this field is used to store uncompleted headers.
 }
 
 func (h *Headers) Reset() {

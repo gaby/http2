@@ -23,21 +23,22 @@ const windowWaitTimeout = 200 * time.Millisecond
 
 // ConnOpts defines the connection options.
 type ConnOpts struct {
+
+	// OnDisconnect is a callback that fires when the Conn disconnects.
+	OnDisconnect func(c *Conn)
+
 	// PingInterval defines the interval in which the client will ping the server.
 	//
 	// An interval of <=0 will make the library to use DefaultPingInterval. Because ping intervals can't be disabled
 	PingInterval time.Duration
 
-	// DisablePingChecking ...
-	DisablePingChecking bool
-
-	// OnDisconnect is a callback that fires when the Conn disconnects.
-	OnDisconnect func(c *Conn)
-
 	// WindowWaitTimeout is the maximum time to wait for flow-control window
 	// credit before returning a FlowControlError to the caller.
 	// A value of 0 uses the default of 200 ms.
 	WindowWaitTimeout time.Duration
+
+	// DisablePingChecking ...
+	DisablePingChecking bool
 }
 
 // Handshake performs an HTTP/2 handshake. It sends the preface (if requested),
@@ -83,11 +84,39 @@ func Handshake(preface bool, bw *bufio.Writer, st *Settings, maxWin int32) error
 type Conn struct {
 	c net.Conn
 
+	lastErr error
+
 	br *bufio.Reader
 	bw *bufio.Writer
 
 	enc *HPACK
 	dec *HPACK
+
+	windowCond *sync.Cond
+
+	in  chan *Ctx
+	out chan *FrameHeader
+
+	onDisconnect func(*Conn)
+
+	done chan struct{} // closed when writeLoop exits
+
+	reqQueued sync.Map
+
+	current Settings
+	serverS Settings
+
+	pingInterval time.Duration
+
+	closed uint64
+
+	windowWaitTimeout time.Duration
+	serverSMu         sync.RWMutex
+
+	lastErrMu      sync.RWMutex
+	windowCondOnce sync.Once
+
+	windowMu sync.Mutex
 
 	nextID uint32
 
@@ -99,35 +128,11 @@ type Conn struct {
 
 	openStreams int32
 
-	current   Settings
-	serverS   Settings
-	serverSMu sync.RWMutex
-
-	windowMu       sync.Mutex
-	windowCond     *sync.Cond
-	windowCondOnce sync.Once
-
 	state    connState
 	closeRef uint32
 
-	reqQueued sync.Map
-
-	in  chan *Ctx
-	out chan *FrameHeader
-
-	pingInterval time.Duration
-
 	unacks      int32
 	disableAcks bool
-
-	lastErrMu    sync.RWMutex
-	lastErr      error
-	onDisconnect func(*Conn)
-
-	closed uint64
-	done   chan struct{} // closed when writeLoop exits
-
-	windowWaitTimeout time.Duration
 }
 
 // NewConn returns a new HTTP/2 connection.
@@ -164,22 +169,22 @@ func NewConn(c net.Conn, opts ConnOpts) *Conn {
 
 // Dialer allows creating HTTP/2 connections by specifying an address and tls configuration.
 type Dialer struct {
-	// Addr is the server's address in the form: `host:port`.
-	Addr string
 
 	// TLSConfig is the tls configuration.
 	//
 	// If TLSConfig is nil, a default one will be defined on the Dial call.
 	TLSConfig *tls.Config
 
+	// NetDial defines the callback for establishing new connection to the host.
+	// Default Dial is used if not set.
+	NetDial fasthttp.DialFunc
+	// Addr is the server's address in the form: `host:port`.
+	Addr string
+
 	// PingInterval defines the interval in which the client will ping the server.
 	//
 	// An interval of 0 will make the library to use DefaultPingInterval. Because ping intervals can't be disabled.
 	PingInterval time.Duration
-
-	// NetDial defines the callback for establishing new connection to the host.
-	// Default Dial is used if not set.
-	NetDial fasthttp.DialFunc
 }
 
 func (d *Dialer) tryDial() (net.Conn, error) {
