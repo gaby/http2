@@ -130,8 +130,10 @@ type serverConn struct {
 const defaultEnqueueTimeout = 2 * time.Second
 
 // goawayFlushDelay is a brief pause given to the write loop to flush a GOAWAY
-// frame to the peer before the connection is torn down.
-const goawayFlushDelay = 20 * time.Millisecond
+// frame to the peer before the connection is torn down. The value must be large
+// enough for the writeLoop goroutine to be scheduled and flush the frame even
+// on slow CI platforms (Windows runners can need 50ms+ for a context switch).
+const goawayFlushDelay = 100 * time.Millisecond
 
 // maxContinuationFrames is the maximum number of CONTINUATION frames allowed
 // for a single header block. A client fragmenting headers across more frames
