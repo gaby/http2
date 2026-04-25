@@ -824,6 +824,69 @@ func TestHPACKIndexedFieldInvalid(t *testing.T) {
 	require.Contains(t, err.Error(), "index field not found")
 }
 
+func TestHPACKLiteralWithIndexedKey(t *testing.T) {
+	hp := AcquireHPACK()
+	defer ReleaseHPACK(hp)
+	hp.SetMaxTableSize(4096)
+
+	hf := AcquireHeaderField()
+	defer ReleaseHeaderField(hf)
+
+	// Literal with incremental indexing, key from static table index 1 (:authority)
+	// 0x41 = 0100_0001 → literal with incremental indexing, key index = 1
+	// Value: "example.com" (len=11, no huffman)
+	val := []byte("example.com")
+	b := []byte{0x41, byte(len(val))}
+	b = append(b, val...)
+
+	remaining, err := hp.Next(hf, b)
+	require.NoError(t, err)
+	require.Empty(t, remaining)
+	require.Equal(t, ":authority", hf.Key())
+	require.Equal(t, "example.com", hf.Value())
+	// Should be added to dynamic table
+	require.Len(t, hp.dynamic, 1)
+}
+
+func TestHPACKLiteralWithIndexedKeyInvalid(t *testing.T) {
+	hp := AcquireHPACK()
+	defer ReleaseHPACK(hp)
+	hp.SetMaxTableSize(4096)
+
+	hf := AcquireHeaderField()
+	defer ReleaseHeaderField(hf)
+
+	// Literal with incremental indexing, invalid key index
+	// 0x7F 0x40 = index = 63 + 64 = 127 (beyond static table, no dynamic entries)
+	b := []byte{0x7F, 0x40}
+	_, err := hp.Next(hf, b)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "literal indexed field not found")
+}
+
+func TestHPACKNonIndexedLiteralWithIndexedKey(t *testing.T) {
+	hp := AcquireHPACK()
+	defer ReleaseHPACK(hp)
+	hp.SetMaxTableSize(4096)
+
+	hf := AcquireHeaderField()
+	defer ReleaseHeaderField(hf)
+
+	// Non-indexed literal with key from static table index 1 (:authority)
+	// 0x01 = 0000_0001 → without indexing, key index = 1
+	val := []byte("test.com")
+	b := []byte{0x01, byte(len(val))}
+	b = append(b, val...)
+
+	remaining, err := hp.Next(hf, b)
+	require.NoError(t, err)
+	require.Empty(t, remaining)
+	require.Equal(t, ":authority", hf.Key())
+	require.Equal(t, "test.com", hf.Value())
+	// Should NOT be added to dynamic table
+	require.Empty(t, hp.dynamic)
+}
+
 func hexComparison(b, r []byte) (s string) {
 	s += "\n"
 	for i := range b {
