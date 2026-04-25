@@ -3,6 +3,7 @@ package http2
 import (
 	"bytes"
 	"crypto/tls"
+	"errors"
 	"io"
 	"testing"
 
@@ -115,4 +116,36 @@ func TestConnCancelErrors(t *testing.T) {
 	ctx := &Ctx{Err: make(chan error, 1)}
 	err := c.Cancel(ctx)
 	require.ErrorIs(t, err, ErrStreamNotReady)
+}
+
+func TestWriteErrorUnwrap(t *testing.T) {
+	inner := io.ErrClosedPipe
+	we := WriteError{err: inner}
+
+	require.Equal(t, inner, we.Unwrap(), "Unwrap should return the inner error")
+	require.ErrorIs(t, we, inner, "errors.Is should match through Unwrap")
+	require.Contains(t, we.Error(), "closed pipe")
+}
+
+func TestWindowUpdateErrorMessage(t *testing.T) {
+	require.Equal(t, "invalid window size increment", windowUpdateErrorMessage(errInvalidWindowSizeIncrement))
+	require.Equal(t, "window is above limits", windowUpdateErrorMessage(errWindowSizeOverflow))
+	require.Equal(t, "window size increment is 0", windowUpdateErrorMessage(errWindowIncrementZero))
+	require.Equal(t, "some other error", windowUpdateErrorMessage(errors.New("some other error")))
+}
+
+func TestPingDeserializeInvalidPayload(t *testing.T) {
+	p := &Ping{}
+	fr := AcquireFrameHeader()
+	defer ReleaseFrameHeader(fr)
+
+	// Valid 8-byte payload should succeed
+	fr.payload = make([]byte, 8)
+	require.NoError(t, p.Deserialize(fr))
+
+	// Invalid payload length should return error
+	fr.payload = make([]byte, 4)
+	err := p.Deserialize(fr)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid ping payload")
 }
