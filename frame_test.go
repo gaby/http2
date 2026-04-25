@@ -348,6 +348,50 @@ func TestWindowUpdateRoundTrip(t *testing.T) {
 	require.EqualValues(t, 123, decoded.Increment(), "increment mismatch")
 }
 
+func TestPingSerializeDeserialize(t *testing.T) {
+	p := &Ping{}
+	p.SetData([]byte{1, 2, 3, 4, 5, 6, 7, 8})
+	p.SetAck(true)
+
+	fr := AcquireFrameHeader()
+	defer ReleaseFrameHeader(fr)
+	fr.SetBody(p)
+	p.Serialize(fr)
+	fr.length = len(fr.payload)
+
+	require.True(t, fr.Flags().Has(FlagAck))
+
+	var decoded Ping
+	err := decoded.Deserialize(fr)
+	require.NoError(t, err)
+	require.True(t, decoded.IsAck())
+	require.Equal(t, p.Data(), decoded.Data())
+}
+
+func TestPingTimeRoundTrip(t *testing.T) {
+	p := &Ping{}
+	p.SetCurrentTime()
+
+	ts := p.DataAsTime()
+	require.False(t, ts.IsZero())
+
+	// Write/CopyTo
+	p2 := &Ping{}
+	p.CopyTo(p2)
+	require.Equal(t, p.Data(), p2.Data())
+	require.Equal(t, p.IsAck(), p2.IsAck())
+
+	// Write via io.Writer interface
+	p3 := &Ping{}
+	_, err := p3.Write([]byte{10, 20, 30, 40, 50, 60, 70, 80})
+	require.NoError(t, err)
+	require.Equal(t, byte(10), p3.Data()[0])
+
+	// Reset
+	p.Reset()
+	require.False(t, p.IsAck())
+}
+
 func TestPrioritySerializeDeserialize(t *testing.T) {
 	pry := &Priority{}
 	pry.SetStream(7)
