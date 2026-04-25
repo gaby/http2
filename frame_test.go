@@ -529,6 +529,47 @@ func TestPushPromiseAndRstStreamHelpers(t *testing.T) {
 	ReleaseFrameHeader(fr)
 }
 
+func TestContinuationSerializeDeserialize(t *testing.T) {
+	fr := AcquireFrameHeader()
+	defer ReleaseFrameHeader(fr)
+
+	c := AcquireFrame(FrameContinuation).(*Continuation)
+	c.SetHeader([]byte("raw-headers"))
+	c.SetEndHeaders(true)
+	fr.SetBody(c)
+	c.Serialize(fr)
+
+	require.True(t, fr.Flags().Has(FlagEndHeaders))
+	fr.length = len(fr.payload)
+
+	var decoded Continuation
+	err := decoded.Deserialize(fr)
+	require.NoError(t, err)
+	require.True(t, decoded.EndHeaders())
+	require.Equal(t, []byte("raw-headers"), decoded.Headers())
+}
+
+func TestContinuationCopyAndAppend(t *testing.T) {
+	c := &Continuation{}
+	c.SetHeader([]byte("initial"))
+	c.AppendHeader([]byte("-more"))
+	require.Equal(t, []byte("initial-more"), c.Headers())
+
+	n, err := c.Write([]byte("-write"))
+	require.NoError(t, err)
+	require.Equal(t, 6, n)
+	require.Equal(t, []byte("initial-more-write"), c.Headers())
+
+	var c2 Continuation
+	c.CopyTo(&c2)
+	require.Equal(t, c.Headers(), c2.Headers())
+	require.Equal(t, c.EndHeaders(), c2.EndHeaders())
+
+	c.Reset()
+	require.Empty(t, c.Headers())
+	require.False(t, c.EndHeaders())
+}
+
 func TestPushPromiseDeserializeWithInsufficientPadding(t *testing.T) {
 	fr := AcquireFrameHeader()
 	defer ReleaseFrameHeader(fr)
