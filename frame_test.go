@@ -348,6 +348,39 @@ func TestWindowUpdateRoundTrip(t *testing.T) {
 	require.EqualValues(t, 123, decoded.Increment(), "increment mismatch")
 }
 
+func TestWindowUpdateSerializeDeserialize(t *testing.T) {
+	increments := []int{1, 100, 1 << 15, 1<<31 - 1}
+
+	for _, inc := range increments {
+		wu := &WindowUpdate{}
+		wu.SetIncrement(inc)
+
+		fr := AcquireFrameHeader()
+		fr.SetBody(wu)
+		wu.Serialize(fr)
+		fr.length = len(fr.payload)
+
+		var decoded WindowUpdate
+		err := decoded.Deserialize(fr)
+		require.NoError(t, err)
+		require.Equal(t, inc, decoded.Increment(), "increment mismatch for %d", inc)
+
+		ReleaseFrameHeader(fr)
+	}
+}
+
+func TestWindowUpdateCopyTo(t *testing.T) {
+	wu := &WindowUpdate{}
+	wu.SetIncrement(42)
+
+	var wu2 WindowUpdate
+	wu.CopyTo(&wu2)
+	require.Equal(t, 42, wu2.Increment())
+
+	wu.Reset()
+	require.Zero(t, wu.Increment())
+}
+
 func TestWindowUpdateRejectsZeroIncrement(t *testing.T) {
 	fr := AcquireFrameHeader()
 	defer ReleaseFrameHeader(fr)
