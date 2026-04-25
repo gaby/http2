@@ -377,6 +377,34 @@ func (e *errReader) Read([]byte) (int, error) {
 	return 0, io.ErrUnexpectedEOF
 }
 
+func TestErrorCodeAllKnownCodes(t *testing.T) {
+	codes := []struct {
+		code ErrorCode
+		str  string
+		err  string
+	}{
+		{NoError, "NoError", "No errors"},
+		{ProtocolError, "ProtocolError", "Protocol error"},
+		{InternalError, "InternalError", "Internal error"},
+		{FlowControlError, "FlowControlError", "Flow control error"},
+		{SettingsTimeoutError, "SettingsTimeoutError", "Settings timeout"},
+		{StreamClosedError, "StreamClosedError", "Stream has been closed"},
+		{FrameSizeError, "FrameSizeError", "FrameHeader size error"},
+		{RefusedStreamError, "RefusedStreamError", "Refused Stream"},
+		{StreamCanceled, "StreamCanceled", "Stream canceled"},
+		{CompressionError, "CompressionError", "Compression error"},
+		{ConnectionError, "ConnectionError", "Connection error"},
+		{EnhanceYourCalm, "EnhanceYourCalm", "Enhance your calm"},
+		{InadequateSecurity, "InadequateSecurity", "Inadequate security"},
+		{HTTP11Required, "HTTP11Required", "HTTP/1.1 required"},
+	}
+
+	for _, tc := range codes {
+		require.Equal(t, tc.str, tc.code.String(), "String() for %d", tc.code)
+		require.Equal(t, tc.err, tc.code.Error(), "Error() for %d", tc.code)
+	}
+}
+
 func TestNewFrameSizeError(t *testing.T) {
 	// stream=0 → GoAway
 	err := newFrameSizeError(0, "test goaway")
