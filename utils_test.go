@@ -372,6 +372,25 @@ func (e *errReader) Read([]byte) (int, error) {
 	return 0, io.ErrUnexpectedEOF
 }
 
+func TestPushPromiseDeserializeEdgeCases(t *testing.T) {
+	pp := &PushPromise{}
+	fr := AcquireFrameHeader()
+	defer ReleaseFrameHeader(fr)
+
+	// Too-short payload (< 4 bytes)
+	fr.payload = make([]byte, 2)
+	fr.flags = 0
+	fr.length = 2
+	require.ErrorIs(t, pp.Deserialize(fr), ErrMissingBytes)
+
+	// Padded with invalid padding
+	fr.flags = FlagPadded
+	fr.payload = []byte{0xFF}
+	fr.length = 1
+	err := pp.Deserialize(fr)
+	require.Error(t, err)
+}
+
 func TestHeadersDeserializePriorityTooShort(t *testing.T) {
 	h := &Headers{}
 	fr := AcquireFrameHeader()
