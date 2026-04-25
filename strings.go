@@ -18,6 +18,7 @@ var (
 	StringHTTP2         = []byte("HTTP/2")
 )
 
+// ToLower converts ASCII uppercase letters in b to lowercase in-place and returns b.
 func ToLower(b []byte) []byte {
 	for i := range b {
 		if b[i] >= 'A' && b[i] <= 'Z' {
