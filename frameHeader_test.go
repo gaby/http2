@@ -113,6 +113,27 @@ func TestReadFrameFromWithSizeOversizePayload(t *testing.T) {
 	_ = fr
 }
 
+func TestReadFromPayloadReadError(t *testing.T) {
+	// Frame header declares 100 bytes payload, but only 5 bytes available
+	var h [9]byte
+	http2utils.Uint24ToBytes(h[:3], 100) // length = 100
+	h[3] = 0                             // type = DATA
+
+	buf := append(h[:], make([]byte, 5)...) // only 5 of 100 bytes
+	bf := bytes.NewBuffer(buf)
+	br := bufio.NewReader(bf)
+
+	fr := AcquireFrameHeader()
+	defer func() {
+		if fr != nil && fr.Body() != nil {
+			ReleaseFrameHeader(fr)
+		}
+	}()
+
+	_, err := fr.ReadFrom(br)
+	require.Error(t, err, "should error on incomplete payload read")
+}
+
 func TestReadFrameFromUnknownType(t *testing.T) {
 	// Build a frame header with unknown type (0x0A > FrameContinuation=0x9)
 	// FrameType is int8, so must use value in range [0, 127]
