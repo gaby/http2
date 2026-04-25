@@ -65,4 +65,30 @@ func TestFrameRead(t *testing.T) {
 	require.Equal(t, testStr, string(data.Data()), "payload mismatch")
 }
 
-// TODO: continue
+func TestReadFrameFromShortRead(t *testing.T) {
+	// Feed only 5 bytes when 9 are needed for the header
+	bf := bytes.NewBuffer([]byte{0, 0, 0, 0, 0})
+	br := bufio.NewReader(bf)
+
+	fr, err := ReadFrameFrom(br)
+	require.Error(t, err)
+	require.Nil(t, fr)
+}
+
+func TestReadFrameFromUnknownType(t *testing.T) {
+	// Build a frame header with unknown type (0x0A > FrameContinuation=0x9)
+	// FrameType is int8, so must use value in range [0, 127]
+	var h [9]byte
+	http2utils.Uint24ToBytes(h[:3], 0) // length = 0
+	h[3] = 0x0A                        // type = unknown (10)
+	h[4] = 0                           // flags
+	// stream = 0
+
+	bf := bytes.NewBuffer(h[:])
+	br := bufio.NewReader(bf)
+
+	fr, err := ReadFrameFromWithSize(br, 16384)
+	require.ErrorIs(t, err, ErrUnknownFrameType)
+	// fr is returned for inspection on unknown type
+	_ = fr
+}
