@@ -34,6 +34,32 @@ func TestSettingsSerializeDeserialize(t *testing.T) {
 	require.Equal(t, uint32(2048), decoded.MaxHeaderListSize())
 }
 
+func TestSettingsDeserializeWrongPayloadLength(t *testing.T) {
+	st := &Settings{}
+	fr := AcquireFrameHeader()
+	defer ReleaseFrameHeader(fr)
+	fr.SetBody(st)
+
+	// Payload not divisible by 6
+	fr.payload = make([]byte, 7)
+	err := st.Deserialize(fr)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "wrong payload")
+}
+
+func TestSettingsReadWindowSizeOverflow(t *testing.T) {
+	st := &Settings{}
+
+	// MaxWindowSize > 2^31 - 1
+	payload := []byte{
+		0, byte(MaxWindowSize),
+		0xFF, 0xFF, 0xFF, 0xFF, // value = 4294967295 > 2^31-1
+	}
+	err := st.Read(payload)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "SETTINGS_INITIAL_WINDOW_SIZE above maximum")
+}
+
 func TestSettingsInvalidValues(t *testing.T) {
 	fr := AcquireFrameHeader()
 	defer ReleaseFrameHeader(fr)
