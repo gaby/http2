@@ -371,3 +371,54 @@ type errReader struct{}
 func (e *errReader) Read([]byte) (int, error) {
 	return 0, io.ErrUnexpectedEOF
 }
+
+func TestHeadersDeserializePriorityTooShort(t *testing.T) {
+	h := &Headers{}
+	fr := AcquireFrameHeader()
+	defer ReleaseFrameHeader(fr)
+
+	// Priority flag set but payload too short
+	fr.flags = FlagPriority
+	fr.payload = make([]byte, 3) // need at least 5
+	fr.length = 3
+	err := h.Deserialize(fr)
+	require.ErrorIs(t, err, ErrMissingBytes)
+}
+
+func TestHeadersDeserializePaddedWithPriority(t *testing.T) {
+	h := &Headers{}
+	fr := AcquireFrameHeader()
+	defer ReleaseFrameHeader(fr)
+
+	// Build a padded + priority payload:
+	// [pad_len=1] [4 bytes stream dep] [1 byte weight] [header data] [1 byte padding]
+	fr.flags = FlagPadded | FlagPriority | FlagEndHeaders | FlagEndStream
+	fr.payload = []byte{
+		1,          // pad length
+		0, 0, 0, 5, // stream dependency
+		128,       // weight
+		0x82,      // header data (indexed :method GET)
+		0,         // padding byte
+	}
+	fr.length = len(fr.payload)
+
+	err := h.Deserialize(fr)
+	require.NoError(t, err)
+	require.True(t, h.EndHeaders())
+	require.True(t, h.EndStream())
+	require.True(t, h.Priority())
+	require.Equal(t, byte(128), h.Weight())
+}
+
+func TestHeadersDeserializePaddedError(t *testing.T) {
+	h := &Headers{}
+	fr := AcquireFrameHeader()
+	defer ReleaseFrameHeader(fr)
+
+	// Padded flag with invalid padding
+	fr.flags = FlagPadded
+	fr.payload = []byte{0xFF} // pad length exceeds payload
+	fr.length = 1
+	err := h.Deserialize(fr)
+	require.Error(t, err)
+}
