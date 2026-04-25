@@ -40,6 +40,7 @@ type Settings struct {
 	windowSet   bool
 }
 
+// Type returns FrameSettings.
 func (st *Settings) Type() FrameType {
 	return FrameSettings
 }
@@ -277,6 +278,7 @@ func (st *Settings) SetAck(ack bool) {
 	st.ack = ack
 }
 
+// Deserialize reads a SETTINGS frame from the given frame header payload.
 func (st *Settings) Deserialize(fr *FrameHeader) error {
 	if len(fr.payload)%6 != 0 {
 		return NewGoAwayError(FrameSizeError, "wrong payload for settings")
@@ -291,6 +293,7 @@ func (st *Settings) Deserialize(fr *FrameHeader) error {
 	return st.Read(fr.payload)
 }
 
+// Serialize writes the SETTINGS payload into the frame header.
 func (st *Settings) Serialize(fr *FrameHeader) {
 	if st.ack { // ACK should be empty
 		fr.SetFlags(
