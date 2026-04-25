@@ -10,33 +10,42 @@ const FrameGoAway FrameType = 0x7
 
 var _ Frame = &GoAway{}
 
-// GoAway https://tools.ietf.org/html/rfc7540#section-6.8
+// GoAway represents a GOAWAY frame (RFC 7540 Section 6.8).
+//
+// GOAWAY is used to initiate graceful shutdown of a connection or to signal
+// serious error conditions. It contains the last peer-initiated stream ID
+// that was processed, an error code, and optional debug data.
 type GoAway struct {
 	data   []byte // additional data
 	stream uint32
 	code   ErrorCode
 }
 
+// Error returns a human-readable representation of the GOAWAY frame.
 func (ga *GoAway) Error() string {
 	return fmt.Sprintf("stream=%d, code=%s, data=%s", ga.stream, ga.code, ga.data)
 }
 
+// Type returns FrameGoAway.
 func (ga *GoAway) Type() FrameType {
 	return FrameGoAway
 }
 
+// Reset clears all GOAWAY fields.
 func (ga *GoAway) Reset() {
 	ga.stream = 0
 	ga.code = 0
 	ga.data = ga.data[:0]
 }
 
+// CopyTo copies the GOAWAY state into other.
 func (ga *GoAway) CopyTo(other *GoAway) {
 	other.stream = ga.stream
 	other.code = ga.code
 	other.data = append(other.data[:0], ga.data...)
 }
 
+// Copy returns a deep copy of the GOAWAY frame.
 func (ga *GoAway) Copy() *GoAway {
 	other := new(GoAway)
 	other.stream = ga.stream
@@ -45,30 +54,37 @@ func (ga *GoAway) Copy() *GoAway {
 	return other
 }
 
+// Code returns the GOAWAY error code.
 func (ga *GoAway) Code() ErrorCode {
 	return ga.code
 }
 
+// SetCode sets the GOAWAY error code.
 func (ga *GoAway) SetCode(code ErrorCode) {
 	ga.code = code & (1<<31 - 1)
 }
 
+// Stream returns the last peer-initiated stream ID.
 func (ga *GoAway) Stream() uint32 {
 	return ga.stream
 }
 
+// SetStream sets the last peer-initiated stream ID.
 func (ga *GoAway) SetStream(stream uint32) {
 	ga.stream = stream & (1<<31 - 1)
 }
 
+// Data returns the optional debug data.
 func (ga *GoAway) Data() []byte {
 	return ga.data
 }
 
+// SetData sets the optional debug data.
 func (ga *GoAway) SetData(b []byte) {
 	ga.data = append(ga.data[:0], b...)
 }
 
+// Deserialize reads a GOAWAY frame from the given frame header payload.
 func (ga *GoAway) Deserialize(fr *FrameHeader) (err error) {
 	if len(fr.payload) < 8 { // 8 is the min number of bytes
 		err = ErrMissingBytes
@@ -84,6 +100,7 @@ func (ga *GoAway) Deserialize(fr *FrameHeader) (err error) {
 	return
 }
 
+// Serialize writes the GOAWAY payload into the frame header.
 func (ga *GoAway) Serialize(fr *FrameHeader) {
 	fr.payload = http2utils.AppendUint32Bytes(fr.payload[:0], ga.stream)
 	fr.payload = http2utils.AppendUint32Bytes(fr.payload[:4], uint32(ga.code))
