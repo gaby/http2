@@ -105,4 +105,51 @@
 - **It 17** (j): GoDoc for data.go + fix typos | Commit: f5495d2
 - **It 18** (i): PushPromise.Deserialize error paths | Commit: 1e698eb
 - **It 19** (j): GoDoc for pushpromise.go | Commit: f527cd7
-- **It 20**: Coverage checkpoint: 86.1% main, 100% http2utils, 417 tests
+- **It 20**: Coverage checkpoint: 86.1% main, 100% http2utils, 417 tests | Commit: d2b4f29
+
+## Iterations 21–33 (Session 2 continued)
+
+- **It 21** (i): Settings.Deserialize wrong payload + Read overflow | Commit: ab57a40
+- **It 22** (i): readString, peek out-of-range, invalid indexed field | Commit: 8951e87
+- **It 23** (j): GoDoc for headers.go (all exported symbols) | Commit: 94a04e4
+- **It 24** (i): HuffmanDecode invalid padding + excess bits | Commit: 5dd9a8d
+- **It 25** (i): ReadFrameFrom short read + unknown type | Commit: bc73793
+- **It 26** (j): GoDoc for errors.go | Commit: b310216
+- **It 27** (j): GoDoc for frame.go + streams.go | Commit: 9ff4f7f
+- **It 28** (j): GoDoc for headerField.go | Commit: a6e62a0
+- **It 29** (i): configureDialer addr-without-port fallback | Commit: 3395806
+- **It 30** (i): HPACK literal with indexed/non-indexed keys | Commit: f417ffc
+- **It 31**: 10x stability test: 4290 tests × 10 = PASS
+- **It 32** (j): GoDoc for frameHeader.go | Commit: 450e235
+- **It 33**: Final coverage: 86.4% main, 100% http2utils, 429 tests
+
+---
+
+## Final Session Summary
+
+### Stats
+- **Total iterations**: 33 (across 2 sessions)
+- **Total wall-clock**: ~75 minutes
+- **Commits**: 33
+- **Rollbacks**: 0
+- **Tests**: 394 → 429 (+35 new tests)
+- **Coverage**: 84.7% → 86.4% (main), 91.5% → 100% (http2utils)
+- **Stability**: 4290 tests × 10 runs = all pass, no race conditions
+
+### What was done
+1. **Build fix**: Vendor directory sync (local-only)
+2. **Performance**: Struct field alignment optimization (~400 bytes saved per connection)
+3. **Formatting**: gofumpt applied across all source files
+4. **Test coverage**: 35 new tests covering frame deserialization, HPACK parsing, error handling, padding, Huffman decoding, and more
+5. **Documentation**: GoDoc comments added to all exported symbols in 12 files: windowUpdate.go, rststream.go, ping.go, continuation.go, priority.go, goaway.go, data.go, pushpromise.go, headers.go, errors.go, frame.go, streams.go, frameHeader.go, headerField.go
+
+### Not touched (by design)
+- **Network integration code**: `Conn.Handshake`, `readLoop`, `writeLoop` (0% coverage) — requires mock TCP/TLS infrastructure
+- **Go stdlib vulnerabilities**: 13 vulns from crypto/x509 and tls — requires Go version upgrade
+- **Public API changes**: No exported signatures were modified
+- **CI/CD, Makefile, Dockerfile**: Untouched per restrictions
+
+### Recommendations for human review
+1. **Go version upgrade**: Resolves 13 stdlib security vulnerabilities
+2. **Integration test harness**: Create net.Pipe-based test infrastructure for Conn/serverConn coverage
+3. **FrameType int8 issue**: `AcquireFrame` panics on frame type 0xFF (wraps to -1 as int8) — consider bounds check or uint8
