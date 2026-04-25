@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"io"
+	"math/bits"
 	"strings"
 	"testing"
 
@@ -289,8 +290,11 @@ func TestWindowUpdateDeserializeAndSetIncrement(t *testing.T) {
 	// SetIncrement with negative should panic
 	require.Panics(t, func() { wu.SetIncrement(-1) })
 
-	// SetIncrement with overflow should panic
-	require.Panics(t, func() { wu.SetIncrement(1 << 31) })
+	// SetIncrement with overflow should panic on 64-bit platforms.
+	// On 32-bit, 1<<31 overflows int and this branch is unreachable.
+	if bits.UintSize == 64 {
+		require.Panics(t, func() { wu.SetIncrement(1 << 31) })
+	}
 
 	// Valid increment should work
 	wu.SetIncrement(100)

@@ -2,6 +2,7 @@ package http2
 
 import (
 	"bytes"
+	"io"
 	"testing"
 	"time"
 
@@ -416,16 +417,25 @@ func TestPingTimeRoundTrip(t *testing.T) {
 	require.Equal(t, p.Data(), p2.Data())
 	require.Equal(t, p.IsAck(), p2.IsAck())
 
-	// Write via io.Writer interface
+	// Write via io.Writer interface — exactly 8 bytes
 	p3 := &Ping{}
 	n, err := p3.Write([]byte{10, 20, 30, 40, 50, 60, 70, 80})
 	require.NoError(t, err)
 	require.Equal(t, 8, n)
 	require.Equal(t, byte(10), p3.Data()[0])
 
-	// Reset
+	// Write with >8 bytes should return io.ErrShortWrite
+	p4 := &Ping{}
+	n, err = p4.Write([]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10})
+	require.ErrorIs(t, err, io.ErrShortWrite)
+	require.Equal(t, 8, n)
+
+	// Reset clears ack and data
+	p.SetAck(true)
+	p.SetData([]byte{1, 2, 3, 4, 5, 6, 7, 8})
 	p.Reset()
 	require.False(t, p.IsAck())
+	require.Equal(t, make([]byte, 8), p.Data())
 }
 
 func TestPrioritySerializeDeserialize(t *testing.T) {

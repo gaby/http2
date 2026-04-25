@@ -2,6 +2,7 @@ package http2
 
 import (
 	"encoding/binary"
+	"io"
 	"time"
 )
 
@@ -33,9 +34,10 @@ func (p *Ping) Type() FrameType {
 	return FramePing
 }
 
-// Reset clears the ack flag.
+// Reset clears the ack flag and the data payload.
 func (p *Ping) Reset() {
 	p.ack = false
+	p.data = [8]byte{}
 }
 
 // CopyTo copies the PING state into other.
@@ -44,9 +46,13 @@ func (p *Ping) CopyTo(other *Ping) {
 	other.data = p.data
 }
 
-// Write copies b into the PING data field, implementing io.Writer.
+// Write copies up to 8 bytes of b into the PING data field, implementing io.Writer.
+// If len(b) exceeds 8, only the first 8 bytes are copied and io.ErrShortWrite is returned.
 func (p *Ping) Write(b []byte) (n int, err error) {
 	n = copy(p.data[:], b)
+	if len(b) > 8 {
+		err = io.ErrShortWrite
+	}
 	return
 }
 
