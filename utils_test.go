@@ -89,6 +89,11 @@ func TestConfigureDialerSetsDefaults(t *testing.T) {
 	}
 	require.True(t, found, "h2 not injected in NextProtos")
 
+	// Addr without port: SplitHostPort fails, fallback uses full Addr
+	d3 := &Dialer{Addr: "example.com"}
+	configureDialer(d3)
+	require.Equal(t, "example.com", d3.TLSConfig.ServerName, "should use full addr when no port")
+
 	// ServerName should not be overridden when already present
 	cfg := &tls.Config{ServerName: "custom"}
 	d2 := &Dialer{Addr: "ignored:443", TLSConfig: cfg}
