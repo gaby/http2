@@ -989,6 +989,40 @@ func TestHPACKNonIndexedLiteralWithStringKey(t *testing.T) {
 	require.Empty(t, hp.dynamic)
 }
 
+func TestHPACKSearchDynamicTable(t *testing.T) {
+	hp := AcquireHPACK()
+	defer ReleaseHPACK(hp)
+	hp.SetMaxTableSize(4096)
+
+	// Add a custom header to the dynamic table
+	hf := AcquireHeaderField()
+	hf.Set("x-custom", "value1")
+	hp.addDynamic(hf)
+
+	// Search should find it with full match
+	idx, full := hp.search(hf)
+	require.True(t, full, "should find full match in dynamic table")
+	require.GreaterOrEqual(t, idx, uint64(maxIndex), "dynamic index should be >= maxIndex")
+
+	// Search with same key but different value → no match in dynamic (key-only not tracked)
+	hf2 := AcquireHeaderField()
+	hf2.Set("x-custom", "value2")
+	idx2, full2 := hp.search(hf2)
+	require.False(t, full2, "different value should not be full match")
+	require.Zero(t, idx2, "dynamic table only returns full matches")
+
+	// Search with unknown key → no match
+	hf3 := AcquireHeaderField()
+	hf3.Set("x-unknown", "nope")
+	idx3, full3 := hp.search(hf3)
+	require.Zero(t, idx3)
+	require.False(t, full3)
+
+	ReleaseHeaderField(hf)
+	ReleaseHeaderField(hf2)
+	ReleaseHeaderField(hf3)
+}
+
 func TestHPACKShrinkEviction(t *testing.T) {
 	hp := AcquireHPACK()
 	defer ReleaseHPACK(hp)
