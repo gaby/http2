@@ -247,3 +247,55 @@ func TestVerifyState(t *testing.T) {
 	require.NoError(t, sc.verifyState(strm, fr))
 	ReleaseFrameHeader(fr)
 }
+
+func TestRstStreamDeserializeShortPayload(t *testing.T) {
+	rst := &RstStream{}
+	fr := AcquireFrameHeader()
+	defer ReleaseFrameHeader(fr)
+
+	// Payload too short should fail
+	fr.payload = make([]byte, 2)
+	require.ErrorIs(t, rst.Deserialize(fr), ErrMissingBytes)
+
+	// Valid 4-byte payload should succeed
+	fr.payload = make([]byte, 4)
+	require.NoError(t, rst.Deserialize(fr))
+}
+
+func TestWindowUpdateDeserializeAndSetIncrement(t *testing.T) {
+	wu := &WindowUpdate{}
+	fr := AcquireFrameHeader()
+	defer ReleaseFrameHeader(fr)
+
+	// Invalid payload length should fail
+	fr.payload = make([]byte, 2)
+	err := wu.Deserialize(fr)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "window_update frame payload must be 4 bytes")
+
+	// Valid payload should succeed
+	fr.payload = make([]byte, 4)
+	require.NoError(t, wu.Deserialize(fr))
+
+	// SetIncrement with 0 should panic
+	require.Panics(t, func() { wu.SetIncrement(0) })
+
+	// SetIncrement with negative should panic
+	require.Panics(t, func() { wu.SetIncrement(-1) })
+
+	// SetIncrement with overflow should panic
+	require.Panics(t, func() { wu.SetIncrement(1 << 31) })
+
+	// Valid increment should work
+	wu.SetIncrement(100)
+	require.Equal(t, 100, wu.Increment())
+}
+
+func TestErrorCodeErrorFallback(t *testing.T) {
+	// Known code should return human-readable string
+	require.Equal(t, "No errors", NoError.Error())
+	require.Equal(t, "Protocol error", ProtocolError.Error())
+
+	// Unknown code should fall back to numeric string
+	require.Equal(t, "999", ErrorCode(999).Error())
+}
