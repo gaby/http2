@@ -7,6 +7,50 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
+func TestStreamsCollectionOperations(t *testing.T) {
+	// Build a collection of streams
+	var strms Streams
+	for _, id := range []uint32{1, 3, 5, 7, 9} {
+		s := NewStream(id, 65535, 65535)
+		s.origType = FrameHeaders
+		strms = append(strms, s)
+	}
+
+	// Search existing
+	require.NotNil(t, strms.Search(5))
+	require.Equal(t, uint32(5), strms.Search(5).ID())
+
+	// Search non-existing
+	require.Nil(t, strms.Search(99))
+
+	// GetFirstOf
+	first := strms.GetFirstOf(FrameHeaders)
+	require.NotNil(t, first)
+	require.Equal(t, uint32(1), first.ID())
+
+	// GetFirstOf non-existing type
+	require.Nil(t, strms.GetFirstOf(FramePing))
+
+	// Del middle element
+	strms.Del(5)
+	require.Nil(t, strms.Search(5))
+	require.Len(t, strms, 4)
+
+	// Del last element
+	strms.Del(9)
+	require.Len(t, strms, 3)
+
+	// Del single remaining → trim to 0
+	strms = Streams{NewStream(99, 65535, 65535)}
+	strms.Del(99)
+	require.Len(t, strms, 0)
+
+	// Del non-existing is no-op
+	strms = Streams{NewStream(1, 65535, 65535)}
+	strms.Del(999)
+	require.Len(t, strms, 1)
+}
+
 func TestStreamHelpers(t *testing.T) {
 	require.Equal(t, "Idle", StreamStateIdle.String())
 	require.Equal(t, "Reserved", StreamStateReserved.String())
