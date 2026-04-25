@@ -788,6 +788,42 @@ func TestHPACKNeverIndexedField(t *testing.T) {
 	require.Empty(t, hp.dynamic)
 }
 
+func TestReadStringEdgeCases(t *testing.T) {
+	// Empty input should return error
+	_, _, err := readString(nil, nil)
+	require.Error(t, err)
+
+	// Truncated string: declare length 10 but provide only 3 bytes of data
+	b := []byte{10, 'a', 'b', 'c'}
+	_, _, err = readString(nil, b)
+	require.ErrorIs(t, err, ErrUnexpectedSize)
+}
+
+func TestHPACKPeekOutOfRange(t *testing.T) {
+	hp := AcquireHPACK()
+	defer ReleaseHPACK(hp)
+
+	// Peek with index beyond dynamic table should return nil
+	result := hp.peek(maxIndex + 100)
+	require.Nil(t, result)
+}
+
+func TestHPACKIndexedFieldInvalid(t *testing.T) {
+	hp := AcquireHPACK()
+	defer ReleaseHPACK(hp)
+	hp.SetMaxTableSize(4096)
+
+	hf := AcquireHeaderField()
+	defer ReleaseHeaderField(hf)
+
+	// Indexed header field with index that doesn't exist in static or dynamic table
+	// 0xFF 0x00 = indexed field, index = 127 (way beyond static table)
+	b := []byte{0xFF, 0x00}
+	_, err := hp.Next(hf, b)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "index field not found")
+}
+
 func hexComparison(b, r []byte) (s string) {
 	s += "\n"
 	for i := range b {
