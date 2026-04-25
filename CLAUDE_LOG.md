@@ -198,3 +198,44 @@
 2. **Integration tests**: `Conn.Handshake`, `readLoop`, `writeLoop` need mock TCP
 3. **Fix HPACK sensible prefix**: Change `bits` to 4 when `hf.sensible` is true
 4. **Fix FrameType range**: Add bounds check in `AcquireFrame` or change to uint8
+
+---
+
+**Session 4 — Resumed 2026-04-25 17:42**
+**Contract**: 40 minutes wall-clock
+
+## Iterations 48–63 (Session 4)
+
+- **It 48** (i): ReadFrameFrom payload error path (Body!=nil branch) | Commit: 7aed77c
+- **It 49** (k): Continuation serialize/deserialize + CopyTo/Append | Commit: faf4ab8
+- **It 50** (k): WindowUpdate serialize/deserialize + CopyTo | Commit: 7862363
+- **It 51** (k): Priority serialize/deserialize + invalid length + CopyTo | Commit: 3e62975
+- **It 52** (k): Ping serialize/deserialize + time round-trip | Commit: bd26993
+- **It 53** (i): readString huffman decode error path | Commit: 24018e6
+- **It 54** (i): HPACK non-indexed literal with string key | Commit: a377cb6
+- **It 55** (k): Data Write/Append/Len/Type | Commit: 11fb609
+- **It 56** (i): newFrameSizeError both branches | Commit: cc842b9
+- **It 57** (k): RstStream serialize/deserialize for 5 error codes | Commit: 7c93b9f
+- **It 58** (i): HPACK shrink/eviction | Commit: a2115f5
+- **It 59**: gofumpt check (all clean), coverage: 86.6%
+- **It 60** (k): ErrorCode String/Error for all 14 codes | Commit: 4ab1245
+- **It 61** (i): HPACK search with dynamic + static table | Commit: 777e14a
+- **It 62** (i): HPACK search static table partial match | Commit: 21f2dd3
+- **It 63**: Final: 86.6% coverage, 4560 × 10 PASS
+
+---
+
+## Final Summary (All Sessions)
+
+### Stats
+- **Total iterations**: 63
+- **Total commits**: 66
+- **Rollbacks**: 0
+- **Tests**: 394 → 456 (+62 new tests)
+- **Coverage**: 84.7% → 86.6% (main), 91.5% → 100% (http2utils)
+- **Stability**: 4560 tests × 10 = PASS
+
+### Bugs discovered
+1. **HPACK sensible header prefix mismatch**: Encoder uses 6-bit prefix, decoder expects 4-bit
+2. **FrameType int8 overflow**: `AcquireFrame` panics on type 0xFF
+3. **Ping.Write returns n=0**: Named return value never assigned
