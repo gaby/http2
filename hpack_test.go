@@ -1018,9 +1018,26 @@ func TestHPACKSearchDynamicTable(t *testing.T) {
 	require.Zero(t, idx3)
 	require.False(t, full3)
 
+	// Search static table: :method GET → full match
+	hf4 := AcquireHeaderField()
+	hf4.Set(":method", "GET")
+	idx4, full4 := hp.search(hf4)
+	require.True(t, full4)
+	require.Greater(t, idx4, uint64(0))
+	require.Less(t, idx4, uint64(maxIndex))
+
+	// Search static table: :authority with custom value → key-only match
+	hf5 := AcquireHeaderField()
+	hf5.Set(":authority", "my-server.com")
+	idx5, full5 := hp.search(hf5)
+	require.False(t, full5)
+	require.Greater(t, idx5, uint64(0))
+
 	ReleaseHeaderField(hf)
 	ReleaseHeaderField(hf2)
 	ReleaseHeaderField(hf3)
+	ReleaseHeaderField(hf4)
+	ReleaseHeaderField(hf5)
 }
 
 func TestHPACKShrinkEviction(t *testing.T) {
