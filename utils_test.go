@@ -377,6 +377,20 @@ func (e *errReader) Read([]byte) (int, error) {
 	return 0, io.ErrUnexpectedEOF
 }
 
+func TestNewFrameSizeError(t *testing.T) {
+	// stream=0 → GoAway
+	err := newFrameSizeError(0, "test goaway")
+	require.Equal(t, FrameSizeError, err.Code())
+	require.Equal(t, FrameGoAway, err.frameType)
+	require.Equal(t, "test goaway", err.Debug())
+
+	// stream>0 → ResetStream
+	err = newFrameSizeError(5, "test reset")
+	require.Equal(t, FrameSizeError, err.Code())
+	require.Equal(t, FrameResetStream, err.frameType)
+	require.Equal(t, "test reset", err.Debug())
+}
+
 func TestHeaderFieldPropertyBased(t *testing.T) {
 	fields := []struct{ key, value string }{
 		{":method", "GET"},
