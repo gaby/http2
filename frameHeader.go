@@ -91,10 +91,12 @@ func (f *FrameHeader) Type() FrameType {
 	return f.kind
 }
 
+// Flags returns the frame flags.
 func (f *FrameHeader) Flags() FrameFlags {
 	return f.flags
 }
 
+// SetFlags replaces the frame flags.
 func (f *FrameHeader) SetFlags(flags FrameFlags) {
 	f.flags = flags
 }
@@ -136,6 +138,7 @@ func (f *FrameHeader) parseHeader(header []byte) {
 	http2utils.Uint32ToBytes(header[5:], f.stream)         // 4
 }
 
+// ReadFrameFrom reads a single frame from br, returning the frame header and any error.
 func ReadFrameFrom(br *bufio.Reader) (*FrameHeader, error) {
 	fr := AcquireFrameHeader()
 
@@ -152,6 +155,7 @@ func ReadFrameFrom(br *bufio.Reader) (*FrameHeader, error) {
 	return fr, err
 }
 
+// ReadFrameFromWithSize reads a frame from br, rejecting payloads larger than max bytes.
 func ReadFrameFromWithSize(br *bufio.Reader, max uint32) (*FrameHeader, error) {
 	fr := AcquireFrameHeader()
 	fr.maxLen = max
@@ -249,10 +253,12 @@ func (f *FrameHeader) WriteTo(w *bufio.Writer) (wb int64, err error) {
 	return wb, err
 }
 
+// Body returns the frame body, or nil if not yet set.
 func (f *FrameHeader) Body() Frame {
 	return f.fr
 }
 
+// SetBody sets the frame body. Panics if fr is nil.
 func (f *FrameHeader) SetBody(fr Frame) {
 	if fr == nil {
 		panic("Body cannot be nil")
