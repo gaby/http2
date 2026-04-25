@@ -377,6 +377,55 @@ func (e *errReader) Read([]byte) (int, error) {
 	return 0, io.ErrUnexpectedEOF
 }
 
+func TestHeaderFieldPropertyBased(t *testing.T) {
+	fields := []struct{ key, value string }{
+		{":method", "GET"},
+		{":path", "/"},
+		{"content-type", "text/html"},
+		{"x-custom", "value"},
+		{"", ""},
+	}
+
+	for _, f := range fields {
+		hf := AcquireHeaderField()
+		hf.Set(f.key, f.value)
+
+		// String round-trip
+		s := hf.String()
+		require.Contains(t, s, f.key)
+
+		// AppendBytes
+		b := hf.AppendBytes(nil)
+		require.Contains(t, string(b), f.key)
+
+		// Size = len(key) + len(value) + 32
+		require.Equal(t, uint32(len(f.key)+len(f.value)+32), hf.Size())
+
+		// IsPseudo
+		if len(f.key) > 0 && f.key[0] == ':' {
+			require.True(t, hf.IsPseudo())
+		} else {
+			require.False(t, hf.IsPseudo())
+		}
+
+		// CopyTo preserves all fields
+		hf2 := AcquireHeaderField()
+		hf.CopyTo(hf2)
+		require.Equal(t, hf.Key(), hf2.Key())
+		require.Equal(t, hf.Value(), hf2.Value())
+
+		// SetBytes equivalent
+		hf3 := AcquireHeaderField()
+		hf3.SetBytes(hf.KeyBytes(), hf.ValueBytes())
+		require.Equal(t, hf.Key(), hf3.Key())
+		require.Equal(t, hf.Value(), hf3.Value())
+
+		ReleaseHeaderField(hf)
+		ReleaseHeaderField(hf2)
+		ReleaseHeaderField(hf3)
+	}
+}
+
 func TestPushPromiseDeserializeEdgeCases(t *testing.T) {
 	pp := &PushPromise{}
 	fr := AcquireFrameHeader()
