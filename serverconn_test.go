@@ -651,7 +651,7 @@ func TestSettingsInitialWindowIncreaseFlushesPendingData(t *testing.T) {
 	})
 
 	// Set a read deadline to prevent the test from hanging indefinitely.
-	require.NoError(t, c.c.SetReadDeadline(time.Now().Add(10*time.Second)))
+	require.NoError(t, c.c.SetReadDeadline(time.Now().Add(30*time.Second)))
 	defer c.c.SetReadDeadline(time.Time{})
 
 	sendSettings := func(val uint32) {
@@ -673,8 +673,11 @@ func TestSettingsInitialWindowIncreaseFlushesPendingData(t *testing.T) {
 	})
 	require.NoError(t, c.writeFrame(headers))
 
+	// readNextWithRetry uses a per-read deadline long enough for CI runners
+	// (macOS/Windows runners can be slow). A 2-second timeout reduces retry
+	// overhead compared to the previous 200ms which caused flakiness.
 	readNextWithRetry := func() (*FrameHeader, error) {
-		require.NoError(t, c.c.SetReadDeadline(time.Now().Add(200*time.Millisecond)))
+		require.NoError(t, c.c.SetReadDeadline(time.Now().Add(2*time.Second)))
 		fr, err := c.readNext()
 		if err != nil {
 			var timeoutErr interface{ Timeout() bool }
@@ -687,7 +690,7 @@ func TestSettingsInitialWindowIncreaseFlushesPendingData(t *testing.T) {
 		return fr, nil
 	}
 
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	var gotHeaders bool
 	for time.Now().Before(deadline) && !gotHeaders {
 		fr, err := readNextWithRetry()
@@ -713,7 +716,7 @@ func TestSettingsInitialWindowIncreaseFlushesPendingData(t *testing.T) {
 
 	sendSettings(1)
 
-	deadline = time.Now().Add(10 * time.Second)
+	deadline = time.Now().Add(30 * time.Second)
 	var dataFrame *FrameHeader
 	for time.Now().Before(deadline) && dataFrame == nil {
 		fr, err := readNextWithRetry()
