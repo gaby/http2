@@ -964,6 +964,31 @@ func TestHPACKAppendHeaderVariants(t *testing.T) {
 	ReleaseHeaderField(out)
 }
 
+func TestHPACKNonIndexedLiteralWithStringKey(t *testing.T) {
+	hp := AcquireHPACK()
+	defer ReleaseHPACK(hp)
+	hp.SetMaxTableSize(4096)
+
+	hf := AcquireHeaderField()
+	defer ReleaseHeaderField(hf)
+
+	// Non-indexed literal with string key (c = 0x00, c&15 == 0)
+	// 0x00 = no indexing, new name (string literal key)
+	key := []byte("x-custom")
+	val := []byte("myval")
+	b := []byte{0x00, byte(len(key))}
+	b = append(b, key...)
+	b = append(b, byte(len(val)))
+	b = append(b, val...)
+
+	remaining, err := hp.Next(hf, b)
+	require.NoError(t, err)
+	require.Empty(t, remaining)
+	require.Equal(t, "x-custom", hf.Key())
+	require.Equal(t, "myval", hf.Value())
+	require.Empty(t, hp.dynamic)
+}
+
 func TestHPACKEncodeDecodeRoundTrip(t *testing.T) {
 	headers := []struct{ key, value string }{
 		{":method", "GET"},
