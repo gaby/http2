@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/dgrr/http2/http2utils"
@@ -346,4 +347,27 @@ func TestFrameHeaderSetBodyNilPanics(t *testing.T) {
 	defer ReleaseFrameHeader(fr)
 
 	require.Panics(t, func() { fr.SetBody(nil) })
+}
+
+func TestReadPrefaceEdgeCases(t *testing.T) {
+	// Valid preface
+	valid := strings.NewReader("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+	require.True(t, ReadPreface(valid))
+
+	// Wrong content
+	wrong := strings.NewReader("GET / HTTP/1.1\r\n\r\nXX\r\n\r\n")
+	require.False(t, ReadPreface(wrong))
+
+	// Short read (error from reader)
+	short := strings.NewReader("PRI")
+	require.False(t, ReadPreface(short))
+
+	// Error reader
+	require.False(t, ReadPreface(&errReader{}))
+}
+
+type errReader struct{}
+
+func (e *errReader) Read([]byte) (int, error) {
+	return 0, io.ErrUnexpectedEOF
 }
