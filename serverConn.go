@@ -336,8 +336,11 @@ func (sc *serverConn) Serve() error {
 
 	writerDone := make(chan struct{})
 	go func() {
-		// defer closing the connection in the writeLoop in case the writeLoop panics
 		defer func() {
+			// Brief pause before closing so the OS TCP stack can flush any
+			// remaining data (e.g. a GOAWAY frame) to the peer. On Windows,
+			// Close() can discard unsent data in the kernel send buffer.
+			time.Sleep(goawayFlushDelay)
 			_ = sc.c.Close()
 		}()
 
