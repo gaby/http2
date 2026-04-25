@@ -958,6 +958,46 @@ func TestHPACKAppendHeaderVariants(t *testing.T) {
 	ReleaseHeaderField(out)
 }
 
+func TestHPACKEncodeDecodeRoundTrip(t *testing.T) {
+	headers := []struct{ key, value string }{
+		{":method", "GET"},
+		{":method", "POST"},
+		{":path", "/"},
+		{":path", "/api/v1/users"},
+		{":scheme", "https"},
+		{":status", "200"},
+		{":status", "404"},
+		{"content-type", "application/json"},
+		{"x-custom-header", "custom-value"},
+		{"accept-encoding", "gzip, deflate, br"},
+	}
+
+	for _, hdr := range headers {
+		enc := AcquireHPACK()
+		dec := AcquireHPACK()
+		enc.SetMaxTableSize(4096)
+		dec.SetMaxTableSize(4096)
+
+		hf := AcquireHeaderField()
+		hf.Set(hdr.key, hdr.value)
+
+		encoded := enc.AppendHeader(nil, hf, true)
+		require.NotEmpty(t, encoded, "empty encoding for %s: %s", hdr.key, hdr.value)
+
+		out := AcquireHeaderField()
+		remaining, err := dec.Next(out, encoded)
+		require.NoError(t, err, "decode error for %s: %s", hdr.key, hdr.value)
+		require.Empty(t, remaining)
+		require.Equal(t, hdr.key, out.Key())
+		require.Equal(t, hdr.value, out.Value())
+
+		ReleaseHeaderField(hf)
+		ReleaseHeaderField(out)
+		ReleaseHPACK(enc)
+		ReleaseHPACK(dec)
+	}
+}
+
 func hexComparison(b, r []byte) (s string) {
 	s += "\n"
 	for i := range b {
