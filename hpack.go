@@ -483,7 +483,7 @@ func appendString(dst, src []byte, encode bool) []byte {
 	return dst
 }
 
-// TODO: Change naming.
+// AppendHeaderField encodes hf and appends the result to h's raw header buffer.
 func (hp *HPACK) AppendHeaderField(h *Headers, hf *HeaderField, store bool) {
 	h.rawHeaders = hp.AppendHeader(h.rawHeaders, hf, store)
 }
