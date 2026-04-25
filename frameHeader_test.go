@@ -75,6 +75,44 @@ func TestReadFrameFromShortRead(t *testing.T) {
 	require.Nil(t, fr)
 }
 
+func TestCheckLenRejectsOversizePayload(t *testing.T) {
+	fr := AcquireFrameHeader()
+	defer ReleaseFrameHeader(fr)
+
+	// Within limit: should pass
+	fr.maxLen = 100
+	fr.length = 50
+	require.NoError(t, fr.checkLen())
+
+	// Exceeds limit: should fail
+	fr.length = 200
+	require.ErrorIs(t, fr.checkLen(), ErrPayloadExceeds)
+
+	// maxLen=0 disables check
+	fr.maxLen = 0
+	fr.length = 99999
+	require.NoError(t, fr.checkLen())
+}
+
+func TestReadFrameFromWithSizeOversizePayload(t *testing.T) {
+	// Build a valid DATA frame with payload length > max
+	var h [9]byte
+	http2utils.Uint24ToBytes(h[:3], 100) // length = 100 bytes
+	h[3] = 0                             // type = DATA
+	h[4] = 0                             // flags
+
+	payload := make([]byte, 100)
+	buf := append(h[:], payload...)
+	bf := bytes.NewBuffer(buf)
+	br := bufio.NewReader(bf)
+
+	// Set max to 50 — payload of 100 should exceed
+	fr, err := ReadFrameFromWithSize(br, 50)
+	require.ErrorIs(t, err, ErrPayloadExceeds)
+	// fr is returned for payload-exceeds errors
+	_ = fr
+}
+
 func TestReadFrameFromUnknownType(t *testing.T) {
 	// Build a frame header with unknown type (0x0A > FrameContinuation=0x9)
 	// FrameType is int8, so must use value in range [0, 127]
