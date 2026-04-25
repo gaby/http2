@@ -149,3 +149,101 @@ func TestPingDeserializeInvalidPayload(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "invalid ping payload")
 }
+
+func TestReleaseFrameHeaderNil(t *testing.T) {
+	// Should not panic when nil is passed
+	ReleaseFrameHeader(nil)
+}
+
+func TestCheckFrameWithStream(t *testing.T) {
+	sc := &serverConn{}
+
+	// Even stream ID should be rejected
+	fr := AcquireFrameHeader()
+	fr.SetStream(2)
+	fr.SetBody(AcquireFrame(FrameData))
+	err := sc.checkFrameWithStream(fr)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid stream id")
+	ReleaseFrameHeader(fr)
+
+	// Ping with stream ID should be rejected
+	fr = AcquireFrameHeader()
+	fr.SetStream(1)
+	fr.SetBody(AcquireFrame(FramePing))
+	err = sc.checkFrameWithStream(fr)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "ping is carrying a stream id")
+	ReleaseFrameHeader(fr)
+
+	// PushPromise from client should be rejected
+	fr = AcquireFrameHeader()
+	fr.SetStream(1)
+	fr.SetBody(AcquireFrame(FramePushPromise))
+	err = sc.checkFrameWithStream(fr)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "push_promise")
+	ReleaseFrameHeader(fr)
+
+	// Valid odd stream with data frame should succeed
+	fr = AcquireFrameHeader()
+	fr.SetStream(3)
+	fr.SetBody(AcquireFrame(FrameData))
+	err = sc.checkFrameWithStream(fr)
+	require.NoError(t, err)
+	ReleaseFrameHeader(fr)
+}
+
+func TestVerifyState(t *testing.T) {
+	sc := &serverConn{}
+
+	// Idle stream: Headers frame should be allowed
+	strm := NewStream(1, 65535, 65535)
+	strm.SetState(StreamStateIdle)
+	fr := AcquireFrameHeader()
+	fr.SetBody(AcquireFrame(FrameHeaders))
+	require.NoError(t, sc.verifyState(strm, fr))
+	ReleaseFrameHeader(fr)
+
+	// Idle stream: Priority frame should be allowed
+	fr = AcquireFrameHeader()
+	fr.SetBody(AcquireFrame(FramePriority))
+	require.NoError(t, sc.verifyState(strm, fr))
+	ReleaseFrameHeader(fr)
+
+	// Idle stream: Data frame should be rejected
+	fr = AcquireFrameHeader()
+	fr.SetBody(AcquireFrame(FrameData))
+	err := sc.verifyState(strm, fr)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "wrong frame on idle stream")
+	ReleaseFrameHeader(fr)
+
+	// HalfClosed stream: WindowUpdate should be allowed
+	strm.SetState(StreamStateHalfClosed)
+	fr = AcquireFrameHeader()
+	fr.SetBody(AcquireFrame(FrameWindowUpdate))
+	require.NoError(t, sc.verifyState(strm, fr))
+	ReleaseFrameHeader(fr)
+
+	// HalfClosed stream: ResetStream should be allowed
+	fr = AcquireFrameHeader()
+	fr.SetBody(AcquireFrame(FrameResetStream))
+	require.NoError(t, sc.verifyState(strm, fr))
+	ReleaseFrameHeader(fr)
+
+	// HalfClosed stream: Data frame should be rejected
+	fr = AcquireFrameHeader()
+	fr.SetBody(AcquireFrame(FrameData))
+	err = sc.verifyState(strm, fr)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "wrong frame on half-closed stream")
+	ReleaseFrameHeader(fr)
+
+	// Open stream: any frame type should be allowed
+	strm.SetState(StreamStateOpen)
+	fr = AcquireFrameHeader()
+	fr.SetBody(AcquireFrame(FrameData))
+	require.NoError(t, sc.verifyState(strm, fr))
+	ReleaseFrameHeader(fr)
+}
