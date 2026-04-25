@@ -65,6 +65,22 @@ func TestFrameRead(t *testing.T) {
 	require.Equal(t, testStr, string(data.Data()), "payload mismatch")
 }
 
+func TestReadFrameFromPayloadError(t *testing.T) {
+	// Valid 9-byte header declares 50 bytes payload, but only 5 available.
+	// This exercises the fr.Body() != nil branch in ReadFrameFrom.
+	var h [9]byte
+	http2utils.Uint24ToBytes(h[:3], 50) // length = 50
+	h[3] = 0                            // type = DATA (valid)
+
+	buf := append(h[:], make([]byte, 5)...) // only 5 of 50
+	bf := bytes.NewBuffer(buf)
+	br := bufio.NewReader(bf)
+
+	fr, err := ReadFrameFrom(br)
+	require.Error(t, err)
+	require.Nil(t, fr)
+}
+
 func TestReadFrameFromShortRead(t *testing.T) {
 	// Feed only 5 bytes when 9 are needed for the header
 	bf := bytes.NewBuffer([]byte{0, 0, 0, 0, 0})
