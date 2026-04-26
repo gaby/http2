@@ -131,4 +131,31 @@ func ConfigureServerAndConfig(s *fasthttp.Server, tlsConfig *tls.Config, cnf ...
 	return s2
 }
 
+// ConfigureServerH2C configures a fasthttp server to handle HTTP/2 prior-knowledge
+// cleartext (h2c) connections. This enables HTTP/2 without TLS, which is useful
+// for internal services, testing, and behind TLS-terminating load balancers.
+//
+// To use h2c, set up a plain (non-TLS) listener and pass connections through
+// Server.ServeConn directly, or use this with fasthttp's connection handler.
+//
+// Example:
+//
+//	s := &fasthttp.Server{Handler: handler}
+//	h2s := http2.ConfigureServerH2C(s, http2.ServerConfig{})
+//	// For h2c, use ListenAndServe (not ListenAndServeTLS)
+//	s.ListenAndServe(":8080")
+func ConfigureServerH2C(s *fasthttp.Server, cnf ServerConfig) *Server {
+	cnf.defaults()
+
+	s2 := &Server{
+		s:   s,
+		cnf: cnf,
+	}
+
+	// Register for h2c protocol negotiation
+	s.NextProto(H2Clean, s2.ServeConn)
+
+	return s2
+}
+
 var ErrNotAvailableStreams = errors.New("ran out of available streams")
