@@ -380,6 +380,11 @@ func (c *Conn) CanOpenStream() bool {
 	return atomic.LoadInt32(&c.openStreams) < int32(maxStreams)
 }
 
+// ActiveStreams returns the number of currently open streams on this connection.
+func (c *Conn) ActiveStreams() int32 {
+	return atomic.LoadInt32(&c.openStreams)
+}
+
 // Closed indicates whether the connection is closed or not.
 func (c *Conn) Closed() bool {
 	return atomic.LoadUint64(&c.closed) == 1
