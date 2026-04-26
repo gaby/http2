@@ -501,6 +501,13 @@ func (c *Conn) Closed() bool {
 	return atomic.LoadUint64(&c.closed) == 1
 }
 
+// Done returns a channel that is closed when the connection's write loop exits.
+// This is useful for select-based event loops that need to react to connection
+// teardown. Returns nil if the connection was never fully handshaked.
+func (c *Conn) Done() <-chan struct{} {
+	return c.done
+}
+
 // Close closes the connection gracefully, sending a GoAway message
 // and then closing the underlying TCP connection.
 //

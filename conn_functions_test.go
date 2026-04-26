@@ -82,6 +82,33 @@ func TestConnWriteToClosedConn(t *testing.T) {
 	}
 }
 
+func TestConnDone(t *testing.T) {
+	// Before handshake, Done returns nil
+	conn := NewConn(&stubConn{}, ConnOpts{})
+	require.Nil(t, conn.Done())
+
+	// After manually setting done (simulating handshake), it's available
+	conn.done = make(chan struct{})
+	ch := conn.Done()
+	require.NotNil(t, ch)
+
+	// Channel should not be closed yet
+	select {
+	case <-ch:
+		t.Fatal("done channel should not be closed yet")
+	default:
+	}
+
+	// Close the done channel
+	close(conn.done)
+	select {
+	case <-ch:
+		// expected
+	case <-time.After(time.Second):
+		t.Fatal("done channel should be closed")
+	}
+}
+
 func TestConnCustomWindowSize(t *testing.T) {
 	// Default window size
 	conn := NewConn(&stubConn{}, ConnOpts{})
