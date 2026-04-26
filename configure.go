@@ -112,13 +112,16 @@ func ConfigureServer(s *fasthttp.Server, cnf ServerConfig) *Server {
 
 // ConfigureServerAndConfig configures the fasthttp server to handle HTTP/2 connections
 // and your own tlsConfig file. If you are NOT using your own tls config, you may want to use ConfigureServer.
-func ConfigureServerAndConfig(s *fasthttp.Server, tlsConfig *tls.Config) *Server {
-	var cnf ServerConfig
-	cnf.defaults()
+func ConfigureServerAndConfig(s *fasthttp.Server, tlsConfig *tls.Config, cnf ...ServerConfig) *Server {
+	var cfg ServerConfig
+	if len(cnf) > 0 {
+		cfg = cnf[0]
+	}
+	cfg.defaults()
 
 	s2 := &Server{
 		s:   s,
-		cnf: cnf,
+		cnf: cfg,
 	}
 
 	s.NextProto(H2TLSProto, s2.ServeConn)
