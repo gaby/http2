@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/dgrr/http2/http2utils"
 	"github.com/stretchr/testify/require"
@@ -111,6 +112,19 @@ func TestConfigureDialerSetsDefaults(t *testing.T) {
 	d2 := &Dialer{Addr: "ignored:443", TLSConfig: cfg}
 	configureDialer(d2)
 	require.Equal(t, "custom", d2.TLSConfig.ServerName, "existing server name modified")
+}
+
+func TestClientOptsString(t *testing.T) {
+	opts := ClientOpts{
+		PingInterval: 3 * time.Second,
+		MaxConns:     5,
+		H2C:          true,
+	}
+	s := opts.String()
+	require.Contains(t, s, "ping=3s")
+	require.Contains(t, s, "maxConns=5")
+	require.Contains(t, s, "h2c=true")
+	require.Contains(t, s, "push=false")
 }
 
 func TestClientOptionsSanitize(t *testing.T) {
