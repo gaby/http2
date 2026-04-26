@@ -14,7 +14,7 @@ import (
 // inflation attacks while allowing generous header sets in practice.
 const defaultMaxHeaderListSize uint32 = 32 * 1024
 
-// ServerConfig ...
+// ServerConfig holds the configuration for an HTTP/2 server.
 type ServerConfig struct {
 	// PingInterval is the interval at which the server will send a
 	// ping message to a client.
@@ -22,7 +22,9 @@ type ServerConfig struct {
 	// To disable pings set the PingInterval to a negative value.
 	PingInterval time.Duration
 
-	// ...
+	// MaxConcurrentStreams is the maximum number of concurrent streams
+	// the server will allow per connection.
+	// A value of 0 uses the default of 1024.
 	MaxConcurrentStreams int
 
 	// Debug is a flag that will allow the library to print debugging information.
@@ -32,6 +34,12 @@ type ServerConfig struct {
 	// name + value + 32 bytes per field) that the server accepts per request.
 	// A value of 0 uses the default of 32 KiB.
 	MaxHeaderListSize uint32
+
+	// MaxFrameSize is the maximum size of a single HTTP/2 frame payload
+	// the server is willing to receive from the client.
+	// Valid range is 16384 (16 KiB) to 16777215 (16 MiB - 1).
+	// A value of 0 uses the default of 16384.
+	MaxFrameSize uint32
 
 	// EnqueueTimeout is the maximum duration the server will wait when the
 	// internal frame-write queue is full before dropping the frame.
@@ -50,6 +58,14 @@ func (sc *ServerConfig) defaults() {
 
 	if sc.MaxHeaderListSize == 0 {
 		sc.MaxHeaderListSize = defaultMaxHeaderListSize
+	}
+
+	if sc.MaxFrameSize == 0 {
+		sc.MaxFrameSize = defaultDataFrameSize
+	} else if sc.MaxFrameSize < defaultDataFrameSize {
+		sc.MaxFrameSize = defaultDataFrameSize
+	} else if sc.MaxFrameSize > maxFrameSize {
+		sc.MaxFrameSize = maxFrameSize
 	}
 
 	if sc.EnqueueTimeout == 0 {
@@ -111,6 +127,9 @@ func (s *Server) ServeConn(c net.Conn) error {
 	sc.st.SetMaxWindowSize(uint32(sc.maxWindow))
 	sc.st.SetMaxConcurrentStreams(uint32(s.cnf.MaxConcurrentStreams))
 	sc.st.SetMaxHeaderListSize(s.cnf.MaxHeaderListSize)
+	if s.cnf.MaxFrameSize != defaultDataFrameSize {
+		sc.st.SetMaxFrameSize(s.cnf.MaxFrameSize)
+	}
 
 	if err := sc.Handshake(); err != nil {
 		return err
