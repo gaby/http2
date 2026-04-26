@@ -26,6 +26,10 @@ type ConnOpts struct {
 	// OnDisconnect is a callback that fires when the Conn disconnects.
 	OnDisconnect func(c *Conn)
 
+	// OnRTT is called after each round-trip time measurement when a PONG is received.
+	// The duration is the time between sending the PING and receiving the PONG.
+	OnRTT func(time.Duration)
+
 	// PingInterval defines the interval in which the client will ping the server.
 	//
 	// An interval of <=0 will make the library to use DefaultPingInterval. Because ping intervals can't be disabled
@@ -97,6 +101,7 @@ type Conn struct {
 	out chan *FrameHeader
 
 	onDisconnect func(*Conn)
+	onRTT        func(time.Duration)
 
 	done chan struct{} // closed when writeLoop exits
 
@@ -156,6 +161,7 @@ func NewConn(c net.Conn, opts ConnOpts) *Conn {
 		pingInterval:      opts.PingInterval,
 		disableAcks:       opts.DisablePingChecking,
 		onDisconnect:      opts.OnDisconnect,
+		onRTT:             opts.OnRTT,
 		windowWaitTimeout: wwt,
 	}
 	nc.windowCond = sync.NewCond(&nc.windowMu)
@@ -897,6 +903,10 @@ loop:
 				c.handlePing(ping)
 			} else {
 				atomic.AddInt32(&c.unacks, -1)
+				if c.onRTT != nil {
+					rtt := time.Since(ping.DataAsTime())
+					c.onRTT(rtt)
+				}
 			}
 		case FrameGoAway:
 			ga := fr.Body().(*GoAway)

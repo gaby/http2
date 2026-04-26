@@ -117,6 +117,7 @@ func (cl *Client) createConn() (*Conn, *list.Element, error) {
 	c, err := cl.d.Dial(ConnOpts{
 		PingInterval: cl.d.PingInterval,
 		OnDisconnect: cl.onConnectionDropped,
+		OnRTT:        cl.opts.OnRTT,
 	})
 	if err != nil {
 		return nil, nil, err
