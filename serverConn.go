@@ -119,6 +119,7 @@ type serverConn struct {
 	// our values
 	maxWindow     int32
 	currentWindow int32
+	nextPushID    uint32 // next even stream ID for server push
 	writerClosed  atomic.Bool
 
 	state connState
@@ -1702,18 +1703,18 @@ func (sc *serverConn) sendPushPromise(parentStrm *Stream, method, path string) {
 }
 
 // nextServerStreamID returns the next even-numbered stream ID for server push.
+// Uses a monotonically increasing atomic counter to avoid ID reuse.
 func (sc *serverConn) nextServerStreamID() uint32 {
-	sc.streamsMu.Lock()
-	// Find the highest even stream ID
-	var maxID uint32
-	for id := range sc.streams {
-		if id%2 == 0 && id > maxID {
-			maxID = id
+	for {
+		cur := atomic.LoadUint32(&sc.nextPushID)
+		next := cur + 2
+		if next < 2 {
+			next = 2
+		}
+		if atomic.CompareAndSwapUint32(&sc.nextPushID, cur, next) {
+			return next
 		}
 	}
-	next := max(maxID+2, 2)
-	sc.streamsMu.Unlock()
-	return next
 }
 
 // handleEndRequest dispatches the finished request to the handler.

@@ -6,7 +6,15 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"unsafe"
 )
+
+// unsafeString converts a byte slice to a string without copying.
+// The caller must ensure the byte slice is not modified while the
+// string is in use. Safe for map lookups within a single call.
+func unsafeString(b []byte) string {
+	return unsafe.String(unsafe.SliceData(b), len(b))
+}
 
 // HPACK represents header compression methods to
 // encode and decode header fields in HTTP/2.
@@ -175,7 +183,9 @@ func (hp *HPACK) search(hf *HeaderField) (n uint64, fullMatch bool) {
 
 	if n == 0 {
 		// Use the hash map for O(1) key lookup in the static table.
-		if indices, ok := staticTableByKey[string(hf.key)]; ok {
+		// The unsafe string conversion avoids a heap allocation; the
+		// resulting string is only used as a map key within this call.
+		if indices, ok := staticTableByKey[unsafeString(hf.key)]; ok {
 			for _, i := range indices {
 				if bytes.Equal(hf.value, staticTable[i].value) {
 					n = uint64(i + 1)

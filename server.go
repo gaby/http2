@@ -138,9 +138,10 @@ func (s *Server) String() string {
 		", ping=" + s.cnf.PingInterval.String() + "}"
 }
 
-// Shutdown gracefully shuts down all HTTP/2 connections by sending GOAWAY
-// frames and waiting for active streams to drain. It does not close the
-// underlying fasthttp.Server — call fasthttp.Server.Shutdown for that.
+// Shutdown initiates shutdown of all HTTP/2 connections by sending GOAWAY
+// frames and signaling the connections to close. It does not wait for active
+// streams to drain, and it does not close the underlying fasthttp.Server —
+// call fasthttp.Server.Shutdown for that.
 func (s *Server) Shutdown() {
 	s.mu.Lock()
 	conns := make([]*serverConn, 0, len(s.conns))
@@ -206,9 +207,6 @@ func (s *Server) ServeConn(c net.Conn) error {
 		s.cnf.OnNewConnection(c)
 	}
 
-	// Clear handshake deadline now that the connection is initialized.
-	_ = c.SetDeadline(time.Time{})
-
 	if sc.logger == nil {
 		if s.cnf.Logger != nil {
 			sc.logger = s.cnf.Logger
@@ -234,6 +232,10 @@ func (s *Server) ServeConn(c net.Conn) error {
 	if err := sc.Handshake(); err != nil {
 		return err
 	}
+
+	// Clear handshake deadline now that the HTTP/2 connection is fully
+	// established (preface read + SETTINGS exchange complete).
+	_ = c.SetDeadline(time.Time{})
 
 	return sc.Serve()
 }

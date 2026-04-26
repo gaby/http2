@@ -144,8 +144,8 @@ func createClient(d *Dialer, opts ClientOpts) *Client {
 	return cl
 }
 
-// Close gracefully closes all connections managed by this client.
-// After Close returns, no new requests can be made.
+// Close gracefully closes all connections currently managed by this client
+// and clears the client's tracked connection list.
 func (cl *Client) Close() {
 	cl.lck.Lock()
 	defer cl.lck.Unlock()
