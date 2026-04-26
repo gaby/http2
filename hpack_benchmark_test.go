@@ -75,6 +75,48 @@ func BenchmarkHPACKDecodeTypicalRequest(b *testing.B) {
 	}
 }
 
+func BenchmarkHPACKSearchStaticFullMatch(b *testing.B) {
+	hp := AcquireHPACK()
+	defer ReleaseHPACK(hp)
+
+	hf := AcquireHeaderField()
+	defer ReleaseHeaderField(hf)
+	hf.SetBytes([]byte(":method"), []byte("GET"))
+
+	b.ReportAllocs()
+	for b.Loop() {
+		hp.search(hf)
+	}
+}
+
+func BenchmarkHPACKSearchStaticKeyOnly(b *testing.B) {
+	hp := AcquireHPACK()
+	defer ReleaseHPACK(hp)
+
+	hf := AcquireHeaderField()
+	defer ReleaseHeaderField(hf)
+	hf.SetBytes([]byte("content-type"), []byte("application/json"))
+
+	b.ReportAllocs()
+	for b.Loop() {
+		hp.search(hf)
+	}
+}
+
+func BenchmarkHPACKSearchMiss(b *testing.B) {
+	hp := AcquireHPACK()
+	defer ReleaseHPACK(hp)
+
+	hf := AcquireHeaderField()
+	defer ReleaseHeaderField(hf)
+	hf.SetBytes([]byte("x-custom-header"), []byte("value"))
+
+	b.ReportAllocs()
+	for b.Loop() {
+		hp.search(hf)
+	}
+}
+
 func BenchmarkReadIntSmall(b *testing.B) {
 	// Index 2 (:method GET) encoded with 7-bit prefix: 0x82
 	data := []byte{0x82}
