@@ -1952,7 +1952,11 @@ func (sc *serverConn) handleSettings(st *Settings) {
 	// Hold streamsMu while updating initialClientWindow and adjusting streams
 	// to prevent race with stream creation and queueData
 	sc.streamsMu.Lock()
-	streamIDsToFlush := make([]uint32, 0, len(sc.streams))
+	var idBuf [32]uint32
+	streamIDsToFlush := idBuf[:0]
+	if len(sc.streams) > len(idBuf) {
+		streamIDsToFlush = make([]uint32, 0, len(sc.streams))
+	}
 	if delta != 0 {
 		for _, strm := range sc.streams {
 			newWin := atomic.AddInt64(&strm.sendWindow, delta)
