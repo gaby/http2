@@ -53,6 +53,10 @@ type ServerConfig struct {
 	// Maximum value is 2^31 - 1 (2147483647).
 	MaxWindowSize int32
 
+	// HandshakeTimeout is the maximum time to wait for the HTTP/2 connection
+	// preface and settings exchange. A value of 0 uses the default of 5 seconds.
+	HandshakeTimeout time.Duration
+
 	// OnNewConnection is called when a new HTTP/2 connection is established.
 	// The net.Conn parameter is the underlying connection (may be TLS or plain TCP).
 	// This callback can be used for logging, metrics, or connection-level setup.
@@ -86,6 +90,10 @@ func (sc *ServerConfig) defaults() {
 
 	if sc.EnqueueTimeout == 0 {
 		sc.EnqueueTimeout = defaultEnqueueTimeout
+	}
+
+	if sc.HandshakeTimeout <= 0 {
+		sc.HandshakeTimeout = 5 * time.Second
 	}
 
 	if sc.MaxWindowSize <= 0 {
@@ -145,7 +153,7 @@ func (s *Server) ServeConn(c net.Conn) error {
 
 	// Bound the TLS/preface handshake to avoid hangs on misbehaving clients.
 	// The deadline is cleared after the HTTP/2 connection is fully set up.
-	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+	_ = c.SetDeadline(time.Now().Add(s.cnf.HandshakeTimeout))
 
 	if !ReadPreface(c) {
 		return errors.New("wrong preface")
