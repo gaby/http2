@@ -107,6 +107,55 @@ handler := func(ctx *fasthttp.RequestCtx) {
 }
 ```
 
+## Server Configuration
+
+```go
+http2.ConfigureServer(s, http2.ServerConfig{
+    PingInterval:        10 * time.Second,
+    MaxConcurrentStreams: 250,
+    MaxHeaderListSize:   64 * 1024,
+    MaxFrameSize:        32768,
+    MaxWindowSize:       1 << 24,          // 16 MiB
+    HandshakeTimeout:    5 * time.Second,
+    EnqueueTimeout:      2 * time.Second,
+    Debug:               false,
+    OnNewConnection: func(c net.Conn) {
+        log.Printf("new h2 conn from %s", c.RemoteAddr())
+    },
+    OnConnectionClosed: func(c net.Conn) {
+        log.Printf("h2 conn closed from %s", c.RemoteAddr())
+    },
+})
+```
+
+## Client Configuration
+
+```go
+http2.ConfigureClient(hc, http2.ClientOpts{
+    PingInterval:        3 * time.Second,
+    MaxResponseTime:     time.Minute,
+    MaxConns:            10,
+    DialTimeout:         5 * time.Second,
+    DisablePingChecking: false,
+    OnRTT: func(rtt time.Duration) {
+        log.Printf("RTT: %s", rtt)
+    },
+})
+```
+
+## Monitoring
+
+```go
+// Server
+srv.ActiveConnections() // int64
+
+// Client connection
+conn.Stats() // ConnStats{streams, rtt, window, ...}
+conn.RTT()
+conn.ActiveStreams()
+conn.ServerWindow()
+```
+
 ## Benchmarks
 
 Benchmark code [here](https://github.com/dgrr/http2/tree/master/benchmark).
