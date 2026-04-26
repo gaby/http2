@@ -75,6 +75,33 @@ func BenchmarkHPACKDecodeTypicalRequest(b *testing.B) {
 	}
 }
 
+func BenchmarkReadIntSmall(b *testing.B) {
+	// Index 2 (:method GET) encoded with 7-bit prefix: 0x82
+	data := []byte{0x82}
+	b.ReportAllocs()
+	for b.Loop() {
+		readInt(7, data)
+	}
+}
+
+func BenchmarkReadIntLarge(b *testing.B) {
+	// Multi-byte encoded integer: prefix full (0x7F) + continuation
+	data := []byte{0xFF, 0x01}
+	b.ReportAllocs()
+	for b.Loop() {
+		readInt(7, data)
+	}
+}
+
+func BenchmarkAppendIntSmall(b *testing.B) {
+	dst := make([]byte, 0, 16)
+	b.ReportAllocs()
+	for b.Loop() {
+		dst = append(dst[:0], 0)
+		dst = appendInt(dst, 7, 2)
+	}
+}
+
 func BenchmarkHPACKAppendHeaderStaticFullMatch(b *testing.B) {
 	hp := AcquireHPACK()
 	defer ReleaseHPACK(hp)
