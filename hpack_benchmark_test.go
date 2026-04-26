@@ -27,6 +27,54 @@ func BenchmarkHPACKEncodeTypicalResponse(b *testing.B) {
 	}
 }
 
+func BenchmarkHPACKDecodeTypicalRequest(b *testing.B) {
+	// Encode a typical request header set, then benchmark decoding.
+	hp := AcquireHPACK()
+	defer ReleaseHPACK(hp)
+
+	hf := AcquireHeaderField()
+
+	var encoded []byte
+
+	hf.SetBytes([]byte(":method"), []byte("GET"))
+	encoded = hp.AppendHeader(encoded, hf, true)
+
+	hf.SetBytes([]byte(":path"), []byte("/api/v1/users"))
+	encoded = hp.AppendHeader(encoded, hf, true)
+
+	hf.SetBytes([]byte(":scheme"), []byte("https"))
+	encoded = hp.AppendHeader(encoded, hf, true)
+
+	hf.SetBytes([]byte(":authority"), []byte("example.com"))
+	encoded = hp.AppendHeader(encoded, hf, true)
+
+	hf.SetBytes([]byte("accept"), []byte("application/json"))
+	encoded = hp.AppendHeader(encoded, hf, false)
+
+	hf.SetBytes([]byte("user-agent"), []byte("fasthttp/1.0"))
+	encoded = hp.AppendHeader(encoded, hf, false)
+
+	ReleaseHeaderField(hf)
+
+	// Now benchmark decoding
+	decHP := AcquireHPACK()
+	defer ReleaseHPACK(decHP)
+	decHF := AcquireHeaderField()
+	defer ReleaseHeaderField(decHF)
+
+	b.ReportAllocs()
+	for b.Loop() {
+		data := encoded
+		var err error
+		for len(data) > 0 {
+			data, err = decHP.Next(decHF, data)
+			if err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
+}
+
 func BenchmarkHPACKAppendHeaderStaticFullMatch(b *testing.B) {
 	hp := AcquireHPACK()
 	defer ReleaseHPACK(hp)
