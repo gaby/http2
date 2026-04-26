@@ -258,14 +258,13 @@ loop:
 			hf.SetKeyBytes(hf2.KeyBytes())
 		} else { // Read key literal string
 			b = b[1:]
-			dst := bytePool.Get().([]byte)
+			var stackBuf [128]byte
+			dst := stackBuf[:0]
 
-			b, dst, err = readString(dst[:0], b)
+			b, dst, err = readString(dst, b)
 			if err == nil {
 				hf.SetKeyBytes(dst)
 			}
-
-			bytePool.Put(dst)
 		}
 
 		// Reading value
@@ -274,16 +273,15 @@ loop:
 				b = b[1:]
 			}
 
-			dst := bytePool.Get().([]byte)
+			var stackBuf [128]byte
+			dst := stackBuf[:0]
 
-			b, dst, err = readString(dst[:0], b)
+			b, dst, err = readString(dst, b)
 			if err == nil {
 				hf.SetValueBytes(dst)
 				// add to the table as RFC specifies.
 				hp.addDynamic(hf)
 			}
-
-			bytePool.Put(dst)
 		}
 
 	// Literal Header Field Never Indexed.
@@ -308,14 +306,13 @@ loop:
 			hf.SetKeyBytes(hf2.key)
 		} else { // Reading key as string literal
 			b = b[1:]
-			dst := bytePool.Get().([]byte)
+			var stackBuf [128]byte
+			dst := stackBuf[:0]
 
-			b, dst, err = readString(dst[:0], b)
+			b, dst, err = readString(dst, b)
 			if err == nil {
 				hf.SetKeyBytes(dst)
 			}
-
-			bytePool.Put(dst)
 		}
 
 		// Reading value
@@ -324,14 +321,13 @@ loop:
 				b = b[1:]
 			}
 
-			dst := bytePool.Get().([]byte)
+			var stackBuf [128]byte
+			dst := stackBuf[:0]
 
-			b, dst, err = readString(dst[:0], b)
+			b, dst, err = readString(dst, b)
 			if err == nil {
 				hf.SetValueBytes(dst)
 			}
-
-			bytePool.Put(dst)
 		}
 
 	// Dynamic Table Size Update
