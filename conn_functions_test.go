@@ -43,6 +43,14 @@ func TestParseUintBytes(t *testing.T) {
 	}
 }
 
+func BenchmarkParseUintBytes(b *testing.B) {
+	data := []byte("200")
+	b.ReportAllocs()
+	for b.Loop() {
+		parseUintBytes(data)
+	}
+}
+
 func TestConnHandleSettingsAndPing(t *testing.T) {
 	conn := &Conn{
 		enc: AcquireHPACK(),
