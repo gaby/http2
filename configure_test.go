@@ -22,6 +22,34 @@ func TestConfigureServerHelpers(t *testing.T) {
 	require.Contains(t, tlsCfg.NextProtos, H2TLSProto)
 }
 
+func TestServerConfigDefaultValues(t *testing.T) {
+	// Zero values get defaults
+	cnf := ServerConfig{}
+	cnf.defaults()
+	require.Equal(t, 10*time.Second, cnf.PingInterval)
+	require.Equal(t, 1024, cnf.MaxConcurrentStreams)
+	require.Equal(t, defaultMaxHeaderListSize, cnf.MaxHeaderListSize)
+	require.Equal(t, defaultDataFrameSize, cnf.MaxFrameSize)
+	require.Equal(t, defaultEnqueueTimeout, cnf.EnqueueTimeout)
+}
+
+func TestServerConfigMaxFrameSizeClamping(t *testing.T) {
+	// Too small: clamp to minimum (defaultDataFrameSize = 16384)
+	cnf := ServerConfig{MaxFrameSize: 100}
+	cnf.defaults()
+	require.Equal(t, defaultDataFrameSize, cnf.MaxFrameSize)
+
+	// Too large: clamp to maximum (maxFrameSize = 16777215)
+	cnf = ServerConfig{MaxFrameSize: 1 << 25}
+	cnf.defaults()
+	require.Equal(t, uint32(maxFrameSize), cnf.MaxFrameSize)
+
+	// Valid value: keep as-is
+	cnf = ServerConfig{MaxFrameSize: 1 << 16}
+	cnf.defaults()
+	require.Equal(t, uint32(1<<16), cnf.MaxFrameSize)
+}
+
 func TestClientAdapterRoundTrip(t *testing.T) {
 	conn := &Conn{
 		in:  make(chan *Ctx, 1),
