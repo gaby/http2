@@ -1190,9 +1190,10 @@ func handleState(fr *FrameHeader, strm *Stream) {
 					strm.pendingEndStream = true
 				}
 			}
-		} // TODO: else push promise ...
+		} // Push promise state transitions handled in sendPushPromise
 	case StreamStateReserved:
-		// TODO: ...
+		// Reserved streams are created by PUSH_PROMISE and transition to
+		// HalfClosed(local) when the server sends headers.
 	case StreamStateOpen:
 		if fr.Flags().Has(FlagEndStream) {
 			if strm.headersFinished {
