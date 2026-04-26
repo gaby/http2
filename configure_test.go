@@ -240,6 +240,16 @@ func TestGetClientTransport(t *testing.T) {
 	require.Nil(t, GetClientTransport(hc2))
 }
 
+func TestServerConfigLogger(t *testing.T) {
+	cnf := ServerConfig{}
+	cnf.defaults()
+	require.Nil(t, cnf.Logger) // default is nil
+
+	cnf = ServerConfig{Logger: logger}
+	cnf.defaults()
+	require.NotNil(t, cnf.Logger)
+}
+
 func TestConfigureServerAndConfigCustomConfig(t *testing.T) {
 	tlsCfg := &tls.Config{}
 	cnf := ServerConfig{
