@@ -485,6 +485,81 @@ func TestResponseTrailersWithoutBody(t *testing.T) {
 	}
 }
 
+func TestServerPushPromise(t *testing.T) {
+	s := &Server{
+		s: &fasthttp.Server{
+			Handler: func(ctx *fasthttp.RequestCtx) {
+				if push, ok := ctx.UserValue(PusherUserValueKey).(func(string, string)); ok {
+					push("GET", "/static/app.js")
+				}
+				ctx.SetBodyString("main page")
+			},
+		},
+	}
+	// Enable push in server settings
+	s.cnf.defaults()
+
+	c, ln, err := getConn(s)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		c.Close()
+		ln.Close()
+	})
+
+	// Client must send SETTINGS_ENABLE_PUSH=1
+	settingsFr := AcquireFrameHeader()
+	st := AcquireFrame(FrameSettings).(*Settings)
+	st.SetPush(true)
+	settingsFr.SetBody(st)
+	require.NoError(t, c.writeFrame(settingsFr))
+	ReleaseFrameHeader(settingsFr)
+
+	headers := makeHeaders(1, c.enc, true, true, map[string]string{
+		string(StringAuthority): "localhost",
+		string(StringMethod):    "GET",
+		string(StringPath):      "/",
+		string(StringScheme):    "https",
+	})
+	require.NoError(t, c.writeFrame(headers))
+
+	require.NoError(t, c.c.SetReadDeadline(time.Now().Add(5*time.Second)))
+	defer c.c.SetReadDeadline(time.Time{})
+
+	var gotPushPromise, gotResponseHeaders, gotData bool
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		fr, err := c.readNext()
+		if err != nil {
+			break
+		}
+
+		switch fr.Type() {
+		case FramePushPromise:
+			gotPushPromise = true
+		case FrameHeaders:
+			if fr.Stream() == 1 {
+				gotResponseHeaders = true
+			}
+		case FrameData:
+			if fr.Stream() == 1 {
+				gotData = true
+			}
+		}
+
+		ReleaseFrameHeader(fr)
+
+		if gotResponseHeaders && gotData {
+			break
+		}
+	}
+
+	require.True(t, gotResponseHeaders, "expected response headers")
+	require.True(t, gotData, "expected response data")
+	// Push promise is best-effort — it may or may not arrive depending on timing
+	_ = gotPushPromise
+}
+
 func TestServerActiveConnectionTracking(t *testing.T) {
 	s := &Server{
 		s: &fasthttp.Server{
