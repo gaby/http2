@@ -57,6 +57,10 @@ type ServerConfig struct {
 	// preface and settings exchange. A value of 0 uses the default of 5 seconds.
 	HandshakeTimeout time.Duration
 
+	// Logger overrides the logger used for HTTP/2 connection logging.
+	// If nil, fasthttp.Server.Logger is used (or a default stdout logger).
+	Logger fasthttp.Logger
+
 	// OnNewConnection is called when a new HTTP/2 connection is established.
 	// The net.Conn parameter is the underlying connection (may be TLS or plain TCP).
 	// This callback can be used for logging, metrics, or connection-level setup.
@@ -198,7 +202,11 @@ func (s *Server) ServeConn(c net.Conn) error {
 	_ = c.SetDeadline(time.Time{})
 
 	if sc.logger == nil {
-		sc.logger = logger
+		if s.cnf.Logger != nil {
+			sc.logger = s.cnf.Logger
+		} else {
+			sc.logger = logger
+		}
 	}
 
 	sc.enc.Reset()

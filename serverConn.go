@@ -11,7 +11,6 @@ import (
 	"net"
 	"os"
 	"runtime/debug"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1495,8 +1494,8 @@ func (sc *serverConn) handleHeaderFrame(strm *Stream, fr *FrameHeader) error {
 			case bytes.Equal(k, StringContentType):
 				req.Header.SetContentTypeBytes(v)
 			case bytes.Equal(k, StringContentLength):
-				contentLength, parseErr := strconv.ParseInt(hf.Value(), 10, 64)
-				if parseErr != nil || contentLength < 0 {
+				contentLength, parseErr := parseContentLength(v)
+				if parseErr != nil {
 					return NewResetStreamError(ProtocolError, "invalid content-length header")
 				}
 				if strm.contentLength >= 0 && strm.contentLength != contentLength {
