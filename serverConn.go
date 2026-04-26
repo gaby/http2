@@ -26,7 +26,22 @@ const (
 	connStateClosed
 )
 
-var validHTTP2HeaderNamePunctuation = []byte("!#$%&'*+-.^_`|~")
+// validHeaderNameChar is a 256-byte lookup table where a non-zero value
+// indicates that the byte is valid inside an HTTP/2 header field name
+// (excluding the leading ':' for pseudo-headers, handled separately).
+var validHeaderNameChar [256]bool
+
+func init() {
+	for ch := byte('a'); ch <= 'z'; ch++ {
+		validHeaderNameChar[ch] = true
+	}
+	for ch := byte('0'); ch <= '9'; ch++ {
+		validHeaderNameChar[ch] = true
+	}
+	for _, ch := range []byte("!#$%&'*+-.^_`|~") {
+		validHeaderNameChar[ch] = true
+	}
+}
 
 type serverConn struct {
 	pingWindowStart time.Time
@@ -1551,18 +1566,12 @@ func isValidHTTP2HeaderName(name []byte) bool {
 	if len(name) == 1 && name[0] == ':' {
 		return false
 	}
-	for i, ch := range name {
-		if i == 0 && ch == ':' {
-			continue
-		}
-		if ch >= 'A' && ch <= 'Z' {
-			return false
-		}
-		switch {
-		case ch >= 'a' && ch <= 'z':
-		case ch >= '0' && ch <= '9':
-		case bytes.IndexByte(validHTTP2HeaderNamePunctuation, ch) >= 0:
-		default:
+	start := 0
+	if name[0] == ':' {
+		start = 1
+	}
+	for _, ch := range name[start:] {
+		if !validHeaderNameChar[ch] {
 			return false
 		}
 	}
