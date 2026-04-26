@@ -75,6 +75,15 @@ func TestErrorHelpers(t *testing.T) {
 	require.True(t, resetErr.Is(EnhanceYourCalm))
 	require.Equal(t, EnhanceYourCalm, resetErr.Code())
 	require.Contains(t, resetErr.Error(), "boom")
+
+	// Test FrameType, IsConnectionError, IsStreamError
+	require.Equal(t, FrameGoAway, err.FrameType())
+	require.True(t, err.IsConnectionError())
+	require.False(t, err.IsStreamError())
+
+	require.Equal(t, FrameResetStream, resetErr.FrameType())
+	require.False(t, resetErr.IsConnectionError())
+	require.True(t, resetErr.IsStreamError())
 }
 
 func TestConfigureDialerSetsDefaults(t *testing.T) {
