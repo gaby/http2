@@ -157,3 +157,45 @@ func TestClientAdapterRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	<-done
 }
+
+func TestClientClose(t *testing.T) {
+	// Create a client with stub connections
+	conn1 := &Conn{
+		in:  make(chan *Ctx, 1),
+		out: make(chan *FrameHeader, 1),
+		c:   &stubConn{},
+	}
+	conn2 := &Conn{
+		in:  make(chan *Ctx, 1),
+		out: make(chan *FrameHeader, 1),
+		c:   &stubConn{},
+	}
+
+	client := createClient(&Dialer{}, ClientOpts{MaxResponseTime: -1})
+	client.conns.PushBack(conn1)
+	client.conns.PushBack(conn2)
+
+	require.Equal(t, 2, client.conns.Len())
+
+	client.Close()
+
+	// After Close, the connection list should be empty
+	require.Equal(t, 0, client.conns.Len())
+}
+
+func TestClientTransportClose(t *testing.T) {
+	conn := &Conn{
+		in:  make(chan *Ctx, 1),
+		out: make(chan *FrameHeader, 1),
+		c:   &stubConn{},
+	}
+
+	client := createClient(&Dialer{}, ClientOpts{MaxResponseTime: -1})
+	client.conns.PushBack(conn)
+
+	transport := &ClientTransport{client: client}
+	transport.Close()
+
+	// After Close, the client's connection list should be empty
+	require.Equal(t, 0, client.conns.Len())
+}
