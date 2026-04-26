@@ -216,3 +216,27 @@ func TestGetClientTransport(t *testing.T) {
 	hc2 := &fasthttp.HostClient{}
 	require.Nil(t, GetClientTransport(hc2))
 }
+
+func TestConfigureServerAndConfigCustomConfig(t *testing.T) {
+	tlsCfg := &tls.Config{}
+	cnf := ServerConfig{
+		PingInterval:        3 * time.Second,
+		MaxConcurrentStreams: 64,
+		Debug:               true,
+	}
+
+	s := ConfigureServerAndConfig(&fasthttp.Server{}, tlsCfg, cnf)
+	require.NotNil(t, s)
+	require.Equal(t, 3*time.Second, s.Config().PingInterval)
+	require.Equal(t, 64, s.Config().MaxConcurrentStreams)
+	require.True(t, s.Config().Debug)
+	require.Contains(t, tlsCfg.NextProtos, H2TLSProto)
+}
+
+func TestConfigureServerAndConfigDefaultConfig(t *testing.T) {
+	tlsCfg := &tls.Config{}
+	s := ConfigureServerAndConfig(&fasthttp.Server{}, tlsCfg)
+	require.NotNil(t, s)
+	require.Equal(t, 10*time.Second, s.Config().PingInterval) // default
+	require.Contains(t, tlsCfg.NextProtos, H2TLSProto)
+}
