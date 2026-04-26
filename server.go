@@ -48,6 +48,11 @@ type ServerConfig struct {
 	// A value of 0 uses the default of 2 seconds.
 	EnqueueTimeout time.Duration
 
+	// MaxWindowSize is the connection-level flow control window size.
+	// A value of 0 uses the default of 4 MiB (1 << 22).
+	// Maximum value is 2^31 - 1 (2147483647).
+	MaxWindowSize int32
+
 	// OnNewConnection is called when a new HTTP/2 connection is established.
 	// The net.Conn parameter is the underlying connection (may be TLS or plain TCP).
 	// This callback can be used for logging, metrics, or connection-level setup.
@@ -82,6 +87,12 @@ func (sc *ServerConfig) defaults() {
 	if sc.EnqueueTimeout == 0 {
 		sc.EnqueueTimeout = defaultEnqueueTimeout
 	}
+
+	if sc.MaxWindowSize <= 0 {
+		sc.MaxWindowSize = 1 << 22 // 4 MiB default
+	} else if sc.MaxWindowSize > maxWindowIncrement {
+		sc.MaxWindowSize = maxWindowIncrement
+	}
 }
 
 // Server defines an HTTP/2 entity that can handle HTTP/2 connections.
@@ -94,6 +105,12 @@ type Server struct {
 
 	mu    sync.Mutex
 	conns map[*serverConn]struct{}
+}
+
+// Config returns a copy of the server's current configuration.
+// Modifying the returned value does not affect the server.
+func (s *Server) Config() ServerConfig {
+	return s.cnf
 }
 
 // ActiveConnections returns the number of currently active HTTP/2 connections.
@@ -179,7 +196,7 @@ func (s *Server) ServeConn(c net.Conn) error {
 	sc.enc.Reset()
 	sc.dec.Reset()
 
-	sc.maxWindow = 1 << 22
+	sc.maxWindow = s.cnf.MaxWindowSize
 	sc.currentWindow = sc.maxWindow
 
 	sc.st.Reset()

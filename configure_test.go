@@ -9,6 +9,24 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
+func TestServerConfigAccessor(t *testing.T) {
+	cnf := ServerConfig{
+		PingInterval:        5 * time.Second,
+		MaxConcurrentStreams: 512,
+		Debug:               true,
+	}
+	s := ConfigureServer(&fasthttp.Server{}, cnf)
+
+	got := s.Config()
+	require.Equal(t, 5*time.Second, got.PingInterval)
+	require.Equal(t, 512, got.MaxConcurrentStreams)
+	require.True(t, got.Debug)
+
+	// Mutating the copy must not affect the server
+	got.PingInterval = 99 * time.Second
+	require.Equal(t, 5*time.Second, s.Config().PingInterval)
+}
+
 func TestConfigureServerHelpers(t *testing.T) {
 	s := &fasthttp.Server{}
 	s2 := ConfigureServer(s, ServerConfig{})
@@ -48,6 +66,65 @@ func TestServerConfigMaxFrameSizeClamping(t *testing.T) {
 	cnf = ServerConfig{MaxFrameSize: 1 << 16}
 	cnf.defaults()
 	require.Equal(t, uint32(1<<16), cnf.MaxFrameSize)
+}
+
+func TestConfigureServerH2C(t *testing.T) {
+	s := &fasthttp.Server{
+		Handler: func(ctx *fasthttp.RequestCtx) {
+			ctx.SetBodyString("h2c works")
+		},
+	}
+
+	s2 := ConfigureServerH2C(s, ServerConfig{})
+	require.NotNil(t, s2)
+	// defaults should be applied
+	require.Equal(t, 10*time.Second, s2.cnf.PingInterval)
+	require.Equal(t, 1024, s2.cnf.MaxConcurrentStreams)
+}
+
+func TestConfigureServerH2CCustomConfig(t *testing.T) {
+	s := &fasthttp.Server{
+		Handler: func(ctx *fasthttp.RequestCtx) {},
+	}
+
+	cnf := ServerConfig{
+		PingInterval:        5 * time.Second,
+		MaxConcurrentStreams: 100,
+	}
+	s2 := ConfigureServerH2C(s, cnf)
+	require.NotNil(t, s2)
+	require.Equal(t, 5*time.Second, s2.cnf.PingInterval)
+	require.Equal(t, 100, s2.cnf.MaxConcurrentStreams)
+}
+
+func TestConfigureServerAndConfigWithServerConfig(t *testing.T) {
+	s := &fasthttp.Server{
+		Handler: func(ctx *fasthttp.RequestCtx) {},
+	}
+	tlsCfg := &tls.Config{}
+
+	cnf := ServerConfig{
+		PingInterval:        3 * time.Second,
+		MaxConcurrentStreams: 256,
+	}
+	s2 := ConfigureServerAndConfig(s, tlsCfg, cnf)
+	require.NotNil(t, s2)
+	require.Equal(t, 3*time.Second, s2.cnf.PingInterval)
+	require.Equal(t, 256, s2.cnf.MaxConcurrentStreams)
+	require.Contains(t, tlsCfg.NextProtos, H2TLSProto)
+}
+
+func TestConfigureServerAndConfigNoServerConfig(t *testing.T) {
+	s := &fasthttp.Server{
+		Handler: func(ctx *fasthttp.RequestCtx) {},
+	}
+	tlsCfg := &tls.Config{}
+
+	// Calling without optional ServerConfig should use defaults
+	s2 := ConfigureServerAndConfig(s, tlsCfg)
+	require.NotNil(t, s2)
+	require.Equal(t, 10*time.Second, s2.cnf.PingInterval)
+	require.Equal(t, 1024, s2.cnf.MaxConcurrentStreams)
 }
 
 func TestClientAdapterRoundTrip(t *testing.T) {
