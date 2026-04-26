@@ -521,3 +521,121 @@ func TestIdleConnection(t *testing.T) {
 	_, err = c.readNext()
 	require.Error(t, err, "Expecting error")
 }
+
+// getConnWithHandshake is like getConn but uses the public Conn.Handshake()
+// method which starts readLoop and writeLoop, enabling Conn.Do().
+func getConnWithHandshake(s *Server) (*Conn, net.Listener, error) {
+	s.cnf.defaults()
+
+	ln := fasthttputil.NewInmemoryListener()
+
+	go serve(s, ln)
+
+	c, err := ln.Dial()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	nc := NewConn(c, ConnOpts{
+		PingInterval:        -1, // disable pings for test stability
+		DisablePingChecking: true,
+	})
+
+	err = nc.Handshake()
+	return nc, ln, err
+}
+
+func TestConnDoSynchronous(t *testing.T) {
+	s := &Server{
+		s: &fasthttp.Server{
+			Handler: func(ctx *fasthttp.RequestCtx) {
+				ctx.SetBodyString("hello from Do")
+			},
+		},
+	}
+
+	c, ln, err := getConnWithHandshake(s)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		c.Close()
+		ln.Close()
+	})
+
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+
+	req.SetRequestURI("https://localhost/test")
+	req.Header.SetMethod("GET")
+
+	err = c.Do(req, resp)
+	require.NoError(t, err)
+	require.Equal(t, "hello from Do", string(resp.Body()))
+}
+
+func TestConnDoPostWithBody(t *testing.T) {
+	s := &Server{
+		s: &fasthttp.Server{
+			Handler: func(ctx *fasthttp.RequestCtx) {
+				ctx.SetBodyString("echo:" + string(ctx.PostBody()))
+			},
+		},
+	}
+
+	c, ln, err := getConnWithHandshake(s)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		c.Close()
+		ln.Close()
+	})
+
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+
+	req.SetRequestURI("https://localhost/post")
+	req.Header.SetMethod("POST")
+	req.SetBody([]byte("hello"))
+
+	err = c.Do(req, resp)
+	require.NoError(t, err)
+	require.Equal(t, "echo:hello", string(resp.Body()))
+}
+
+func TestServerShutdownSendsGoAway(t *testing.T) {
+	s := &Server{
+		s: &fasthttp.Server{
+			Handler: func(ctx *fasthttp.RequestCtx) {
+				ctx.SetBodyString("ok")
+			},
+		},
+	}
+
+	c, ln, err := getConnWithHandshake(s)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		c.Close()
+		ln.Close()
+	})
+
+	// Send a request first to ensure the server is fully initialized
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+
+	req.SetRequestURI("https://localhost/warmup")
+	req.Header.SetMethod("GET")
+	require.NoError(t, c.Do(req, resp))
+
+	// Now the server is fully up and running; safe to call Shutdown
+	s.Shutdown()
+
+	// The client's readLoop should eventually see an error (EOF or GoAway)
+	// after the server sends GOAWAY and closes the connection.
+	require.Eventually(t, func() bool {
+		return c.Closed()
+	}, 5*time.Second, 50*time.Millisecond, "connection should close after shutdown")
+}

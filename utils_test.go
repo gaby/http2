@@ -568,11 +568,10 @@ func TestConnectionClosedErrorInterface(t *testing.T) {
 }
 
 func TestErrorErrorMethod(t *testing.T) {
-	// The Error.Error() method at errors.go:151 formats "code: debug"
-	// Note: code.String() is used by fmt.Sprintf %s, which calls Error() on ErrorCode
+	// The Error.Error() method formats as "code.String(): debug"
 	e := NewError(ProtocolError, "bad request")
-	require.Equal(t, "Protocol error: bad request", e.Error())
+	require.Equal(t, "ProtocolError: bad request", e.Error())
 
 	e2 := NewGoAwayError(InternalError, "internal failure")
-	require.Equal(t, "Internal error: internal failure", e2.Error())
+	require.Equal(t, "InternalError: internal failure", e2.Error())
 }
