@@ -273,3 +273,14 @@ func TestConfigureServerAndConfigDefaultConfig(t *testing.T) {
 	require.Equal(t, 10*time.Second, s.Config().PingInterval) // default
 	require.Contains(t, tlsCfg.NextProtos, H2TLSProto)
 }
+
+func TestConfigureClientH2CFailsWithoutServer(t *testing.T) {
+	hc := &fasthttp.HostClient{
+		Addr: "127.0.0.1:1", // unreachable port
+	}
+
+	err := ConfigureClientH2C(hc, ClientOpts{
+		DialTimeout: 50 * time.Millisecond,
+	})
+	require.Error(t, err)
+}
