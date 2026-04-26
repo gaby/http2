@@ -467,11 +467,19 @@ func huffmanEncodedLen(src []byte) int {
 // https://tools.ietf.org/html/rfc7541#section-5.2
 func appendString(dst, src []byte, encode bool) []byte {
 	var b []byte
+	var poolBuf []byte
 	if encode {
 		// Only Huffman-encode when the result is not longer than the original.
 		if huffmanEncodedLen(src) <= len(src) {
-			b = bytePool.Get().([]byte)
-			b = HuffmanEncode(b[:0], src)
+			// Use a stack-local buffer for small strings to avoid pool overhead.
+			// 128 bytes covers the vast majority of header field values.
+			var stackBuf [128]byte
+			if len(src) <= 128 {
+				b = HuffmanEncode(stackBuf[:0], src)
+			} else {
+				poolBuf = bytePool.Get().([]byte)
+				b = HuffmanEncode(poolBuf[:0], src)
+			}
 		} else {
 			encode = false
 			b = src
@@ -491,7 +499,9 @@ func appendString(dst, src []byte, encode bool) []byte {
 	dst = append(dst, b...)
 
 	if encode {
-		bytePool.Put(b)
+		if poolBuf != nil {
+			bytePool.Put(poolBuf)
+		}
 		dst[nn] |= 128 // setting H bit
 	}
 
