@@ -151,6 +151,57 @@ func TestReadFromPayloadReadError(t *testing.T) {
 	require.Error(t, err, "should error on incomplete payload read")
 }
 
+func BenchmarkFrameHeaderWriteTo(b *testing.B) {
+	fr := AcquireFrameHeader()
+	defer ReleaseFrameHeader(fr)
+
+	data := AcquireFrame(FrameData).(*Data)
+	data.SetData([]byte("hello world"))
+	data.SetEndStream(true)
+	fr.SetBody(data)
+	fr.SetStream(1)
+
+	buf := bytes.NewBuffer(make([]byte, 0, 1024))
+	bw := bufio.NewWriter(buf)
+
+	b.ReportAllocs()
+	for b.Loop() {
+		buf.Reset()
+		bw.Reset(buf)
+		fr.WriteTo(bw)
+		bw.Flush()
+	}
+}
+
+func BenchmarkFrameHeaderReadFrom(b *testing.B) {
+	// Prepare a valid DATA frame in a buffer
+	fr := AcquireFrameHeader()
+	data := AcquireFrame(FrameData).(*Data)
+	data.SetData([]byte("hello world"))
+	data.SetEndStream(true)
+	fr.SetBody(data)
+	fr.SetStream(1)
+
+	buf := bytes.NewBuffer(make([]byte, 0, 1024))
+	bw := bufio.NewWriter(buf)
+	fr.WriteTo(bw)
+	bw.Flush()
+	ReleaseFrameHeader(fr)
+
+	raw := buf.Bytes()
+	reader := bytes.NewReader(raw)
+	br := bufio.NewReader(reader)
+
+	b.ReportAllocs()
+	for b.Loop() {
+		reader.Reset(raw)
+		br.Reset(reader)
+		fr2 := AcquireFrameHeader()
+		fr2.ReadFrom(br)
+		ReleaseFrameHeader(fr2)
+	}
+}
+
 func TestReadFrameFromUnknownType(t *testing.T) {
 	// Build a frame header with unknown type (0x0A > FrameContinuation=0x9)
 	// FrameType is int8, so must use value in range [0, 127]
