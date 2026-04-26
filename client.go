@@ -173,7 +173,7 @@ func (cl *Client) onConnectionDropped(c *Conn) {
 
 func (cl *Client) createConn() (*Conn, *list.Element, error) {
 	c, err := cl.d.Dial(ConnOpts{
-		PingInterval:        cl.d.PingInterval,
+		PingInterval:        cl.opts.PingInterval,
 		OnDisconnect:        cl.onConnectionDropped,
 		OnRTT:               cl.opts.OnRTT,
 		DisablePingChecking: cl.opts.DisablePingChecking,

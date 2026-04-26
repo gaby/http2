@@ -631,8 +631,9 @@ var staticTable = []*HeaderField{ // entry + 1
 // maxIndex defines the maximum index number of the static table.
 const maxIndex = 62
 
-// staticTableByKey maps header names to their indices (1-based) in the static
-// table for O(1) lookup instead of linear scan.
+// staticTableByKey maps header names to their 0-based indices in the static
+// table for O(1) lookup instead of linear scan. The search code converts
+// to 1-based HPACK indices by adding 1 when returning results.
 var staticTableByKey map[string][]int
 
 func init() {

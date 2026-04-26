@@ -718,13 +718,13 @@ func TestSettingsInitialWindowIncreaseFlushesPendingData(t *testing.T) {
 	// HEADERS frame the handler has returned and enqueueFrame was called,
 	// but queueData (which stores pending body data) may still be running
 	// on slow CI. Re-send SETTINGS(1) from a background goroutine every
-	// 200ms so at least one arrives after the server has stored the pending
+	// 100ms so at least one arrives after the server has stored the pending
 	// data and triggers a flush.
 	stopResend := make(chan struct{})
 	go func() {
-		ticker := time.NewTicker(200 * time.Millisecond)
+		ticker := time.NewTicker(100 * time.Millisecond)
 		defer ticker.Stop()
-		sendSettings(1) // initial send
+		sendSettings(1)
 		for {
 			select {
 			case <-stopResend:
@@ -735,10 +735,26 @@ func TestSettingsInitialWindowIncreaseFlushesPendingData(t *testing.T) {
 		}
 	}()
 
+	// Use a short read timeout (500ms) so the loop can pick up the DATA
+	// frame quickly after the background SETTINGS triggers the flush.
+	shortRead := func() (*FrameHeader, error) {
+		require.NoError(t, c.c.SetReadDeadline(time.Now().Add(500*time.Millisecond)))
+		fr, err := c.readNext()
+		if err != nil {
+			var timeoutErr interface{ Timeout() bool }
+			if (errors.As(err, &timeoutErr) && timeoutErr.Timeout()) ||
+				errors.Is(err, os.ErrDeadlineExceeded) {
+				return nil, nil
+			}
+			return nil, err
+		}
+		return fr, nil
+	}
+
 	deadline = time.Now().Add(30 * time.Second)
 	var dataFrame *FrameHeader
 	for time.Now().Before(deadline) && dataFrame == nil {
-		fr, err := readNextWithRetry()
+		fr, err := shortRead()
 		if fr == nil && err == nil {
 			continue
 		}

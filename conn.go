@@ -16,18 +16,25 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
+var errIntegerOverflow = errors.New("integer overflow")
+
 // parseUintBytes parses an unsigned integer from a byte slice without
 // allocating a string. Returns the parsed value and any error.
 func parseUintBytes(b []byte) (int, error) {
 	if len(b) == 0 {
 		return 0, errors.New("empty number")
 	}
+	const maxInt = int(^uint(0) >> 1)
 	n := 0
 	for _, c := range b {
 		if c < '0' || c > '9' {
 			return 0, fmt.Errorf("invalid digit: %c", c)
 		}
-		n = n*10 + int(c-'0')
+		digit := int(c - '0')
+		if n > (maxInt-digit)/10 {
+			return 0, errIntegerOverflow
+		}
+		n = n*10 + digit
 	}
 	return n, nil
 }
@@ -1228,8 +1235,9 @@ func (c *Conn) readHeader(b []byte, res *fasthttp.Response) error {
 		}
 
 		if bytes.Equal(hf.KeyBytes(), StringContentLength) {
-			n, _ := parseUintBytes(hf.ValueBytes())
-			res.Header.SetContentLength(n)
+			if n, err := parseUintBytes(hf.ValueBytes()); err == nil {
+				res.Header.SetContentLength(n)
+			}
 		} else {
 			res.Header.AddBytesKV(hf.KeyBytes(), hf.ValueBytes())
 		}
