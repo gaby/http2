@@ -125,6 +125,29 @@ func TestClientRoundTripTimeoutIgnoresLateResponse(t *testing.T) {
 	}
 }
 
+func TestClientRoundTripMaxConnsReached(t *testing.T) {
+	// Create a connection that's busy (can't open more streams)
+	conn := &Conn{
+		in:  make(chan *Ctx, 1),
+		out: make(chan *FrameHeader, 1),
+	}
+	conn.serverS.maxStreams = 0 // no streams available
+
+	client := createClient(&Dialer{}, ClientOpts{
+		MaxResponseTime: -1,
+		MaxConns:        1,
+	})
+	client.conns.PushBack(conn)
+
+	req := fasthttp.AcquireRequest()
+	res := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(res)
+
+	_, err := client.RoundTrip(nil, req, res)
+	require.ErrorIs(t, err, ErrMaxConnsReached)
+}
+
 func TestConfigureClientRemovesH2WhenServerDoesNotSupportIt(t *testing.T) {
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
