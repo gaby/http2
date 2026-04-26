@@ -22,6 +22,11 @@ func TestServerConfigAccessor(t *testing.T) {
 	require.Equal(t, 512, got.MaxConcurrentStreams)
 	require.True(t, got.Debug)
 
+	// Test Server.String()
+	str := s.String()
+	require.Contains(t, str, "maxStreams=512")
+	require.Contains(t, str, "ping=5s")
+
 	// Mutating the copy must not affect the server
 	got.PingInterval = 99 * time.Second
 	require.Equal(t, 5*time.Second, s.Config().PingInterval)
