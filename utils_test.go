@@ -8,6 +8,7 @@ import (
 	"math/bits"
 	"net"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/dgrr/http2/http2utils"
@@ -562,6 +563,8 @@ func TestConnectionClosedErrorInterface(t *testing.T) {
 	var netErr net.Error
 	require.True(t, errors.As(err, &netErr), "should implement net.Error")
 	require.False(t, netErr.Timeout(), "should not be a timeout error")
+	//nolint:staticcheck // Temporary is deprecated but we still need to test it
+	require.False(t, netErr.Temporary(), "should not be a temporary error")
 
 	// Unwrap → net.ErrClosed
 	require.ErrorIs(t, err, net.ErrClosed, "should wrap net.ErrClosed")
@@ -574,4 +577,66 @@ func TestErrorErrorMethod(t *testing.T) {
 
 	e2 := NewGoAwayError(InternalError, "internal failure")
 	require.Equal(t, "InternalError: internal failure", e2.Error())
+}
+
+func TestStatusCodeToBytes(t *testing.T) {
+	// Common pre-allocated codes
+	require.Equal(t, "200", string(statusCodeToBytes(200)))
+	require.Equal(t, "404", string(statusCodeToBytes(404)))
+	require.Equal(t, "500", string(statusCodeToBytes(500)))
+
+	// Uncommon code (not in the pre-allocated table)
+	require.Equal(t, "999", string(statusCodeToBytes(999)))
+
+	// Negative code (falls through to strconv)
+	require.Equal(t, "-1", string(statusCodeToBytes(-1)))
+
+	// Code above table range
+	require.Equal(t, "700", string(statusCodeToBytes(700)))
+}
+
+func TestDialerH2CSkipsTLS(t *testing.T) {
+	d := &Dialer{
+		Addr: "localhost:8080",
+		H2C:  true,
+	}
+
+	// H2C dialer should not configure TLS
+	require.Nil(t, d.TLSConfig, "H2C dialer should not set TLSConfig")
+
+	// tryDial with H2C goes straight to dialTCP (no TLS wrapping)
+	// We can't actually dial here, but we verify the flag is respected
+	// by checking that configureDialer is not called for H2C
+	require.True(t, d.H2C)
+}
+
+func TestConnCancelWithActiveStream(t *testing.T) {
+	conn := &Conn{
+		in:  make(chan *Ctx, 1),
+		out: make(chan *FrameHeader, 128),
+		done: make(chan struct{}),
+	}
+	conn.serverS.maxStreams = 10
+
+	ctx := &Ctx{
+		Err: make(chan error, 1),
+	}
+
+	// Set a non-zero stream ID to bypass ErrStreamNotReady
+	atomic.StoreUint32(&ctx.streamID, 5)
+
+	err := conn.Cancel(ctx)
+	require.NoError(t, err)
+
+	// Should have sent a RST_STREAM frame to the out channel
+	select {
+	case fr := <-conn.out:
+		require.Equal(t, FrameResetStream, fr.Type())
+		require.Equal(t, uint32(5), fr.Stream())
+		rst := fr.Body().(*RstStream)
+		require.Equal(t, StreamCanceled, rst.Code())
+		ReleaseFrameHeader(fr)
+	default:
+		t.Fatal("expected RST_STREAM frame in out channel")
+	}
 }

@@ -603,7 +603,7 @@ func TestGoAwaySerializeAndDeserialize(t *testing.T) {
 	require.Equal(t, ga.Stream(), cloned.Stream())
 	require.Equal(t, ga.Code(), cloned.Code())
 	require.Equal(t, ga.Data(), cloned.Data())
-	require.Contains(t, cloned.Error(), "Enhance your calm")
+	require.Contains(t, cloned.Error(), "EnhanceYourCalm")
 
 	ReleaseFrameHeader(fr)
 }
