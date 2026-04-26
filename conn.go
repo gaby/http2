@@ -118,6 +118,8 @@ type Conn struct {
 	onDisconnect func(*Conn)
 	onRTT        func(time.Duration)
 
+	lastRTT atomic.Int64 // nanoseconds
+
 	done chan struct{} // closed when writeLoop exits
 
 	reqQueued sync.Map
@@ -421,6 +423,12 @@ func (c *Conn) CanOpenStream() bool {
 // ActiveStreams returns the number of currently open streams on this connection.
 func (c *Conn) ActiveStreams() int32 {
 	return atomic.LoadInt32(&c.openStreams)
+}
+
+// RTT returns the last measured round-trip time to the server.
+// Returns 0 if no PONG has been received yet.
+func (c *Conn) RTT() time.Duration {
+	return time.Duration(c.lastRTT.Load())
 }
 
 // MaxConcurrentStreams returns the maximum number of concurrent streams
@@ -944,8 +952,9 @@ loop:
 				c.handlePing(ping)
 			} else {
 				atomic.AddInt32(&c.unacks, -1)
+				rtt := time.Since(ping.DataAsTime())
+				c.lastRTT.Store(int64(rtt))
 				if c.onRTT != nil {
-					rtt := time.Since(ping.DataAsTime())
 					c.onRTT(rtt)
 				}
 			}
