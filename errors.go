@@ -2,7 +2,6 @@ package http2
 
 import (
 	"errors"
-	"fmt"
 	"net"
 	"strconv"
 )
@@ -149,7 +148,7 @@ func newFrameSizeError(stream uint32, debug string) Error {
 
 // Error implements the error interface.
 func (e Error) Error() string {
-	return fmt.Sprintf("%s: %s", e.code, e.debug)
+	return e.code.String() + ": " + e.debug
 }
 
 var (
