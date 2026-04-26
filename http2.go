@@ -16,11 +16,11 @@ var (
 
 // ReadPreface reads the connection initialisation preface.
 func ReadPreface(br io.Reader) bool {
-	b := make([]byte, prefaceLen)
+	var b [24]byte // stack-allocated; prefaceLen == 24
 
-	n, err := br.Read(b[:prefaceLen])
+	n, err := io.ReadFull(br, b[:prefaceLen])
 	if err == nil && n == prefaceLen {
-		if bytes.Equal(b, http2Preface) {
+		if bytes.Equal(b[:], http2Preface) {
 			return true
 		}
 	}
