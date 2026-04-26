@@ -124,3 +124,47 @@ func TestHuffmanDecodeTooManyBitsLeft(t *testing.T) {
 	_, err := HuffmanDecode(nil, []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF})
 	require.Error(t, err, "should error with too many bits left")
 }
+
+func BenchmarkHuffmanEncodeShort(b *testing.B) {
+	src := []byte("content-type")
+	dst := make([]byte, 0, 64)
+	b.ReportAllocs()
+	for b.Loop() {
+		dst = HuffmanEncode(dst[:0], src)
+	}
+}
+
+func BenchmarkHuffmanEncodeLong(b *testing.B) {
+	src := []byte("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+	dst := make([]byte, 0, 128)
+	b.ReportAllocs()
+	for b.Loop() {
+		dst = HuffmanEncode(dst[:0], src)
+	}
+}
+
+func BenchmarkHuffmanDecodeShort(b *testing.B) {
+	src := HuffmanEncode(nil, []byte("content-type"))
+	dst := make([]byte, 0, 64)
+	b.ReportAllocs()
+	for b.Loop() {
+		dst, _ = HuffmanDecode(dst[:0], src)
+	}
+}
+
+func BenchmarkHuffmanDecodeLong(b *testing.B) {
+	src := HuffmanEncode(nil, []byte("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"))
+	dst := make([]byte, 0, 128)
+	b.ReportAllocs()
+	for b.Loop() {
+		dst, _ = HuffmanDecode(dst[:0], src)
+	}
+}
+
+func BenchmarkHuffmanEncodedLen(b *testing.B) {
+	src := []byte("content-type")
+	b.ReportAllocs()
+	for b.Loop() {
+		huffmanEncodedLen(src)
+	}
+}
