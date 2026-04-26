@@ -125,6 +125,28 @@ func TestHuffmanDecodeTooManyBitsLeft(t *testing.T) {
 	require.Error(t, err, "should error with too many bits left")
 }
 
+func TestHuffmanEncodedLen(t *testing.T) {
+	tests := []struct {
+		name string
+		src  []byte
+	}{
+		{"empty", nil},
+		{"hello", []byte("hello")},
+		{"GET", []byte("GET")},
+		{"numbers", []byte("12345")},
+		{"path", []byte("/index.html")},
+		{"high bytes", []byte{0x80, 0x90, 0xA0, 0xFF}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			expected := len(HuffmanEncode(nil, tc.src))
+			got := huffmanEncodedLen(tc.src)
+			require.Equal(t, expected, got, "huffmanEncodedLen mismatch for %q", tc.src)
+		})
+	}
+}
+
 func BenchmarkHuffmanEncodeShort(b *testing.B) {
 	src := []byte("content-type")
 	dst := make([]byte, 0, 64)
