@@ -15,6 +15,34 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
+func TestParseUintBytes(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected int
+		hasErr   bool
+	}{
+		{"0", 0, false},
+		{"200", 200, false},
+		{"404", 404, false},
+		{"1234", 1234, false},
+		{"", 0, true},
+		{"abc", 0, true},
+		{"12a", 0, true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.input, func(t *testing.T) {
+			n, err := parseUintBytes([]byte(tc.input))
+			if tc.hasErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, tc.expected, n)
+			}
+		})
+	}
+}
+
 func TestConnHandleSettingsAndPing(t *testing.T) {
 	conn := &Conn{
 		enc: AcquireHPACK(),
