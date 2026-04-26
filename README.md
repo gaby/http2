@@ -107,6 +107,21 @@ handler := func(ctx *fasthttp.RequestCtx) {
 }
 ```
 
+## Server Push
+
+Handlers can initiate HTTP/2 server push for related resources:
+
+```go
+handler := func(ctx *fasthttp.RequestCtx) {
+    // Push is only available if the client supports it
+    if push, ok := ctx.UserValue(http2.PusherUserValueKey).(func(string, string)); ok {
+        push("GET", "/static/style.css")
+        push("GET", "/static/app.js")
+    }
+    ctx.SetBodyString("<html>...</html>")
+}
+```
+
 ## Server Configuration
 
 ```go
