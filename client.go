@@ -31,6 +31,13 @@ type ClientOpts struct {
 	// If MaxResponseTime is 0, DefaultMaxResponseTime will be used.
 	// If MaxResponseTime is <0, the max response timeout check will be disabled.
 	MaxResponseTime time.Duration
+
+	// MaxConns limits the maximum number of concurrent HTTP/2 connections
+	// the client will open to the host. A new connection is only created when
+	// all existing connections are at their max concurrent streams limit.
+	//
+	// A value of 0 means unlimited connections (the default).
+	MaxConns int
 }
 
 func (opts *ClientOpts) sanitize() {
@@ -120,6 +127,10 @@ func (cl *Client) createConn() (*Conn, *list.Element, error) {
 
 var ErrRequestCanceled = errors.New("request timed out")
 
+// ErrMaxConnsReached is returned when all connections are busy and the
+// MaxConns limit has been reached, preventing a new connection from being created.
+var ErrMaxConnsReached = errors.New("maximum number of HTTP/2 connections reached")
+
 func (cl *Client) RoundTrip(_ *fasthttp.HostClient, req *fasthttp.Request, res *fasthttp.Response) (retry bool, err error) {
 	var c *Conn
 
@@ -131,8 +142,13 @@ func (cl *Client) RoundTrip(_ *fasthttp.HostClient, req *fasthttp.Request, res *
 		if e != nil {
 			c = e.Value.(*Conn)
 		} else {
+			if cl.opts.MaxConns > 0 && cl.conns.Len() >= cl.opts.MaxConns {
+				cl.lck.Unlock()
+				return false, ErrMaxConnsReached
+			}
 			c, e, err = cl.createConn()
 			if err != nil {
+				cl.lck.Unlock()
 				return false, err
 			}
 		}
