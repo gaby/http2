@@ -55,13 +55,13 @@ type ConnOpts struct {
 	// A value of 0 uses the default of 200 ms.
 	WindowWaitTimeout time.Duration
 
-	// DisablePingChecking ...
-	DisablePingChecking bool
-
 	// WindowSize sets the connection-level flow control window size.
 	// A value of 0 uses the default of 1 MiB (1 << 20).
 	// Maximum value is 2^31 - 1.
 	WindowSize int32
+
+	// DisablePingChecking ...
+	DisablePingChecking bool
 
 	// EnableServerPush tells the server that this client supports server push.
 	// When false (default), SETTINGS_ENABLE_PUSH=0 is sent to prevent the server
@@ -128,14 +128,14 @@ type Conn struct {
 	onDisconnect func(*Conn)
 	onRTT        func(time.Duration)
 
-	lastRTT atomic.Int64 // nanoseconds
-
 	done chan struct{} // closed when writeLoop exits
 
 	reqQueued sync.Map
 
 	current Settings
 	serverS Settings
+
+	lastRTT atomic.Int64 // nanoseconds
 
 	pingInterval time.Duration
 
@@ -466,14 +466,14 @@ func (c *Conn) ServerWindow() int32 {
 // Stats returns a snapshot of connection statistics for monitoring.
 func (c *Conn) Stats() ConnStats {
 	return ConnStats{
-		ActiveStreams:      c.ActiveStreams(),
-		RTT:               c.RTT(),
-		ServerWindow:      c.ServerWindow(),
-		MaxStreams:         c.MaxConcurrentStreams(),
-		Closed:            c.Closed(),
-		UnackedPings:      atomic.LoadInt32(&c.unacks),
-		NextStreamID:      atomic.LoadUint32(&c.nextID),
-		PingInterval:      c.PingInterval(),
+		ActiveStreams: c.ActiveStreams(),
+		RTT:           c.RTT(),
+		ServerWindow:  c.ServerWindow(),
+		MaxStreams:    c.MaxConcurrentStreams(),
+		Closed:        c.Closed(),
+		UnackedPings:  atomic.LoadInt32(&c.unacks),
+		NextStreamID:  atomic.LoadUint32(&c.nextID),
+		PingInterval:  c.PingInterval(),
 	}
 }
 
@@ -481,9 +481,9 @@ func (c *Conn) Stats() ConnStats {
 type ConnStats struct {
 	RTT           time.Duration
 	PingInterval  time.Duration
-	ActiveStreams  int32
+	ActiveStreams int32
 	ServerWindow  int32
-	MaxStreams     uint32
+	MaxStreams    uint32
 	NextStreamID  uint32
 	UnackedPings  int32
 	Closed        bool

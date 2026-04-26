@@ -18,44 +18,6 @@ const defaultMaxHeaderListSize uint32 = 32 * 1024
 
 // ServerConfig holds the configuration for an HTTP/2 server.
 type ServerConfig struct {
-	// PingInterval is the interval at which the server will send a
-	// ping message to a client.
-	//
-	// To disable pings set the PingInterval to a negative value.
-	PingInterval time.Duration
-
-	// MaxConcurrentStreams is the maximum number of concurrent streams
-	// the server will allow per connection.
-	// A value of 0 uses the default of 1024.
-	MaxConcurrentStreams int
-
-	// Debug is a flag that will allow the library to print debugging information.
-	Debug bool
-
-	// MaxHeaderListSize is the maximum size of uncompressed header fields (sum of
-	// name + value + 32 bytes per field) that the server accepts per request.
-	// A value of 0 uses the default of 32 KiB.
-	MaxHeaderListSize uint32
-
-	// MaxFrameSize is the maximum size of a single HTTP/2 frame payload
-	// the server is willing to receive from the client.
-	// Valid range is 16384 (16 KiB) to 16777215 (16 MiB - 1).
-	// A value of 0 uses the default of 16384.
-	MaxFrameSize uint32
-
-	// EnqueueTimeout is the maximum duration the server will wait when the
-	// internal frame-write queue is full before dropping the frame.
-	// A value of 0 uses the default of 2 seconds.
-	EnqueueTimeout time.Duration
-
-	// MaxWindowSize is the connection-level flow control window size.
-	// A value of 0 uses the default of 4 MiB (1 << 22).
-	// Maximum value is 2^31 - 1 (2147483647).
-	MaxWindowSize int32
-
-	// HandshakeTimeout is the maximum time to wait for the HTTP/2 connection
-	// preface and settings exchange. A value of 0 uses the default of 5 seconds.
-	HandshakeTimeout time.Duration
 
 	// Logger overrides the logger used for HTTP/2 connection logging.
 	// If nil, fasthttp.Server.Logger is used (or a default stdout logger).
@@ -69,6 +31,44 @@ type ServerConfig struct {
 	// OnConnectionClosed is called when an HTTP/2 connection is closed.
 	// This callback can be used for cleanup and metrics.
 	OnConnectionClosed func(net.Conn)
+	// PingInterval is the interval at which the server will send a
+	// ping message to a client.
+	//
+	// To disable pings set the PingInterval to a negative value.
+	PingInterval time.Duration
+
+	// MaxConcurrentStreams is the maximum number of concurrent streams
+	// the server will allow per connection.
+	// A value of 0 uses the default of 1024.
+	MaxConcurrentStreams int
+
+	// EnqueueTimeout is the maximum duration the server will wait when the
+	// internal frame-write queue is full before dropping the frame.
+	// A value of 0 uses the default of 2 seconds.
+	EnqueueTimeout time.Duration
+
+	// HandshakeTimeout is the maximum time to wait for the HTTP/2 connection
+	// preface and settings exchange. A value of 0 uses the default of 5 seconds.
+	HandshakeTimeout time.Duration
+
+	// MaxHeaderListSize is the maximum size of uncompressed header fields (sum of
+	// name + value + 32 bytes per field) that the server accepts per request.
+	// A value of 0 uses the default of 32 KiB.
+	MaxHeaderListSize uint32
+
+	// MaxFrameSize is the maximum size of a single HTTP/2 frame payload
+	// the server is willing to receive from the client.
+	// Valid range is 16384 (16 KiB) to 16777215 (16 MiB - 1).
+	// A value of 0 uses the default of 16384.
+	MaxFrameSize uint32
+
+	// MaxWindowSize is the connection-level flow control window size.
+	// A value of 0 uses the default of 4 MiB (1 << 22).
+	// Maximum value is 2^31 - 1 (2147483647).
+	MaxWindowSize int32
+
+	// Debug is a flag that will allow the library to print debugging information.
+	Debug bool
 }
 
 func (sc *ServerConfig) defaults() {
@@ -109,14 +109,15 @@ func (sc *ServerConfig) defaults() {
 
 // Server defines an HTTP/2 entity that can handle HTTP/2 connections.
 type Server struct {
+	cnf ServerConfig
+
 	s *fasthttp.Server
 
-	cnf ServerConfig
+	conns map[*serverConn]struct{}
 
 	activeConns int64
 
-	mu    sync.Mutex
-	conns map[*serverConn]struct{}
+	mu sync.Mutex
 }
 
 // Config returns a copy of the server's current configuration.

@@ -39,15 +39,20 @@ type ClientOpts struct {
 	// A value of 0 means unlimited connections (the default).
 	MaxConns int
 
+	// DialTimeout sets a deadline for the TCP connection and TLS handshake
+	// when creating new connections. A value of 0 means no timeout.
+	DialTimeout time.Duration
+
+	// WindowSize sets the connection-level flow control window size for
+	// new connections. A value of 0 uses the default of 1 MiB (1 << 20).
+	// Maximum value is 2^31 - 1 (2147483647).
+	WindowSize int32
+
 	// DisablePingChecking disables the unacknowledged PING check.
 	// By default, the client closes connections that fail to respond
 	// to 3 consecutive PINGs. Set this to true for connections where
 	// the server may not respond to PINGs promptly.
 	DisablePingChecking bool
-
-	// DialTimeout sets a deadline for the TCP connection and TLS handshake
-	// when creating new connections. A value of 0 means no timeout.
-	DialTimeout time.Duration
 
 	// H2C enables cleartext HTTP/2 (prior knowledge) without TLS.
 	// When true, the client connects via plain TCP without TLS negotiation.
@@ -57,11 +62,6 @@ type ClientOpts struct {
 	// EnableServerPush enables receiving server push (PUSH_PROMISE) frames.
 	// When false (default), the client sends SETTINGS_ENABLE_PUSH=0 to the server.
 	EnableServerPush bool
-
-	// WindowSize sets the connection-level flow control window size for
-	// new connections. A value of 0 uses the default of 1 MiB (1 << 20).
-	// Maximum value is 2^31 - 1 (2147483647).
-	WindowSize int32
 }
 
 func (opts *ClientOpts) sanitize() {
