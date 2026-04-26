@@ -131,6 +131,13 @@ func (s *Server) ActiveConnections() int64 {
 	return atomic.LoadInt64(&s.activeConns)
 }
 
+// String returns a summary of the server state for debugging.
+func (s *Server) String() string {
+	return "Server{conns=" + uitoa(uint64(s.ActiveConnections())) +
+		", maxStreams=" + uitoa(uint64(s.cnf.MaxConcurrentStreams)) +
+		", ping=" + s.cnf.PingInterval.String() + "}"
+}
+
 // Shutdown gracefully shuts down all HTTP/2 connections by sending GOAWAY
 // frames and waiting for active streams to drain. It does not close the
 // underlying fasthttp.Server — call fasthttp.Server.Shutdown for that.
