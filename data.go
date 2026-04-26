@@ -107,8 +107,8 @@ func (data *Data) Deserialize(fr *FrameHeader) error {
 }
 
 // Serialize writes the DATA payload into the frame header.
+// When Padding() is true, padding is added via http2utils.AddPadding.
 func (data *Data) Serialize(fr *FrameHeader) {
-	// TODO: generate hasPadding and set to the frame payload
 	if data.endStream {
 		fr.SetFlags(
 			fr.Flags().Add(FlagEndStream))
