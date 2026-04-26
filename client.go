@@ -38,6 +38,12 @@ type ClientOpts struct {
 	//
 	// A value of 0 means unlimited connections (the default).
 	MaxConns int
+
+	// DisablePingChecking disables the unacknowledged PING check.
+	// By default, the client closes connections that fail to respond
+	// to 3 consecutive PINGs. Set this to true for connections where
+	// the server may not respond to PINGs promptly.
+	DisablePingChecking bool
 }
 
 func (opts *ClientOpts) sanitize() {
@@ -115,9 +121,10 @@ func (cl *Client) onConnectionDropped(c *Conn) {
 
 func (cl *Client) createConn() (*Conn, *list.Element, error) {
 	c, err := cl.d.Dial(ConnOpts{
-		PingInterval: cl.d.PingInterval,
-		OnDisconnect: cl.onConnectionDropped,
-		OnRTT:        cl.opts.OnRTT,
+		PingInterval:        cl.d.PingInterval,
+		OnDisconnect:        cl.onConnectionDropped,
+		OnRTT:               cl.opts.OnRTT,
+		DisablePingChecking: cl.opts.DisablePingChecking,
 	})
 	if err != nil {
 		return nil, nil, err
