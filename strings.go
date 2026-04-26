@@ -1,6 +1,9 @@
 package http2
 
-import "strconv"
+import (
+	"errors"
+	"strconv"
+)
 
 var (
 	StringPath          = []byte(":path")
@@ -57,6 +60,27 @@ func ToLower(b []byte) []byte {
 	}
 
 	return b
+}
+
+var errInvalidContentLength = errors.New("invalid content-length")
+
+// parseContentLength parses a non-negative integer from a byte slice
+// without allocating a string. Returns the parsed value and any error.
+func parseContentLength(b []byte) (int64, error) {
+	if len(b) == 0 {
+		return 0, errInvalidContentLength
+	}
+	var n int64
+	for _, c := range b {
+		if c < '0' || c > '9' {
+			return 0, errInvalidContentLength
+		}
+		n = n*10 + int64(c-'0')
+		if n < 0 { // overflow
+			return 0, errInvalidContentLength
+		}
+	}
+	return n, nil
 }
 
 const (
