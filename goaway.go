@@ -84,6 +84,12 @@ func (ga *GoAway) SetData(b []byte) {
 	ga.data = append(ga.data[:0], b...)
 }
 
+// SetDataString sets the optional debug data from a string without
+// an intermediate []byte allocation.
+func (ga *GoAway) SetDataString(s string) {
+	ga.data = append(ga.data[:0], s...)
+}
+
 // Deserialize reads a GOAWAY frame from the given frame header payload.
 func (ga *GoAway) Deserialize(fr *FrameHeader) (err error) {
 	if len(fr.payload) < 8 { // 8 is the min number of bytes

@@ -564,7 +564,7 @@ func (c *Conn) writeLoop() {
 			ga := AcquireFrame(FrameGoAway).(*GoAway)
 			ga.SetStream(0)
 			ga.SetCode(NoError)
-			ga.SetData([]byte(NoError.String()))
+			ga.SetDataString(NoError.String())
 			fr.SetBody(ga)
 			_, _ = fr.WriteTo(c.bw)
 			_ = c.bw.Flush()

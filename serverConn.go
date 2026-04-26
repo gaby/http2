@@ -1096,7 +1096,7 @@ func buildGoAwayFrame(strm uint32, code ErrorCode, message string) *FrameHeader 
 
 	ga.SetStream(strm)
 	ga.SetCode(code)
-	ga.SetData([]byte(message))
+	ga.SetDataString(message)
 
 	fr.SetBody(ga)
 	return fr
