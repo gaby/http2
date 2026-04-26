@@ -53,6 +53,11 @@ type ClientOpts struct {
 	// When true, the client connects via plain TCP without TLS negotiation.
 	// Use this for internal services or connections behind TLS-terminating proxies.
 	H2C bool
+
+	// WindowSize sets the connection-level flow control window size for
+	// new connections. A value of 0 uses the default of 1 MiB (1 << 20).
+	// Maximum value is 2^31 - 1 (2147483647).
+	WindowSize int32
 }
 
 func (opts *ClientOpts) sanitize() {
