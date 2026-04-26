@@ -54,6 +54,10 @@ type ClientOpts struct {
 	// Use this for internal services or connections behind TLS-terminating proxies.
 	H2C bool
 
+	// EnableServerPush enables receiving server push (PUSH_PROMISE) frames.
+	// When false (default), the client sends SETTINGS_ENABLE_PUSH=0 to the server.
+	EnableServerPush bool
+
 	// WindowSize sets the connection-level flow control window size for
 	// new connections. A value of 0 uses the default of 1 MiB (1 << 20).
 	// Maximum value is 2^31 - 1 (2147483647).
@@ -158,6 +162,7 @@ func (cl *Client) createConn() (*Conn, *list.Element, error) {
 		OnRTT:               cl.opts.OnRTT,
 		DisablePingChecking: cl.opts.DisablePingChecking,
 		WindowSize:          cl.opts.WindowSize,
+		EnableServerPush:    cl.opts.EnableServerPush,
 	})
 	if err != nil {
 		return nil, nil, err
