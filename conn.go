@@ -62,6 +62,11 @@ type ConnOpts struct {
 	// A value of 0 uses the default of 1 MiB (1 << 20).
 	// Maximum value is 2^31 - 1.
 	WindowSize int32
+
+	// EnableServerPush tells the server that this client supports server push.
+	// When false (default), SETTINGS_ENABLE_PUSH=0 is sent to prevent the server
+	// from sending PUSH_PROMISE frames.
+	EnableServerPush bool
 }
 
 // Handshake performs an HTTP/2 handshake. It sends the preface (if requested),
@@ -193,7 +198,7 @@ func NewConn(c net.Conn, opts ConnOpts) *Conn {
 	nc.windowCond = sync.NewCond(&nc.windowMu)
 
 	nc.current.SetMaxWindowSize(uint32(winSize))
-	nc.current.SetPush(false)
+	nc.current.SetPush(opts.EnableServerPush)
 
 	return nc
 }
