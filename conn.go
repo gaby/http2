@@ -423,6 +423,15 @@ func (c *Conn) ActiveStreams() int32 {
 	return atomic.LoadInt32(&c.openStreams)
 }
 
+// MaxConcurrentStreams returns the maximum number of concurrent streams
+// allowed by the server on this connection.
+func (c *Conn) MaxConcurrentStreams() uint32 {
+	c.serverSMu.RLock()
+	n := c.serverS.maxStreams
+	c.serverSMu.RUnlock()
+	return n
+}
+
 // Closed indicates whether the connection is closed or not.
 func (c *Conn) Closed() bool {
 	return atomic.LoadUint64(&c.closed) == 1
