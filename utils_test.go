@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"math/bits"
+	"net"
 	"strings"
 	"testing"
 
@@ -549,4 +550,29 @@ func TestHeadersDeserializePaddedError(t *testing.T) {
 	fr.length = 1
 	err := h.Deserialize(fr)
 	require.Error(t, err)
+}
+
+func TestConnectionClosedErrorInterface(t *testing.T) {
+	var err error = ErrConnectionClosed
+
+	// Error() string
+	require.Equal(t, "http2: connection closed", err.Error())
+
+	// Timeout() and Temporary() via net.Error assertion
+	var netErr net.Error
+	require.True(t, errors.As(err, &netErr), "should implement net.Error")
+	require.False(t, netErr.Timeout(), "should not be a timeout error")
+
+	// Unwrap → net.ErrClosed
+	require.ErrorIs(t, err, net.ErrClosed, "should wrap net.ErrClosed")
+}
+
+func TestErrorErrorMethod(t *testing.T) {
+	// The Error.Error() method at errors.go:151 formats "code: debug"
+	// Note: code.String() is used by fmt.Sprintf %s, which calls Error() on ErrorCode
+	e := NewError(ProtocolError, "bad request")
+	require.Equal(t, "Protocol error: bad request", e.Error())
+
+	e2 := NewGoAwayError(InternalError, "internal failure")
+	require.Equal(t, "Internal error: internal failure", e2.Error())
 }
