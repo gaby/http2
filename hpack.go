@@ -175,13 +175,14 @@ func (hp *HPACK) search(hf *HeaderField) (n uint64, fullMatch bool) {
 	}
 
 	if n == 0 {
-		for i, hf2 := range staticTable {
-			if bytes.Equal(hf.key, hf2.key) {
-				if fullMatch = bytes.Equal(hf.value, hf2.value); fullMatch {
+		// Use the hash map for O(1) key lookup in the static table.
+		if indices, ok := staticTableByKey[string(hf.key)]; ok {
+			for _, i := range indices {
+				if bytes.Equal(hf.value, staticTable[i].value) {
 					n = uint64(i + 1)
-					break
+					fullMatch = true
+					return
 				}
-
 				if n == 0 {
 					n = uint64(i + 1)
 				}
@@ -609,3 +610,15 @@ var staticTable = []*HeaderField{ // entry + 1
 
 // maxIndex defines the maximum index number of the static table.
 const maxIndex = 62
+
+// staticTableByKey maps header names to their indices (1-based) in the static
+// table for O(1) lookup instead of linear scan.
+var staticTableByKey map[string][]int
+
+func init() {
+	staticTableByKey = make(map[string][]int, 40)
+	for i, hf := range staticTable {
+		key := string(hf.key)
+		staticTableByKey[key] = append(staticTableByKey[key], i)
+	}
+}
