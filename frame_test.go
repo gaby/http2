@@ -628,6 +628,20 @@ func TestGoAwayCopyHelpers(t *testing.T) {
 	require.Equal(t, target.Data(), cloned.Data())
 }
 
+func TestGoAwaySetDataString(t *testing.T) {
+	ga := &GoAway{}
+	ga.SetDataString("hello world")
+	require.Equal(t, []byte("hello world"), ga.Data())
+
+	// Overwrite with shorter string
+	ga.SetDataString("hi")
+	require.Equal(t, []byte("hi"), ga.Data())
+
+	// Empty string
+	ga.SetDataString("")
+	require.Empty(t, ga.Data())
+}
+
 func TestPushPromiseRoundTrip(t *testing.T) {
 	fr := AcquireFrameHeader()
 	defer ReleaseFrameHeader(fr)
