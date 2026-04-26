@@ -308,6 +308,64 @@ func TestIssue27(t *testing.T) {
 	readReset(7)
 }
 
+func TestH2CRoundTrip(t *testing.T) {
+	s := &Server{
+		s: &fasthttp.Server{
+			Handler: func(ctx *fasthttp.RequestCtx) {
+				ctx.SetBodyString("h2c works")
+			},
+		},
+	}
+
+	c, ln, err := getConn(s)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		c.Close()
+		ln.Close()
+	})
+
+	headers := makeHeaders(1, c.enc, true, true, map[string]string{
+		string(StringAuthority): "localhost",
+		string(StringMethod):    "GET",
+		string(StringPath):      "/test",
+		string(StringScheme):    "http", // h2c uses http, not https
+	})
+
+	require.NoError(t, c.writeFrame(headers))
+
+	require.NoError(t, c.c.SetReadDeadline(time.Now().Add(5*time.Second)))
+	defer c.c.SetReadDeadline(time.Time{})
+
+	var gotHeaders, gotData bool
+	var body []byte
+
+	for !gotData {
+		fr, err := c.readNext()
+		require.NoError(t, err)
+
+		if fr.Stream() != 1 {
+			ReleaseFrameHeader(fr)
+			continue
+		}
+
+		switch fr.Type() {
+		case FrameHeaders:
+			gotHeaders = true
+		case FrameData:
+			data := fr.Body().(*Data)
+			body = append(body, data.Data()...)
+			if fr.Flags().Has(FlagEndStream) {
+				gotData = true
+			}
+		}
+
+		ReleaseFrameHeader(fr)
+	}
+
+	require.True(t, gotHeaders, "expected response headers")
+	require.Equal(t, "h2c works", string(body))
+}
+
 func TestIdleConnection(t *testing.T) {
 	s := &Server{
 		s: &fasthttp.Server{
