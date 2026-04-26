@@ -100,6 +100,52 @@ func TestSettingsAckSerialize(t *testing.T) {
 	require.Empty(t, fr.payload, "ACK settings should have empty payload")
 }
 
+func TestSettingsString(t *testing.T) {
+	st := &Settings{}
+	st.SetHeaderTableSize(4096)
+	st.SetMaxConcurrentStreams(100)
+	st.SetMaxWindowSize(65535)
+	st.SetMaxFrameSize(16384)
+
+	s := st.String()
+	require.Contains(t, s, "tableSize=4096")
+	require.Contains(t, s, "maxStreams=100")
+	require.Contains(t, s, "windowSize=65535")
+	require.Contains(t, s, "frameSize=16384")
+}
+
+func TestSettingsHasMaxWindowSize(t *testing.T) {
+	st := &Settings{}
+	st.Reset()
+	require.False(t, st.HasMaxWindowSize(), "should be false after reset")
+
+	st.SetMaxWindowSize(65535)
+	require.True(t, st.HasMaxWindowSize(), "should be true after SetMaxWindowSize")
+}
+
+func TestSettingsCopyTo(t *testing.T) {
+	original := &Settings{}
+	original.SetHeaderTableSize(8192)
+	original.SetPush(true)
+	original.SetMaxConcurrentStreams(200)
+	original.SetMaxWindowSize(1 << 20)
+	original.SetMaxFrameSize(1 << 16)
+	original.SetMaxHeaderListSize(4096)
+	original.SetAck(true)
+
+	var copy Settings
+	original.CopyTo(&copy)
+
+	require.Equal(t, original.HeaderTableSize(), copy.HeaderTableSize())
+	require.Equal(t, original.Push(), copy.Push())
+	require.Equal(t, original.MaxConcurrentStreams(), copy.MaxConcurrentStreams())
+	require.Equal(t, original.MaxWindowSize(), copy.MaxWindowSize())
+	require.Equal(t, original.HasMaxWindowSize(), copy.HasMaxWindowSize())
+	require.Equal(t, original.MaxFrameSize(), copy.MaxFrameSize())
+	require.Equal(t, original.MaxHeaderListSize(), copy.MaxHeaderListSize())
+	require.Equal(t, original.IsAck(), copy.IsAck())
+}
+
 func TestSettingsInvalidValues(t *testing.T) {
 	fr := AcquireFrameHeader()
 	defer ReleaseFrameHeader(fr)
