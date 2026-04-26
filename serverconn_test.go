@@ -714,11 +714,22 @@ func TestSettingsInitialWindowIncreaseFlushesPendingData(t *testing.T) {
 	}
 	require.True(t, gotHeaders, "expected response headers before expanding window")
 
+	// The server handler runs in handleStreams; by the time we read the
+	// HEADERS frame the handler has returned and enqueueFrame was called,
+	// but queueData (which stores pending body data) may still be running
+	// on slow CI. Re-send SETTINGS periodically so at least one arrives
+	// after the server has finished queuing the pending data.
 	sendSettings(1)
 
 	deadline = time.Now().Add(30 * time.Second)
+	nextResend := time.Now().Add(500 * time.Millisecond)
 	var dataFrame *FrameHeader
 	for time.Now().Before(deadline) && dataFrame == nil {
+		if time.Now().After(nextResend) {
+			sendSettings(1)
+			nextResend = time.Now().Add(500 * time.Millisecond)
+		}
+
 		fr, err := readNextWithRetry()
 		if fr == nil && err == nil {
 			continue
