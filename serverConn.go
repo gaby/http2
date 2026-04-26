@@ -1648,10 +1648,90 @@ func (sc *serverConn) verifyState(strm *Stream, fr *FrameHeader) error {
 //	})
 const TrailerUserValueKey = "h2-trailers"
 
+// PusherUserValueKey is the key used to access the server push function
+// from within a request handler. The value is a func(method, path string)
+// that sends a PUSH_PROMISE to the client:
+//
+//	push := ctx.UserValue(http2.PusherUserValueKey).(func(string, string))
+//	push("GET", "/static/style.css")
+//
+// Push is only available when the client has not disabled push via
+// SETTINGS_ENABLE_PUSH=0.
+const PusherUserValueKey = "h2-pusher"
+
+// sendPushPromise sends a PUSH_PROMISE frame on the parent stream,
+// advertising a server push for the given method and path.
+func (sc *serverConn) sendPushPromise(parentStrm *Stream, method, path string) {
+	promisedID := sc.nextServerStreamID()
+
+	fr := AcquireFrameHeader()
+	fr.SetStream(parentStrm.ID())
+
+	pp := AcquireFrame(FramePushPromise).(*PushPromise)
+	pp.SetStream(promisedID)
+	pp.SetEndHeaders(true)
+	pp.SetPadding(false)
+
+	// Encode the promised request pseudo-headers into the header block
+	hf := AcquireHeaderField()
+	var headerBuf []byte
+
+	sc.encMu.Lock()
+	hf.SetBytes(StringMethod, []byte(method))
+	headerBuf = sc.enc.AppendHeader(headerBuf, hf, true)
+
+	hf.SetBytes(StringPath, []byte(path))
+	headerBuf = sc.enc.AppendHeader(headerBuf, hf, true)
+
+	hf.SetBytes(StringScheme, parentStrm.scheme)
+	headerBuf = sc.enc.AppendHeader(headerBuf, hf, true)
+
+	host := parentStrm.ctx.Request.Header.Peek("Host")
+	if len(host) > 0 {
+		hf.SetBytes(StringAuthority, host)
+		headerBuf = sc.enc.AppendHeader(headerBuf, hf, true)
+	}
+	sc.encMu.Unlock()
+
+	ReleaseHeaderField(hf)
+	pp.SetHeader(headerBuf)
+
+	fr.SetBody(pp)
+	sc.enqueueFrame(fr)
+}
+
+// nextServerStreamID returns the next even-numbered stream ID for server push.
+func (sc *serverConn) nextServerStreamID() uint32 {
+	sc.streamsMu.Lock()
+	// Find the highest even stream ID
+	var maxID uint32
+	for id := range sc.streams {
+		if id%2 == 0 && id > maxID {
+			maxID = id
+		}
+	}
+	next := maxID + 2
+	if next < 2 {
+		next = 2
+	}
+	sc.streamsMu.Unlock()
+	return next
+}
+
 // handleEndRequest dispatches the finished request to the handler.
 func (sc *serverConn) handleEndRequest(strm *Stream) {
 	ctx := strm.ctx
 	ctx.Request.Header.SetProtocolBytes(StringHTTP2)
+
+	// Provide push capability if the client supports it
+	sc.clientSMu.Lock()
+	pushEnabled := sc.clientS.Push()
+	sc.clientSMu.Unlock()
+	if pushEnabled {
+		ctx.SetUserValue(PusherUserValueKey, func(method, path string) {
+			sc.sendPushPromise(strm, method, path)
+		})
+	}
 
 	sc.h(ctx)
 
