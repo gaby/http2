@@ -1712,9 +1712,23 @@ func (sc *serverConn) sendTrailers(strm *Stream, trailers map[string]string) {
 
 	hf := AcquireHeaderField()
 
+	// Use a stack buffer for key lowercasing to avoid per-trailer allocations.
+	var keyBuf [64]byte
+
 	sc.encMu.Lock()
 	for k, v := range trailers {
-		hf.SetBytes(ToLower([]byte(k)), []byte(v))
+		// Lowercase the key using a stack buffer when possible.
+		var lk []byte
+		if len(k) <= len(keyBuf) {
+			lk = keyBuf[:len(k)]
+		} else {
+			lk = make([]byte, len(k))
+		}
+		copy(lk, k)
+		ToLower(lk)
+
+		hf.SetKeyBytes(lk)
+		hf.SetValue(v)
 		sc.enc.AppendHeaderField(h, hf, false)
 	}
 	sc.encMu.Unlock()
