@@ -366,6 +366,73 @@ func TestH2CRoundTrip(t *testing.T) {
 	require.Equal(t, "h2c works", string(body))
 }
 
+func TestResponseTrailers(t *testing.T) {
+	s := &Server{
+		s: &fasthttp.Server{
+			Handler: func(ctx *fasthttp.RequestCtx) {
+				ctx.SetBodyString("body")
+				ctx.SetUserValue(TrailerUserValueKey, map[string]string{
+					"grpc-status":  "0",
+					"grpc-message": "OK",
+				})
+			},
+		},
+	}
+
+	c, ln, err := getConn(s)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		c.Close()
+		ln.Close()
+	})
+
+	headers := makeHeaders(1, c.enc, true, true, map[string]string{
+		string(StringAuthority): "localhost",
+		string(StringMethod):    "POST",
+		string(StringPath):      "/rpc",
+		string(StringScheme):    "https",
+	})
+
+	require.NoError(t, c.writeFrame(headers))
+
+	require.NoError(t, c.c.SetReadDeadline(time.Now().Add(5*time.Second)))
+	defer c.c.SetReadDeadline(time.Time{})
+
+	var gotResponseHeaders, gotData, gotTrailers bool
+	var body []byte
+
+	for !gotTrailers {
+		fr, err := c.readNext()
+		require.NoError(t, err)
+
+		if fr.Stream() != 1 {
+			ReleaseFrameHeader(fr)
+			continue
+		}
+
+		switch fr.Type() {
+		case FrameHeaders:
+			if !gotResponseHeaders {
+				gotResponseHeaders = true
+			} else {
+				// Second HEADERS frame = trailers
+				gotTrailers = true
+				require.True(t, fr.Flags().Has(FlagEndStream), "trailer HEADERS must have END_STREAM")
+			}
+		case FrameData:
+			data := fr.Body().(*Data)
+			body = append(body, data.Data()...)
+			gotData = true
+		}
+
+		ReleaseFrameHeader(fr)
+	}
+
+	require.True(t, gotResponseHeaders, "expected response headers")
+	require.True(t, gotData, "expected data")
+	require.Equal(t, "body", string(body))
+}
+
 func TestIdleConnection(t *testing.T) {
 	s := &Server{
 		s: &fasthttp.Server{
