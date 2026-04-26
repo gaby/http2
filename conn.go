@@ -970,8 +970,7 @@ func (c *Conn) readStream(fr *FrameHeader, res *fasthttp.Response) (err error) {
 		data := fr.Body().(*Data)
 		bytesConsumed := fr.Len()
 
-		c.currentWindow -= int32(bytesConsumed)
-		currentWin := c.currentWindow
+		currentWin := atomic.AddInt32(&c.currentWindow, -int32(bytesConsumed))
 
 		atomic.AddInt32(&c.serverWindow, -int32(bytesConsumed))
 
@@ -987,7 +986,7 @@ func (c *Conn) readStream(fr *FrameHeader, res *fasthttp.Response) (err error) {
 		if currentWin < c.maxWindow/2 {
 			nValue := c.maxWindow - currentWin
 
-			c.currentWindow = c.maxWindow
+			atomic.StoreInt32(&c.currentWindow, c.maxWindow)
 
 			c.updateWindow(0, int(nValue))
 		}
