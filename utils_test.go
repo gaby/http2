@@ -127,6 +127,21 @@ func TestClientOptsString(t *testing.T) {
 	require.Contains(t, s, "push=false")
 }
 
+func TestClientOptionsSanitizeWindowSizeClamping(t *testing.T) {
+	opts := ClientOpts{WindowSize: -1}
+	opts.sanitize()
+	require.Equal(t, int32(0), opts.WindowSize, "negative window should be reset to 0")
+
+	// maxWindowIncrement is int32 max, so we can only test the max value
+	opts = ClientOpts{WindowSize: maxWindowIncrement}
+	opts.sanitize()
+	require.Equal(t, int32(maxWindowIncrement), opts.WindowSize, "max window should be kept")
+
+	opts = ClientOpts{WindowSize: 1 << 20}
+	opts.sanitize()
+	require.Equal(t, int32(1<<20), opts.WindowSize, "valid window should be kept")
+}
+
 func TestClientOptionsSanitize(t *testing.T) {
 	opts := ClientOpts{}
 	opts.sanitize()
