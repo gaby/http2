@@ -458,6 +458,17 @@ func (c *Conn) MaxConcurrentStreams() uint32 {
 	return n
 }
 
+// PingInterval returns the interval at which the connection sends PING frames
+// to the peer. If the connection was created with a zero or negative interval,
+// DefaultPingInterval is used once the write loop starts; this accessor
+// reflects the currently configured value.
+func (c *Conn) PingInterval() time.Duration {
+	if c.pingInterval <= 0 {
+		return DefaultPingInterval
+	}
+	return c.pingInterval
+}
+
 // Closed indicates whether the connection is closed or not.
 func (c *Conn) Closed() bool {
 	return atomic.LoadUint64(&c.closed) == 1

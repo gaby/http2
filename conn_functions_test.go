@@ -82,6 +82,20 @@ func TestConnWriteToClosedConn(t *testing.T) {
 	}
 }
 
+func TestConnPingInterval(t *testing.T) {
+	// Default interval when not set
+	conn := NewConn(&stubConn{}, ConnOpts{})
+	require.Equal(t, DefaultPingInterval, conn.PingInterval())
+
+	// Custom interval
+	conn2 := NewConn(&stubConn{}, ConnOpts{PingInterval: 5 * time.Second})
+	require.Equal(t, 5*time.Second, conn2.PingInterval())
+
+	// Negative interval returns default
+	conn3 := NewConn(&stubConn{}, ConnOpts{PingInterval: -1})
+	require.Equal(t, DefaultPingInterval, conn3.PingInterval())
+}
+
 func TestConnPublicAccessors(t *testing.T) {
 	conn := NewConn(&stubConn{}, ConnOpts{})
 
