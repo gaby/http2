@@ -454,17 +454,32 @@ var (
 	ErrDynamicUpdateMaxTableSize = errors.New("dynamic update is over the max table")
 )
 
+// huffmanEncodedLen returns the byte length of src after Huffman encoding,
+// without actually encoding. Used to decide whether encoding is worthwhile.
+func huffmanEncodedLen(src []byte) int {
+	var bits uint64
+	for _, b := range src {
+		bits += uint64(huffmanCodeLen[b])
+	}
+	return int((bits + 7) / 8)
+}
+
 // appendString writes bytes slice to dst and returns it.
 // https://tools.ietf.org/html/rfc7541#section-5.2
 func appendString(dst, src []byte, encode bool) []byte {
 	var b []byte
-	if !encode {
-		b = src
+	if encode {
+		// Only Huffman-encode when the result is not longer than the original.
+		if huffmanEncodedLen(src) <= len(src) {
+			b = bytePool.Get().([]byte)
+			b = HuffmanEncode(b[:0], src)
+		} else {
+			encode = false
+			b = src
+		}
 	} else {
-		b = bytePool.Get().([]byte)
-		b = HuffmanEncode(b[:0], src)
+		b = src
 	}
-	// TODO: Encode only if length is lower with the string encoded
 
 	n := uint64(len(b))
 	nn := len(dst) - 1 // peek last byte
