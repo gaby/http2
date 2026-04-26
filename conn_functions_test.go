@@ -193,6 +193,61 @@ func TestConnStats(t *testing.T) {
 	require.Equal(t, uint32(1), stats.NextStreamID) // initial nextID is 1
 }
 
+func TestConnStatsString(t *testing.T) {
+	stats := ConnStats{
+		ActiveStreams: 5,
+		MaxStreams:    100,
+		ServerWindow:  65535,
+		RTT:           10 * time.Millisecond,
+		UnackedPings:  1,
+		Closed:        false,
+	}
+	s := stats.String()
+	require.Contains(t, s, "state=open")
+	require.Contains(t, s, "streams=5/100")
+	require.Contains(t, s, "window=65535")
+
+	stats.Closed = true
+	s = stats.String()
+	require.Contains(t, s, "state=closed")
+}
+
+func TestTrySendOutNilDone(t *testing.T) {
+	// When done is nil, trySendOut uses non-blocking send
+	conn := &Conn{
+		out: make(chan *FrameHeader, 1),
+	}
+
+	fr := AcquireFrameHeader()
+	conn.trySendOut(fr)
+
+	// Frame should be in the out channel
+	select {
+	case got := <-conn.out:
+		require.Same(t, fr, got)
+		ReleaseFrameHeader(got)
+	default:
+		t.Fatal("expected frame in out channel")
+	}
+
+	// When out channel is full and done is nil, frame is released
+	conn.out = make(chan *FrameHeader) // unbuffered = always full for non-blocking
+	fr2 := AcquireFrameHeader()
+	conn.trySendOut(fr2) // should not block, frame is released
+}
+
+func TestTrySendOutDoneClosed(t *testing.T) {
+	// When done is closed, trySendOut should release the frame
+	conn := &Conn{
+		out:  make(chan *FrameHeader), // unbuffered
+		done: make(chan struct{}),
+	}
+	close(conn.done)
+
+	fr := AcquireFrameHeader()
+	conn.trySendOut(fr) // should not block
+}
+
 func BenchmarkParseUintBytes(b *testing.B) {
 	data := []byte("200")
 	b.ReportAllocs()
