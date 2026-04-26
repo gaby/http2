@@ -2201,13 +2201,9 @@ func addAndClampWindow(window *int64, inc int64) (int64, error) {
 
 	for {
 		current := atomic.LoadInt64(window)
-		if current >= maxWindowSize {
-			return maxWindowSize, nil
-		}
 
-		if current > maxWindowSize-inc {
-			atomic.StoreInt64(window, maxWindowSize)
-			return maxWindowSize, errWindowSizeOverflow
+		if current+inc > maxWindowSize {
+			return current, errWindowSizeOverflow
 		}
 
 		next := current + inc

@@ -400,7 +400,8 @@ func TestConnectionWindowUpdateOverflowSendsFlowControlGoAway(t *testing.T) {
 	require.ErrorAs(t, err, &h2Err)
 	require.Equal(t, FlowControlError, h2Err.Code())
 	require.Equal(t, FrameGoAway, h2Err.frameType)
-	require.EqualValues(t, maxWindowIncrement, atomic.LoadInt64(&sc.clientWindow))
+	// The window should NOT be modified on overflow — the original value is preserved
+	require.EqualValues(t, int64(sc.clientS.MaxWindowSize()), atomic.LoadInt64(&sc.clientWindow))
 
 	fr := <-sc.writer
 	require.Equal(t, FrameSettings, fr.Type())
@@ -551,7 +552,8 @@ func TestStreamWindowUpdateOverflowResetsStream(t *testing.T) {
 	require.ErrorAs(t, err, &h2Err)
 	require.Equal(t, FlowControlError, h2Err.Code())
 	require.Equal(t, FrameResetStream, h2Err.frameType)
-	require.EqualValues(t, maxWindowIncrement, atomic.LoadInt64(&strm.sendWindow))
+	// The window should NOT be modified on overflow — the original value is preserved
+	require.EqualValues(t, int64(defaultWindowSize), atomic.LoadInt64(&strm.sendWindow))
 
 	sc.writeError(strm, err)
 	out := <-sc.writer
