@@ -210,34 +210,46 @@ type Dialer struct {
 	// Timeout sets a deadline for the TCP connection and TLS handshake.
 	// A value of 0 means no timeout (the default).
 	Timeout time.Duration
+
+	// H2C enables cleartext HTTP/2 (prior knowledge) without TLS.
+	// When true, the Dialer connects via plain TCP and skips TLS negotiation.
+	H2C bool
 }
 
-func (d *Dialer) tryDial() (net.Conn, error) {
-	if d.TLSConfig == nil || !slices.Contains(d.TLSConfig.NextProtos, "h2") {
-		configureDialer(d)
-	}
-
+func (d *Dialer) dialTCP() (net.Conn, error) {
 	var c net.Conn
 	var err error
 
 	if d.NetDial != nil {
 		c, err = d.NetDial(d.Addr)
-		if err != nil {
-			return nil, err
-		}
+	} else if d.Timeout > 0 {
+		c, err = net.DialTimeout("tcp", d.Addr, d.Timeout)
 	} else {
-		if d.Timeout > 0 {
-			c, err = net.DialTimeout("tcp", d.Addr, d.Timeout)
-		} else {
-			tcpAddr, err := net.ResolveTCPAddr("tcp", d.Addr)
-			if err != nil {
-				return nil, err
-			}
-			c, err = net.DialTCP("tcp", nil, tcpAddr)
-		}
+		tcpAddr, err := net.ResolveTCPAddr("tcp", d.Addr)
 		if err != nil {
 			return nil, err
 		}
+		c, err = net.DialTCP("tcp", nil, tcpAddr)
+		if err != nil {
+			return nil, err
+		}
+		return c, nil
+	}
+	return c, err
+}
+
+func (d *Dialer) tryDial() (net.Conn, error) {
+	if d.H2C {
+		return d.dialTCP()
+	}
+
+	if d.TLSConfig == nil || !slices.Contains(d.TLSConfig.NextProtos, "h2") {
+		configureDialer(d)
+	}
+
+	c, err := d.dialTCP()
+	if err != nil {
+		return nil, err
 	}
 
 	if d.Timeout > 0 {
