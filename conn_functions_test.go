@@ -179,6 +179,20 @@ func TestConnPublicAccessors(t *testing.T) {
 	require.False(t, conn.Closed())
 }
 
+func TestConnStats(t *testing.T) {
+	conn := NewConn(&stubConn{}, ConnOpts{})
+	conn.serverS.SetMaxConcurrentStreams(42)
+	atomic.AddInt32(&conn.openStreams, 3)
+
+	stats := conn.Stats()
+	require.Equal(t, int32(3), stats.ActiveStreams)
+	require.Equal(t, uint32(42), stats.MaxStreams)
+	require.False(t, stats.Closed)
+	require.Equal(t, int32(defaultWindowSize), stats.ServerWindow)
+	require.Equal(t, time.Duration(0), stats.RTT)
+	require.Equal(t, uint32(1), stats.NextStreamID) // initial nextID is 1
+}
+
 func BenchmarkParseUintBytes(b *testing.B) {
 	data := []byte("200")
 	b.ReportAllocs()

@@ -199,3 +199,20 @@ func TestClientTransportClose(t *testing.T) {
 	// After Close, the client's connection list should be empty
 	require.Equal(t, 0, client.conns.Len())
 }
+
+func TestGetClientTransport(t *testing.T) {
+	// When transport is a ClientTransport, it should be returned
+	cl := createClient(&Dialer{}, ClientOpts{MaxResponseTime: -1})
+	ct := &ClientTransport{client: cl}
+
+	hc := &fasthttp.HostClient{
+		Transport: ct,
+	}
+
+	got := GetClientTransport(hc)
+	require.Same(t, ct, got)
+
+	// When transport is nil or something else, return nil
+	hc2 := &fasthttp.HostClient{}
+	require.Nil(t, GetClientTransport(hc2))
+}
