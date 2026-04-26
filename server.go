@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"net"
+	"sync/atomic"
 	"time"
 
 	"github.com/valyala/fasthttp"
@@ -78,12 +79,21 @@ type Server struct {
 	s *fasthttp.Server
 
 	cnf ServerConfig
+
+	activeConns int64
+}
+
+// ActiveConnections returns the number of currently active HTTP/2 connections.
+func (s *Server) ActiveConnections() int64 {
+	return atomic.LoadInt64(&s.activeConns)
 }
 
 // ServeConn starts serving a net.Conn as HTTP/2.
 //
 // This function will fail if the connection does not support the HTTP/2 protocol.
 func (s *Server) ServeConn(c net.Conn) error {
+	atomic.AddInt64(&s.activeConns, 1)
+	defer atomic.AddInt64(&s.activeConns, -1)
 	defer func() { _ = c.Close() }()
 
 	// Bound the TLS/preface handshake to avoid hangs on misbehaving clients.
