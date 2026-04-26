@@ -64,6 +64,22 @@ type ClientOpts struct {
 	EnableServerPush bool
 }
 
+// String returns a human-readable representation of the client options.
+func (opts ClientOpts) String() string {
+	return "ClientOpts{ping=" + opts.PingInterval.String() +
+		", maxResp=" + opts.MaxResponseTime.String() +
+		", maxConns=" + uitoa(uint64(opts.MaxConns)) +
+		", h2c=" + boolStr(opts.H2C) +
+		", push=" + boolStr(opts.EnableServerPush) + "}"
+}
+
+func boolStr(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
+}
+
 func (opts *ClientOpts) sanitize() {
 	if opts.MaxResponseTime == 0 {
 		opts.MaxResponseTime = DefaultMaxResponseTime
