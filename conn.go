@@ -9,13 +9,28 @@ import (
 	"io"
 	"net"
 	"slices"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/valyala/fasthttp"
 )
+
+// parseUintBytes parses an unsigned integer from a byte slice without
+// allocating a string. Returns the parsed value and any error.
+func parseUintBytes(b []byte) (int, error) {
+	if len(b) == 0 {
+		return 0, errors.New("empty number")
+	}
+	n := 0
+	for _, c := range b {
+		if c < '0' || c > '9' {
+			return 0, fmt.Errorf("invalid digit: %c", c)
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n, nil
+}
 
 // windowWaitTimeout is the maximum duration to wait for flow control window credit
 // before giving up and returning a flow control–related error.
@@ -1064,18 +1079,18 @@ func (c *Conn) readHeader(b []byte, res *fasthttp.Response) error {
 
 		if hf.IsPseudo() {
 			if hf.KeyBytes()[1] == 's' { // status
-				n, err := strconv.ParseInt(hf.Value(), 10, 64)
+				n, err := parseUintBytes(hf.ValueBytes())
 				if err != nil {
 					return err
 				}
 
-				res.SetStatusCode(int(n))
+				res.SetStatusCode(n)
 				continue
 			}
 		}
 
 		if bytes.Equal(hf.KeyBytes(), StringContentLength) {
-			n, _ := strconv.Atoi(hf.Value())
+			n, _ := parseUintBytes(hf.ValueBytes())
 			res.Header.SetContentLength(n)
 		} else {
 			res.Header.AddBytesKV(hf.KeyBytes(), hf.ValueBytes())
