@@ -1711,10 +1711,7 @@ func (sc *serverConn) nextServerStreamID() uint32 {
 			maxID = id
 		}
 	}
-	next := maxID + 2
-	if next < 2 {
-		next = 2
-	}
+	next := max(maxID+2, 2)
 	sc.streamsMu.Unlock()
 	return next
 }
