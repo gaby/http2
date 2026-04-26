@@ -47,6 +47,15 @@ type ServerConfig struct {
 	// internal frame-write queue is full before dropping the frame.
 	// A value of 0 uses the default of 2 seconds.
 	EnqueueTimeout time.Duration
+
+	// OnNewConnection is called when a new HTTP/2 connection is established.
+	// The net.Conn parameter is the underlying connection (may be TLS or plain TCP).
+	// This callback can be used for logging, metrics, or connection-level setup.
+	OnNewConnection func(net.Conn)
+
+	// OnConnectionClosed is called when an HTTP/2 connection is closed.
+	// This callback can be used for cleanup and metrics.
+	OnConnectionClosed func(net.Conn)
 }
 
 func (sc *ServerConfig) defaults() {
@@ -151,7 +160,14 @@ func (s *Server) ServeConn(c net.Conn) error {
 		s.mu.Lock()
 		delete(s.conns, sc)
 		s.mu.Unlock()
+		if s.cnf.OnConnectionClosed != nil {
+			s.cnf.OnConnectionClosed(c)
+		}
 	}()
+
+	if s.cnf.OnNewConnection != nil {
+		s.cnf.OnNewConnection(c)
+	}
 
 	// Clear handshake deadline now that the connection is initialized.
 	_ = c.SetDeadline(time.Time{})
