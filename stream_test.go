@@ -80,3 +80,53 @@ func TestStreamHelpers(t *testing.T) {
 	require.Equal(t, int32(20), stream.SendWindow())
 	require.Same(t, ctx, stream.Ctx())
 }
+
+func TestNewStreamResetsAllFields(t *testing.T) {
+	// First allocation — set some non-default values
+	s := NewStream(1, 100, 200)
+	s.headersFinished = true
+	s.pendingEndStream = true
+	s.responseStarted = true
+	s.responseEnded = true
+	s.isTrailer = true
+	s.seenMethod = true
+	s.seenScheme = true
+	s.seenPath = true
+	s.seenAuthority = true
+	s.isConnect = true
+	s.regularHeaderSeen = true
+	s.contentLength = 42
+	s.bodyBytesReceived = 42
+	s.headerBlockNum = 5
+	s.headerListSize = 999
+	s.previousHeaderBytes = append(s.previousHeaderBytes, 1, 2, 3)
+	s.pendingData = append(s.pendingData, 4, 5, 6)
+
+	// Return to pool via NewStream (which gets from pool)
+	streamPool.Put(s)
+
+	// Re-acquire — all fields must be reset
+	s2 := NewStream(3, 50, 75)
+	require.Equal(t, uint32(3), s2.ID())
+	require.Equal(t, int32(50), s2.Window())
+	require.Equal(t, int32(75), s2.SendWindow())
+	require.Equal(t, StreamStateIdle, s2.State())
+	require.False(t, s2.headersFinished)
+	require.False(t, s2.pendingEndStream)
+	require.False(t, s2.responseStarted)
+	require.False(t, s2.responseEnded)
+	require.False(t, s2.isTrailer)
+	require.False(t, s2.seenMethod)
+	require.False(t, s2.seenScheme)
+	require.False(t, s2.seenPath)
+	require.False(t, s2.seenAuthority)
+	require.False(t, s2.isConnect)
+	require.False(t, s2.regularHeaderSeen)
+	require.Equal(t, int64(-1), s2.contentLength)
+	require.Equal(t, int64(0), s2.bodyBytesReceived)
+	require.Equal(t, 0, s2.headerBlockNum)
+	require.Equal(t, uint32(0), s2.headerListSize)
+	require.Empty(t, s2.previousHeaderBytes)
+	require.Empty(t, s2.pendingData)
+	require.Nil(t, s2.ctx)
+}
