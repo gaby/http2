@@ -43,6 +43,30 @@ func TestParseUintBytes(t *testing.T) {
 	}
 }
 
+func TestConnPublicAccessors(t *testing.T) {
+	conn := NewConn(&stubConn{}, ConnOpts{})
+
+	// ActiveStreams starts at 0
+	require.Equal(t, int32(0), conn.ActiveStreams())
+
+	// Increment and check
+	atomic.AddInt32(&conn.openStreams, 5)
+	require.Equal(t, int32(5), conn.ActiveStreams())
+
+	// RTT starts at 0
+	require.Equal(t, time.Duration(0), conn.RTT())
+
+	// ServerWindow
+	require.Equal(t, int32(defaultWindowSize), conn.ServerWindow())
+
+	// MaxConcurrentStreams
+	conn.serverS.SetMaxConcurrentStreams(200)
+	require.Equal(t, uint32(200), conn.MaxConcurrentStreams())
+
+	// Closed
+	require.False(t, conn.Closed())
+}
+
 func BenchmarkParseUintBytes(b *testing.B) {
 	data := []byte("200")
 	b.ReportAllocs()
