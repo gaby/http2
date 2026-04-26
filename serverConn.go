@@ -2030,7 +2030,13 @@ func (sc *serverConn) deleteActiveStream(id uint32) {
 
 func (sc *serverConn) forEachActiveStream(fn func(*Stream)) {
 	sc.streamsMu.Lock()
-	streams := make([]*Stream, 0, len(sc.streams))
+	// Reuse a stack-local slice to avoid per-call heap allocation.
+	// Most connections have fewer than 32 concurrent streams.
+	var buf [32]*Stream
+	streams := buf[:0]
+	if len(sc.streams) > len(buf) {
+		streams = make([]*Stream, 0, len(sc.streams))
+	}
 	for _, strm := range sc.streams {
 		streams = append(streams, strm)
 	}
