@@ -57,6 +57,11 @@ type ConnOpts struct {
 
 	// DisablePingChecking ...
 	DisablePingChecking bool
+
+	// WindowSize sets the connection-level flow control window size.
+	// A value of 0 uses the default of 1 MiB (1 << 20).
+	// Maximum value is 2^31 - 1.
+	WindowSize int32
 }
 
 // Handshake performs an HTTP/2 handshake. It sends the preface (if requested),
@@ -163,6 +168,10 @@ func NewConn(c net.Conn, opts ConnOpts) *Conn {
 	if wwt <= 0 {
 		wwt = windowWaitTimeout
 	}
+	winSize := opts.WindowSize
+	if winSize <= 0 {
+		winSize = 1 << 20 // 1 MiB default
+	}
 	nc := &Conn{
 		c:                 c,
 		br:                bufio.NewReaderSize(c, 4096),
@@ -171,8 +180,8 @@ func NewConn(c net.Conn, opts ConnOpts) *Conn {
 		dec:               AcquireHPACK(),
 		nextID:            1,
 		serverWindow:      int32(defaultWindowSize), // RFC 7540 default initial window
-		maxWindow:         1 << 20,
-		currentWindow:     1 << 20,
+		maxWindow:         winSize,
+		currentWindow:     winSize,
 		in:                make(chan *Ctx, 128),
 		out:               make(chan *FrameHeader, 128),
 		pingInterval:      opts.PingInterval,
@@ -183,7 +192,7 @@ func NewConn(c net.Conn, opts ConnOpts) *Conn {
 	}
 	nc.windowCond = sync.NewCond(&nc.windowMu)
 
-	nc.current.SetMaxWindowSize(1 << 20)
+	nc.current.SetMaxWindowSize(uint32(winSize))
 	nc.current.SetPush(false)
 
 	return nc

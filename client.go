@@ -151,6 +151,7 @@ func (cl *Client) createConn() (*Conn, *list.Element, error) {
 		OnDisconnect:        cl.onConnectionDropped,
 		OnRTT:               cl.opts.OnRTT,
 		DisablePingChecking: cl.opts.DisablePingChecking,
+		WindowSize:          cl.opts.WindowSize,
 	})
 	if err != nil {
 		return nil, nil, err

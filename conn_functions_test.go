@@ -82,6 +82,18 @@ func TestConnWriteToClosedConn(t *testing.T) {
 	}
 }
 
+func TestConnCustomWindowSize(t *testing.T) {
+	// Default window size
+	conn := NewConn(&stubConn{}, ConnOpts{})
+	require.Equal(t, int32(1<<20), conn.maxWindow)
+	require.Equal(t, int32(1<<20), conn.currentWindow)
+
+	// Custom window size
+	conn2 := NewConn(&stubConn{}, ConnOpts{WindowSize: 1 << 22})
+	require.Equal(t, int32(1<<22), conn2.maxWindow)
+	require.Equal(t, int32(1<<22), conn2.currentWindow)
+}
+
 func TestConnRemoteAddr(t *testing.T) {
 	sc := &stubConn{}
 	conn := NewConn(sc, ConnOpts{})
