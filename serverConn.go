@@ -967,7 +967,7 @@ loop:
 						nstrm.origType == FrameHeaders {
 
 						nstrm.SetState(StreamStateClosed)
-						closeStream(strm)
+						closeStream(nstrm)
 
 						if sc.debug {
 							sc.logger.Printf("Cancelling stream in idle state: %d\n", nstrm.ID())
