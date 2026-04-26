@@ -531,13 +531,13 @@ func (c *Conn) Do(req *fasthttp.Request, resp *fasthttp.Response) error {
 // net.ErrClosed instead of panicking.
 func (c *Conn) Write(r *Ctx) {
 	if atomic.LoadUint64(&c.closed) == 1 {
-		r.resolve(net.ErrClosed)
+		r.resolve(ErrConnectionClosed)
 		return
 	}
 
 	defer func() {
 		if recover() != nil {
-			r.resolve(net.ErrClosed)
+			r.resolve(ErrConnectionClosed)
 		}
 	}()
 

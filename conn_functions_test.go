@@ -75,7 +75,8 @@ func TestConnWriteToClosedConn(t *testing.T) {
 
 	select {
 	case err := <-ctx.Err:
-		require.ErrorIs(t, err, net.ErrClosed)
+		require.ErrorIs(t, err, ErrConnectionClosed)
+		require.ErrorIs(t, err, net.ErrClosed) // ErrConnectionClosed wraps net.ErrClosed
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for error")
 	}

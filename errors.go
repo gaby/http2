@@ -3,6 +3,7 @@ package http2
 import (
 	"errors"
 	"fmt"
+	"net"
 	"strconv"
 )
 
@@ -129,6 +130,15 @@ func NewResetStreamError(e ErrorCode, debug string) Error {
 	}
 }
 
+// connectionClosedError is a sentinel error indicating the HTTP/2 connection
+// has been closed. It wraps net.ErrClosed for compatibility with errors.Is.
+type connectionClosedError struct{}
+
+func (connectionClosedError) Error() string   { return "http2: connection closed" }
+func (connectionClosedError) Unwrap() error   { return net.ErrClosed }
+func (connectionClosedError) Timeout() bool   { return false }
+func (connectionClosedError) Temporary() bool { return false }
+
 func newFrameSizeError(stream uint32, debug string) Error {
 	if stream == 0 {
 		return NewGoAwayError(FrameSizeError, debug)
@@ -160,7 +170,12 @@ var (
 		HTTP11Required:       "HTTP/1.1 required",
 	}
 
-	// ErrUnknownFrameType This error codes must be used with FrameGoAway.
+	// ErrConnectionClosed is returned when an operation is attempted on a
+	// connection that has already been closed. It wraps net.ErrClosed so
+	// callers can use errors.Is(err, net.ErrClosed) as well.
+	ErrConnectionClosed = &connectionClosedError{}
+
+	// ErrUnknownFrameType error codes must be used with FrameGoAway.
 	ErrUnknownFrameType = NewError(
 		ProtocolError, "unknown frame type")
 	ErrMissingBytes = NewError(
