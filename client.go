@@ -68,6 +68,12 @@ func (opts *ClientOpts) sanitize() {
 	if opts.PingInterval <= 0 {
 		opts.PingInterval = DefaultPingInterval
 	}
+
+	if opts.WindowSize < 0 {
+		opts.WindowSize = 0 // use default
+	} else if opts.WindowSize > maxWindowIncrement {
+		opts.WindowSize = maxWindowIncrement
+	}
 }
 
 // Ctx represents a context for a stream. Every stream is related to a context.
