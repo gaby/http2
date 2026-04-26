@@ -41,7 +41,6 @@ func TestConfigureServerHelpers(t *testing.T) {
 }
 
 func TestServerConfigDefaultValues(t *testing.T) {
-	// Zero values get defaults
 	cnf := ServerConfig{}
 	cnf.defaults()
 	require.Equal(t, 10*time.Second, cnf.PingInterval)
@@ -49,6 +48,30 @@ func TestServerConfigDefaultValues(t *testing.T) {
 	require.Equal(t, defaultMaxHeaderListSize, cnf.MaxHeaderListSize)
 	require.Equal(t, defaultDataFrameSize, cnf.MaxFrameSize)
 	require.Equal(t, defaultEnqueueTimeout, cnf.EnqueueTimeout)
+	require.Equal(t, int32(1<<22), cnf.MaxWindowSize)   // 4 MiB default
+	require.Equal(t, 5*time.Second, cnf.HandshakeTimeout)
+}
+
+func TestServerConfigMaxWindowSizeClamping(t *testing.T) {
+	// Zero → default (1<<22)
+	cnf := ServerConfig{}
+	cnf.defaults()
+	require.Equal(t, int32(1<<22), cnf.MaxWindowSize)
+
+	// Negative → default
+	cnf = ServerConfig{MaxWindowSize: -1}
+	cnf.defaults()
+	require.Equal(t, int32(1<<22), cnf.MaxWindowSize)
+
+	// maxWindowIncrement is already int32 max (2^31-1), so we just test the default clamp works
+	cnf = ServerConfig{MaxWindowSize: int32(maxWindowIncrement)}
+	cnf.defaults()
+	require.Equal(t, int32(maxWindowIncrement), cnf.MaxWindowSize)
+
+	// Valid value → keep
+	cnf = ServerConfig{MaxWindowSize: 1 << 20}
+	cnf.defaults()
+	require.Equal(t, int32(1<<20), cnf.MaxWindowSize)
 }
 
 func TestServerConfigMaxFrameSizeClamping(t *testing.T) {
