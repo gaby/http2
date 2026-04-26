@@ -11,14 +11,20 @@ import (
 // ErrServerSupport indicates whether the server supports HTTP/2 or not.
 var ErrServerSupport = errors.New("server doesn't support HTTP/2")
 
-// clientAdapter adapts a Client.Do method to implement fasthttp.RoundTripper
-type clientAdapter struct {
+// ClientTransport wraps a Client to implement fasthttp.RoundTripper and
+// provides access to the underlying HTTP/2 client for connection management.
+type ClientTransport struct {
 	client *Client
 }
 
-// RoundTrip implements fasthttp.RoundTripper by calling the wrapped client's Do method
-func (ca *clientAdapter) RoundTrip(hc *fasthttp.HostClient, req *fasthttp.Request, resp *fasthttp.Response) (retry bool, err error) {
+// RoundTrip implements fasthttp.RoundTripper by calling the wrapped client's Do method.
+func (ca *ClientTransport) RoundTrip(hc *fasthttp.HostClient, req *fasthttp.Request, resp *fasthttp.Response) (retry bool, err error) {
 	return ca.client.RoundTrip(hc, req, resp)
+}
+
+// Close gracefully closes all HTTP/2 connections managed by this transport.
+func (ca *ClientTransport) Close() {
+	ca.client.Close()
 }
 
 func configureDialer(d *Dialer) {
@@ -78,7 +84,7 @@ func ConfigureClient(c *fasthttp.HostClient, opts ClientOpts) error {
 	c.IsTLS = true
 	c.TLSConfig = d.TLSConfig
 
-	c.Transport = &clientAdapter{client: cl}
+	c.Transport = &ClientTransport{client: cl}
 
 	return nil
 }

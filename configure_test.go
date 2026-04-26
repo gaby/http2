@@ -74,7 +74,7 @@ func TestClientAdapterRoundTrip(t *testing.T) {
 		close(done)
 	}()
 
-	adapter := &clientAdapter{client: client}
+	adapter := &ClientTransport{client: client}
 	retry, err := adapter.RoundTrip(nil, req, res)
 	require.False(t, retry)
 	require.NoError(t, err)

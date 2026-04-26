@@ -108,6 +108,18 @@ func createClient(d *Dialer, opts ClientOpts) *Client {
 	return cl
 }
 
+// Close gracefully closes all connections managed by this client.
+// After Close returns, no new requests can be made.
+func (cl *Client) Close() {
+	cl.lck.Lock()
+	defer cl.lck.Unlock()
+
+	for e := cl.conns.Front(); e != nil; e = e.Next() {
+		_ = e.Value.(*Conn).Close()
+	}
+	cl.conns.Init()
+}
+
 func (cl *Client) onConnectionDropped(c *Conn) {
 	cl.lck.Lock()
 	defer cl.lck.Unlock()
