@@ -484,6 +484,18 @@ type ConnStats struct {
 	Closed        bool
 }
 
+// String returns a human-readable representation of connection stats.
+func (s ConnStats) String() string {
+	state := "open"
+	if s.Closed {
+		state = "closed"
+	}
+	return fmt.Sprintf(
+		"ConnStats{state=%s, streams=%d/%d, window=%d, rtt=%s, pings_unacked=%d}",
+		state, s.ActiveStreams, s.MaxStreams, s.ServerWindow, s.RTT, s.UnackedPings,
+	)
+}
+
 // MaxConcurrentStreams returns the maximum number of concurrent streams
 // allowed by the server on this connection.
 func (c *Conn) MaxConcurrentStreams() uint32 {
