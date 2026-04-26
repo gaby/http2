@@ -167,4 +167,14 @@ func ConfigureServerH2C(s *fasthttp.Server, cnf ServerConfig) *Server {
 	return s2
 }
 
+// GetClientTransport returns the HTTP/2 ClientTransport from a configured
+// fasthttp.HostClient, or nil if the client was not configured for HTTP/2.
+// This is useful for accessing the Close() method for cleanup.
+func GetClientTransport(c *fasthttp.HostClient) *ClientTransport {
+	if ct, ok := c.Transport.(*ClientTransport); ok {
+		return ct
+	}
+	return nil
+}
+
 var ErrNotAvailableStreams = errors.New("ran out of available streams")
