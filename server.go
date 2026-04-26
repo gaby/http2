@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -81,11 +82,31 @@ type Server struct {
 	cnf ServerConfig
 
 	activeConns int64
+
+	mu    sync.Mutex
+	conns map[*serverConn]struct{}
 }
 
 // ActiveConnections returns the number of currently active HTTP/2 connections.
 func (s *Server) ActiveConnections() int64 {
 	return atomic.LoadInt64(&s.activeConns)
+}
+
+// Shutdown gracefully shuts down all HTTP/2 connections by sending GOAWAY
+// frames and waiting for active streams to drain. It does not close the
+// underlying fasthttp.Server — call fasthttp.Server.Shutdown for that.
+func (s *Server) Shutdown() {
+	s.mu.Lock()
+	conns := make([]*serverConn, 0, len(s.conns))
+	for sc := range s.conns {
+		conns = append(conns, sc)
+	}
+	s.mu.Unlock()
+
+	for _, sc := range conns {
+		sc.writeGoAway(0, NoError, "server shutting down")
+		sc.signalConnClose()
+	}
 }
 
 // ServeConn starts serving a net.Conn as HTTP/2.
@@ -119,6 +140,18 @@ func (s *Server) ServeConn(c net.Conn) error {
 		debug:          s.cnf.Debug,
 		enqueueTimeout: s.cnf.EnqueueTimeout,
 	}
+
+	s.mu.Lock()
+	if s.conns == nil {
+		s.conns = make(map[*serverConn]struct{})
+	}
+	s.conns[sc] = struct{}{}
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.conns, sc)
+		s.mu.Unlock()
+	}()
 
 	// Clear handshake deadline now that the connection is initialized.
 	_ = c.SetDeadline(time.Time{})
