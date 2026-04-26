@@ -431,6 +431,12 @@ func (c *Conn) RTT() time.Duration {
 	return time.Duration(c.lastRTT.Load())
 }
 
+// ServerWindow returns the current server-side connection flow control window.
+// A value near zero indicates back-pressure from the server.
+func (c *Conn) ServerWindow() int32 {
+	return atomic.LoadInt32(&c.serverWindow)
+}
+
 // MaxConcurrentStreams returns the maximum number of concurrent streams
 // allowed by the server on this connection.
 func (c *Conn) MaxConcurrentStreams() uint32 {
