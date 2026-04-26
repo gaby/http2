@@ -59,6 +59,7 @@ func ConfigureClient(c *fasthttp.HostClient, opts ClientOpts) error {
 		TLSConfig: c.TLSConfig,
 		NetDial:   c.Dial,
 		Timeout:   opts.DialTimeout,
+		H2C:       opts.H2C,
 	}
 
 	cl := createClient(d, opts)
@@ -81,8 +82,10 @@ func ConfigureClient(c *fasthttp.HostClient, opts ClientOpts) error {
 		return err
 	}
 
-	c.IsTLS = true
-	c.TLSConfig = d.TLSConfig
+	if !opts.H2C {
+		c.IsTLS = true
+		c.TLSConfig = d.TLSConfig
+	}
 
 	c.Transport = &ClientTransport{client: cl}
 

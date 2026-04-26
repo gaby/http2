@@ -48,6 +48,11 @@ type ClientOpts struct {
 	// DialTimeout sets a deadline for the TCP connection and TLS handshake
 	// when creating new connections. A value of 0 means no timeout.
 	DialTimeout time.Duration
+
+	// H2C enables cleartext HTTP/2 (prior knowledge) without TLS.
+	// When true, the client connects via plain TCP without TLS negotiation.
+	// Use this for internal services or connections behind TLS-terminating proxies.
+	H2C bool
 }
 
 func (opts *ClientOpts) sanitize() {
