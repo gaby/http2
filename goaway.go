@@ -1,7 +1,7 @@
 package http2
 
 import (
-	"fmt"
+	"strconv"
 
 	"github.com/dgrr/http2/http2utils"
 )
@@ -23,7 +23,9 @@ type GoAway struct {
 
 // Error returns a human-readable representation of the GOAWAY frame.
 func (ga *GoAway) Error() string {
-	return fmt.Sprintf("stream=%d, code=%s, data=%s", ga.stream, ga.code, ga.data)
+	return "stream=" + strconv.FormatUint(uint64(ga.stream), 10) +
+		", code=" + ga.code.String() +
+		", data=" + string(ga.data)
 }
 
 // Type returns FrameGoAway.
