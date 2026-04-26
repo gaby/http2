@@ -167,6 +167,13 @@ func ConfigureServerH2C(s *fasthttp.Server, cnf ServerConfig) *Server {
 	return s2
 }
 
+// ConfigureClientH2C configures the fasthttp.HostClient for cleartext HTTP/2 (h2c).
+// This is a convenience wrapper that sets H2C=true in the ClientOpts.
+func ConfigureClientH2C(c *fasthttp.HostClient, opts ClientOpts) error {
+	opts.H2C = true
+	return ConfigureClient(c, opts)
+}
+
 // GetClientTransport returns the HTTP/2 ClientTransport from a configured
 // fasthttp.HostClient, or nil if the client was not configured for HTTP/2.
 // This is useful for accessing the Close() method for cleanup.
