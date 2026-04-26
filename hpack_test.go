@@ -10,6 +10,31 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestStaticTableByKeyCompleteness(t *testing.T) {
+	// Every entry in the static table must be reachable via staticTableByKey.
+	for i, hf := range staticTable {
+		key := string(hf.key)
+		indices, ok := staticTableByKey[key]
+		require.True(t, ok, "static table entry %d (%s) not in staticTableByKey", i, key)
+
+		found := false
+		for _, idx := range indices {
+			if idx == i {
+				found = true
+				break
+			}
+		}
+		require.True(t, found, "static table entry %d (%s) index not in staticTableByKey[%s]", i, key, key)
+	}
+
+	// Total entries in the map should sum to len(staticTable)
+	total := 0
+	for _, indices := range staticTableByKey {
+		total += len(indices)
+	}
+	require.Equal(t, len(staticTable), total, "staticTableByKey total entries mismatch")
+}
+
 var hfs = []*HeaderField{
 	{key: []byte("cookie"), value: []byte("testcookie")},
 	{key: []byte("context-type"), value: []byte("text/plain")},
