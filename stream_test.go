@@ -81,6 +81,16 @@ func TestStreamHelpers(t *testing.T) {
 	require.Same(t, ctx, stream.Ctx())
 }
 
+func TestStreamString(t *testing.T) {
+	s := NewStream(42, 100, 200)
+	s.SetState(StreamStateOpen)
+	str := s.String()
+	require.Contains(t, str, "id=42")
+	require.Contains(t, str, "Open")
+	require.Contains(t, str, "window=100")
+	require.Contains(t, str, "sendWindow=200")
+}
+
 func TestNewStreamResetsAllFields(t *testing.T) {
 	// First allocation — set some non-default values
 	s := NewStream(1, 100, 200)
