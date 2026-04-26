@@ -78,11 +78,11 @@ func (ctx *Ctx) resolve(err error) {
 }
 
 type Client struct {
-	opts ClientOpts
-
 	d *Dialer
 
 	conns list.List
+
+	opts ClientOpts
 
 	lck sync.Mutex
 }
