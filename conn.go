@@ -511,6 +511,20 @@ func (c *Conn) Close() error {
 	return nil
 }
 
+// Do sends a request and waits for the response synchronously.
+// This is a convenience wrapper around Write that handles Ctx creation.
+func (c *Conn) Do(req *fasthttp.Request, resp *fasthttp.Response) error {
+	ctx := &Ctx{
+		Request:  req,
+		Response: resp,
+		Err:      make(chan error, 1),
+	}
+
+	c.Write(ctx)
+
+	return <-ctx.Err
+}
+
 // Write queues the request to be sent to the server.
 //
 // If the connection is already closed, the request is resolved with
