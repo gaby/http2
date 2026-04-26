@@ -82,6 +82,26 @@ func TestConnWriteToClosedConn(t *testing.T) {
 	}
 }
 
+func TestConnRemoteAddr(t *testing.T) {
+	sc := &stubConn{}
+	conn := NewConn(sc, ConnOpts{})
+	require.NotNil(t, conn.RemoteAddr())
+	require.IsType(t, &net.TCPAddr{}, conn.RemoteAddr())
+}
+
+func TestConnLocalAddr(t *testing.T) {
+	sc := &stubConn{}
+	conn := NewConn(sc, ConnOpts{})
+	require.NotNil(t, conn.LocalAddr())
+	require.IsType(t, &net.TCPAddr{}, conn.LocalAddr())
+}
+
+func TestConnAddrNilConn(t *testing.T) {
+	conn := &Conn{}
+	require.Nil(t, conn.RemoteAddr())
+	require.Nil(t, conn.LocalAddr())
+}
+
 func TestConnPingInterval(t *testing.T) {
 	// Default interval when not set
 	conn := NewConn(&stubConn{}, ConnOpts{})

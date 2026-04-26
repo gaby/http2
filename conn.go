@@ -458,6 +458,24 @@ func (c *Conn) MaxConcurrentStreams() uint32 {
 	return n
 }
 
+// RemoteAddr returns the remote network address of the underlying connection.
+// Returns nil if the connection is not set.
+func (c *Conn) RemoteAddr() net.Addr {
+	if c.c == nil {
+		return nil
+	}
+	return c.c.RemoteAddr()
+}
+
+// LocalAddr returns the local network address of the underlying connection.
+// Returns nil if the connection is not set.
+func (c *Conn) LocalAddr() net.Addr {
+	if c.c == nil {
+		return nil
+	}
+	return c.c.LocalAddr()
+}
+
 // PingInterval returns the interval at which the connection sends PING frames
 // to the peer. If the connection was created with a zero or negative interval,
 // DefaultPingInterval is used once the write loop starts; this accessor
