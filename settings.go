@@ -1,5 +1,7 @@
 package http2
 
+import "fmt"
+
 const FrameSettings FrameType = 0x4
 
 var _ Frame = &Settings{}
@@ -266,6 +268,14 @@ func (st *Settings) Encode() {
 			byte(st.headerSize>>8), byte(st.headerSize),
 		)
 	}
+}
+
+// String returns a human-readable representation of the settings.
+func (st *Settings) String() string {
+	return fmt.Sprintf(
+		"Settings{tableSize=%d, push=%v, maxStreams=%d, windowSize=%d, frameSize=%d, headerSize=%d, ack=%v}",
+		st.tableSize, st.enablePush, st.maxStreams, st.windowSize, st.frameSize, st.headerSize, st.ack,
+	)
 }
 
 // IsAck returns true if settings has FlagAck set.
