@@ -146,9 +146,10 @@ const defaultEnqueueTimeout = 2 * time.Second
 
 // goawayFlushDelay is a brief pause given to the write loop to flush a GOAWAY
 // frame to the peer before the connection is torn down. The value must be large
-// enough for the writeLoop goroutine to be scheduled and flush the frame even
-// on slow CI platforms (Windows runners can need 50ms+ for a context switch).
-const goawayFlushDelay = 100 * time.Millisecond
+// enough for the writeLoop goroutine to be scheduled, flush the frame, AND for
+// the OS TCP stack to deliver the data to the peer. On Windows CI runners the
+// kernel may need 100ms+ for a context switch plus TCP delivery.
+const goawayFlushDelay = 200 * time.Millisecond
 
 // maxContinuationFrames is the maximum number of CONTINUATION frames allowed
 // for a single header block. A client fragmenting headers across more frames
@@ -211,9 +212,10 @@ func (sc *serverConn) signalConnClose() {
 			// Safety-net close: the normal shutdown path (writeLoop's defer)
 			// closes the connection after flushing all queued frames. This
 			// timer only fires when the writeLoop is stuck. Use a generous
-			// delay so that GOAWAY frames have time to be flushed to the
-			// TCP stack even on slow CI platforms (e.g., Windows runners).
-			time.AfterFunc(250*time.Millisecond, func() {
+			// delay so that GOAWAY frames have time to be written, flushed,
+			// and delivered by the OS TCP stack even on slow CI platforms
+			// (Windows runners may need 200ms+ for scheduling + TCP flush).
+			time.AfterFunc(500*time.Millisecond, func() {
 				_ = sc.c.Close()
 			})
 		}
