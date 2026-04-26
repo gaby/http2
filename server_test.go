@@ -663,12 +663,19 @@ func getConnWithHandshake(s *Server) (*Conn, net.Listener, error) {
 		return nil, nil, err
 	}
 
+	// Set a deadline for the handshake to prevent hangs on slow CI runners.
+	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+
 	nc := NewConn(c, ConnOpts{
 		PingInterval:        -1, // disable pings for test stability
 		DisablePingChecking: true,
 	})
 
 	err = nc.Handshake()
+	if err == nil {
+		// Clear deadline after successful handshake.
+		_ = c.SetDeadline(time.Time{})
+	}
 	return nc, ln, err
 }
 
@@ -726,9 +733,20 @@ func TestConnDoPostWithBody(t *testing.T) {
 	req.Header.SetMethod("POST")
 	req.SetBody([]byte("hello"))
 
-	err = c.Do(req, resp)
-	require.NoError(t, err)
-	require.Equal(t, "echo:hello", string(resp.Body()))
+	// Use a goroutine + timeout to prevent hangs on slow CI runners
+	// where flow control window negotiation may take longer.
+	done := make(chan error, 1)
+	go func() {
+		done <- c.Do(req, resp)
+	}()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+		require.Equal(t, "echo:hello", string(resp.Body()))
+	case <-time.After(10 * time.Second):
+		t.Fatal("Do timed out — likely flow control deadlock")
+	}
 }
 
 func TestServerShutdownSendsGoAway(t *testing.T) {
@@ -755,7 +773,15 @@ func TestServerShutdownSendsGoAway(t *testing.T) {
 
 	req.SetRequestURI("https://localhost/warmup")
 	req.Header.SetMethod("GET")
-	require.NoError(t, c.Do(req, resp))
+
+	warmupDone := make(chan error, 1)
+	go func() { warmupDone <- c.Do(req, resp) }()
+	select {
+	case err := <-warmupDone:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("warmup request timed out")
+	}
 
 	// Now the server is fully up and running; safe to call Shutdown
 	s.Shutdown()
