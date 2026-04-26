@@ -458,6 +458,32 @@ func (c *Conn) ServerWindow() int32 {
 	return atomic.LoadInt32(&c.serverWindow)
 }
 
+// Stats returns a snapshot of connection statistics for monitoring.
+func (c *Conn) Stats() ConnStats {
+	return ConnStats{
+		ActiveStreams:      c.ActiveStreams(),
+		RTT:               c.RTT(),
+		ServerWindow:      c.ServerWindow(),
+		MaxStreams:         c.MaxConcurrentStreams(),
+		Closed:            c.Closed(),
+		UnackedPings:      atomic.LoadInt32(&c.unacks),
+		NextStreamID:      atomic.LoadUint32(&c.nextID),
+		PingInterval:      c.PingInterval(),
+	}
+}
+
+// ConnStats holds a snapshot of connection statistics.
+type ConnStats struct {
+	RTT           time.Duration
+	PingInterval  time.Duration
+	ActiveStreams  int32
+	ServerWindow  int32
+	MaxStreams     uint32
+	NextStreamID  uint32
+	UnackedPings  int32
+	Closed        bool
+}
+
 // MaxConcurrentStreams returns the maximum number of concurrent streams
 // allowed by the server on this connection.
 func (c *Conn) MaxConcurrentStreams() uint32 {
