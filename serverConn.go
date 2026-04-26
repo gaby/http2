@@ -1588,21 +1588,35 @@ var (
 	teTrailers               = []byte("trailers")
 )
 
+// isForbiddenHeader checks if a header is forbidden in HTTP/2.
+// HTTP/2 header names are always lowercase, so we use bytes.Equal
+// and dispatch on length to minimize comparisons.
 func isForbiddenHeader(key, value []byte) (bool, string) {
-	switch {
-	case bytes.EqualFold(key, forbiddenConnection):
-		return true, "connection"
-	case bytes.EqualFold(key, forbiddenProxyConnection):
-		return true, "proxy-connection"
-	case bytes.EqualFold(key, forbiddenTransferEnc):
-		return true, "transfer-encoding"
-	case bytes.EqualFold(key, forbiddenUpgrade):
-		return true, "upgrade"
-	case bytes.EqualFold(key, forbiddenKeepAlive):
-		return true, "keep-alive"
-	case bytes.EqualFold(key, forbiddenTE):
-		if !bytes.EqualFold(bytes.TrimSpace(value), teTrailers) {
-			return true, "te"
+	switch len(key) {
+	case 2: // te
+		if bytes.Equal(key, forbiddenTE) {
+			if !bytes.EqualFold(bytes.TrimSpace(value), teTrailers) {
+				return true, "te"
+			}
+		}
+	case 7: // upgrade
+		if bytes.Equal(key, forbiddenUpgrade) {
+			return true, "upgrade"
+		}
+	case 10: // connection, keep-alive
+		if bytes.Equal(key, forbiddenConnection) {
+			return true, "connection"
+		}
+		if bytes.Equal(key, forbiddenKeepAlive) {
+			return true, "keep-alive"
+		}
+	case 16: // proxy-connection
+		if bytes.Equal(key, forbiddenProxyConnection) {
+			return true, "proxy-connection"
+		}
+	case 17: // transfer-encoding
+		if bytes.Equal(key, forbiddenTransferEnc) {
+			return true, "transfer-encoding"
 		}
 	}
 
