@@ -1639,6 +1639,16 @@ func (sc *serverConn) verifyState(strm *Stream, fr *FrameHeader) error {
 	return nil
 }
 
+// TrailerUserValueKey is the key used to store response trailers
+// in the RequestCtx.UserValue. Handlers can set trailer headers
+// using this key with a map[string]string value:
+//
+//	ctx.SetUserValue(http2.TrailerUserValueKey, map[string]string{
+//	    "grpc-status": "0",
+//	    "grpc-message": "",
+//	})
+const TrailerUserValueKey = "h2-trailers"
+
 // handleEndRequest dispatches the finished request to the handler.
 func (sc *serverConn) handleEndRequest(strm *Stream) {
 	ctx := strm.ctx
@@ -1647,13 +1657,15 @@ func (sc *serverConn) handleEndRequest(strm *Stream) {
 	sc.h(ctx)
 
 	hasBody := ctx.Response.IsBodyStream() || len(ctx.Response.Body()) > 0
+	trailers, hasTrailers := ctx.UserValue(TrailerUserValueKey).(map[string]string)
 
 	fr := AcquireFrameHeader()
 	fr.SetStream(strm.ID())
 
 	h := AcquireFrame(FrameHeaders).(*Headers)
 	h.SetEndHeaders(true)
-	h.SetEndStream(!hasBody)
+	// Only set EndStream on headers if there's no body AND no trailers
+	h.SetEndStream(!hasBody && !hasTrailers)
 
 	fr.SetBody(h)
 
@@ -1662,11 +1674,13 @@ func (sc *serverConn) handleEndRequest(strm *Stream) {
 	sc.encMu.Unlock()
 
 	sc.enqueueFrame(fr)
-	if !hasBody {
+	if !hasBody && !hasTrailers {
 		sc.markResponseEnded(strm)
 	}
 
 	if hasBody {
+		// When trailers follow, the last DATA frame must NOT carry EndStream
+		endStreamOnData := !hasTrailers
 		if ctx.Response.IsBodyStream() {
 			streamWriter := acquireStreamWrite()
 			streamWriter.strm = strm
@@ -1676,9 +1690,39 @@ func (sc *serverConn) handleEndRequest(strm *Stream) {
 			_ = ctx.Response.BodyWriteTo(streamWriter)
 			releaseStreamWrite(streamWriter)
 		} else {
-			sc.queueData(strm, ctx.Response.Body(), true)
+			sc.queueData(strm, ctx.Response.Body(), endStreamOnData)
 		}
 	}
+
+	if hasTrailers {
+		sc.sendTrailers(strm, trailers)
+	}
+}
+
+// sendTrailers sends a trailing HEADERS frame with EndStream set.
+func (sc *serverConn) sendTrailers(strm *Stream, trailers map[string]string) {
+	fr := AcquireFrameHeader()
+	fr.SetStream(strm.ID())
+
+	h := AcquireFrame(FrameHeaders).(*Headers)
+	h.SetEndHeaders(true)
+	h.SetEndStream(true)
+
+	fr.SetBody(h)
+
+	hf := AcquireHeaderField()
+
+	sc.encMu.Lock()
+	for k, v := range trailers {
+		hf.SetBytes(ToLower([]byte(k)), []byte(v))
+		sc.enc.AppendHeaderField(h, hf, false)
+	}
+	sc.encMu.Unlock()
+
+	ReleaseHeaderField(hf)
+
+	sc.enqueueFrame(fr)
+	sc.markResponseEnded(strm)
 }
 
 var (
