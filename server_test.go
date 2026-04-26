@@ -433,6 +433,36 @@ func TestResponseTrailers(t *testing.T) {
 	require.Equal(t, "body", string(body))
 }
 
+func TestServerActiveConnectionTracking(t *testing.T) {
+	s := &Server{
+		s: &fasthttp.Server{
+			Handler: func(ctx *fasthttp.RequestCtx) {
+				ctx.SetBodyString("ok")
+			},
+		},
+	}
+
+	c, ln, err := getConn(s)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		c.Close()
+		ln.Close()
+	})
+
+	// Wait for the server to register the connection
+	require.Eventually(t, func() bool {
+		return s.ActiveConnections() == 1
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// Close the client side, which will cause the server to drop the connection
+	c.Close()
+
+	// Connection count should drop to 0
+	require.Eventually(t, func() bool {
+		return s.ActiveConnections() == 0
+	}, 5*time.Second, 50*time.Millisecond)
+}
+
 func TestIdleConnection(t *testing.T) {
 	s := &Server{
 		s: &fasthttp.Server{
