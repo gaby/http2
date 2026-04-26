@@ -189,6 +189,10 @@ type Dialer struct {
 	//
 	// An interval of 0 will make the library to use DefaultPingInterval. Because ping intervals can't be disabled.
 	PingInterval time.Duration
+
+	// Timeout sets a deadline for the TCP connection and TLS handshake.
+	// A value of 0 means no timeout (the default).
+	Timeout time.Duration
 }
 
 func (d *Dialer) tryDial() (net.Conn, error) {
@@ -205,14 +209,22 @@ func (d *Dialer) tryDial() (net.Conn, error) {
 			return nil, err
 		}
 	} else {
-		tcpAddr, err := net.ResolveTCPAddr("tcp", d.Addr)
+		if d.Timeout > 0 {
+			c, err = net.DialTimeout("tcp", d.Addr, d.Timeout)
+		} else {
+			tcpAddr, err := net.ResolveTCPAddr("tcp", d.Addr)
+			if err != nil {
+				return nil, err
+			}
+			c, err = net.DialTCP("tcp", nil, tcpAddr)
+		}
 		if err != nil {
 			return nil, err
 		}
-		c, err = net.DialTCP("tcp", nil, tcpAddr)
-		if err != nil {
-			return nil, err
-		}
+	}
+
+	if d.Timeout > 0 {
+		_ = c.SetDeadline(time.Now().Add(d.Timeout))
 	}
 
 	tlsConn := tls.Client(c, d.TLSConfig)
@@ -220,6 +232,11 @@ func (d *Dialer) tryDial() (net.Conn, error) {
 	if err := tlsConn.Handshake(); err != nil {
 		_ = c.Close()
 		return nil, err
+	}
+
+	// Clear the deadline after successful handshake
+	if d.Timeout > 0 {
+		_ = c.SetDeadline(time.Time{})
 	}
 
 	if tlsConn.ConnectionState().NegotiatedProtocol != "h2" {
