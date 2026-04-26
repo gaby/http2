@@ -730,6 +730,37 @@ func TestConnWriteRequest(t *testing.T) {
 	require.True(t, ok)
 }
 
+func BenchmarkConnWriteRequestGET(b *testing.B) {
+	rawConn := &stubConn{}
+	conn := NewConn(rawConn, ConnOpts{})
+	conn.serverS.SetMaxConcurrentStreams(1 << 20) // high limit
+
+	req := fasthttp.AcquireRequest()
+	res := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(res)
+
+	req.SetRequestURI("https://example.com/api/v1/users")
+	req.Header.SetMethod("GET")
+	req.Header.Set("Accept", "application/json")
+	req.Header.SetUserAgent("fasthttp/2.0")
+
+	b.ReportAllocs()
+	for b.Loop() {
+		rawConn.Buffer.Reset()
+
+		ctx := &Ctx{
+			Request:  req,
+			Response: res,
+			Err:      make(chan error, 1),
+		}
+
+		conn.writeRequest(ctx)
+		conn.reqQueued.Delete(atomic.LoadUint32(&ctx.streamID))
+		atomic.AddInt32(&conn.openStreams, -1)
+	}
+}
+
 type stubConn struct {
 	bytes.Buffer
 }
