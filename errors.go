@@ -87,6 +87,21 @@ func (e Error) Debug() string {
 	return e.debug
 }
 
+// FrameType returns the frame type this error targets (FrameGoAway or FrameResetStream).
+func (e Error) FrameType() FrameType {
+	return e.frameType
+}
+
+// IsConnectionError reports whether this error is a connection-level error (GOAWAY).
+func (e Error) IsConnectionError() bool {
+	return e.frameType == FrameGoAway
+}
+
+// IsStreamError reports whether this error is a stream-level error (RST_STREAM).
+func (e Error) IsStreamError() bool {
+	return e.frameType == FrameResetStream
+}
+
 // NewError creates a new Error.
 func NewError(e ErrorCode, debug string) Error {
 	return Error{
