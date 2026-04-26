@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -638,4 +639,130 @@ func TestServerShutdownSendsGoAway(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return c.Closed()
 	}, 5*time.Second, 50*time.Millisecond, "connection should close after shutdown")
+}
+
+func TestDialerH2CIntegration(t *testing.T) {
+	s := &Server{
+		s: &fasthttp.Server{
+			Handler: func(ctx *fasthttp.RequestCtx) {
+				ctx.SetBodyString("h2c-dialer-response")
+			},
+		},
+	}
+	s.cnf.defaults()
+
+	ln := fasthttputil.NewInmemoryListener()
+	go serve(s, ln)
+	t.Cleanup(func() { ln.Close() })
+
+	d := &Dialer{
+		Addr: "localhost",
+		H2C:  true,
+		NetDial: func(addr string) (net.Conn, error) {
+			return ln.Dial()
+		},
+		PingInterval: -1, // disable pings
+	}
+
+	c, err := d.Dial(ConnOpts{
+		PingInterval:        -1,
+		DisablePingChecking: true,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { c.Close() })
+
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+
+	req.SetRequestURI("http://localhost/test-h2c")
+	req.Header.SetMethod("GET")
+
+	err = c.Do(req, resp)
+	require.NoError(t, err)
+	require.Equal(t, "h2c-dialer-response", string(resp.Body()))
+}
+
+func TestConnOnNewAndClosedCallbacks(t *testing.T) {
+	var newConn, closedConn int32
+
+	s := &Server{
+		s: &fasthttp.Server{
+			Handler: func(ctx *fasthttp.RequestCtx) {
+				ctx.SetBodyString("ok")
+			},
+		},
+		cnf: ServerConfig{
+			OnNewConnection: func(c net.Conn) {
+				atomic.AddInt32(&newConn, 1)
+			},
+			OnConnectionClosed: func(c net.Conn) {
+				atomic.AddInt32(&closedConn, 1)
+			},
+		},
+	}
+
+	c, ln, err := getConnWithHandshake(s)
+	require.NoError(t, err)
+
+	// Wait for OnNewConnection to fire
+	require.Eventually(t, func() bool {
+		return atomic.LoadInt32(&newConn) == 1
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// Close client and listener
+	c.Close()
+	ln.Close()
+
+	// Wait for OnConnectionClosed to fire
+	require.Eventually(t, func() bool {
+		return atomic.LoadInt32(&closedConn) == 1
+	}, 5*time.Second, 50*time.Millisecond)
+}
+
+func BenchmarkServerGETRequest(b *testing.B) {
+	s := &Server{
+		s: &fasthttp.Server{
+			Handler: func(ctx *fasthttp.RequestCtx) {
+				ctx.SetBodyString("OK")
+			},
+		},
+	}
+
+	c, ln, err := getConn(s)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer c.Close()
+	defer ln.Close()
+
+	streamID := uint32(1)
+
+	b.ReportAllocs()
+	for b.Loop() {
+		headers := makeHeaders(streamID, c.enc, true, true, map[string]string{
+			string(StringAuthority): "localhost",
+			string(StringMethod):    "GET",
+			string(StringPath):      "/",
+			string(StringScheme):    "https",
+		})
+
+		c.writeFrame(headers)
+
+		// Read response
+		for {
+			fr, err := c.readNext()
+			if err != nil {
+				b.Fatal(err)
+			}
+			endStream := fr.Flags().Has(FlagEndStream)
+			ReleaseFrameHeader(fr)
+			if endStream {
+				break
+			}
+		}
+
+		streamID += 2
+	}
 }
