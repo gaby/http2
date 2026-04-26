@@ -43,6 +43,44 @@ func TestParseUintBytes(t *testing.T) {
 	}
 }
 
+func TestConnCloseIdempotent(t *testing.T) {
+	conn := NewConn(&stubConn{}, ConnOpts{})
+
+	// First close should succeed
+	err := conn.Close()
+	require.NoError(t, err)
+
+	// Second close should return io.EOF
+	err = conn.Close()
+	require.ErrorIs(t, err, io.EOF)
+
+	// Third close also io.EOF
+	err = conn.Close()
+	require.ErrorIs(t, err, io.EOF)
+}
+
+func TestConnWriteToClosedConn(t *testing.T) {
+	conn := NewConn(&stubConn{}, ConnOpts{})
+	conn.Close()
+
+	ctx := &Ctx{
+		Request:  fasthttp.AcquireRequest(),
+		Response: fasthttp.AcquireResponse(),
+		Err:      make(chan error, 1),
+	}
+	defer fasthttp.ReleaseRequest(ctx.Request)
+	defer fasthttp.ReleaseResponse(ctx.Response)
+
+	conn.Write(ctx)
+
+	select {
+	case err := <-ctx.Err:
+		require.ErrorIs(t, err, net.ErrClosed)
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for error")
+	}
+}
+
 func TestConnPublicAccessors(t *testing.T) {
 	conn := NewConn(&stubConn{}, ConnOpts{})
 
