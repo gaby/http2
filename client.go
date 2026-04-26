@@ -44,6 +44,10 @@ type ClientOpts struct {
 	// to 3 consecutive PINGs. Set this to true for connections where
 	// the server may not respond to PINGs promptly.
 	DisablePingChecking bool
+
+	// DialTimeout sets a deadline for the TCP connection and TLS handshake
+	// when creating new connections. A value of 0 means no timeout.
+	DialTimeout time.Duration
 }
 
 func (opts *ClientOpts) sanitize() {

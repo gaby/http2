@@ -52,6 +52,7 @@ func ConfigureClient(c *fasthttp.HostClient, opts ClientOpts) error {
 		Addr:      c.Addr,
 		TLSConfig: c.TLSConfig,
 		NetDial:   c.Dial,
+		Timeout:   opts.DialTimeout,
 	}
 
 	cl := createClient(d, opts)
