@@ -603,7 +603,7 @@ func TestGoAwaySerializeAndDeserialize(t *testing.T) {
 	require.Equal(t, ga.Stream(), cloned.Stream())
 	require.Equal(t, ga.Code(), cloned.Code())
 	require.Equal(t, ga.Data(), cloned.Data())
-	require.Contains(t, cloned.Error(), "Enhance your calm")
+	require.Contains(t, cloned.Error(), "EnhanceYourCalm")
 
 	ReleaseFrameHeader(fr)
 }
@@ -626,6 +626,20 @@ func TestGoAwayCopyHelpers(t *testing.T) {
 	require.Equal(t, target.Stream(), cloned.Stream())
 	require.Equal(t, target.Code(), cloned.Code())
 	require.Equal(t, target.Data(), cloned.Data())
+}
+
+func TestGoAwaySetDataString(t *testing.T) {
+	ga := &GoAway{}
+	ga.SetDataString("hello world")
+	require.Equal(t, []byte("hello world"), ga.Data())
+
+	// Overwrite with shorter string
+	ga.SetDataString("hi")
+	require.Equal(t, []byte("hi"), ga.Data())
+
+	// Empty string
+	ga.SetDataString("")
+	require.Empty(t, ga.Data())
 }
 
 func TestPushPromiseRoundTrip(t *testing.T) {

@@ -400,7 +400,8 @@ func TestConnectionWindowUpdateOverflowSendsFlowControlGoAway(t *testing.T) {
 	require.ErrorAs(t, err, &h2Err)
 	require.Equal(t, FlowControlError, h2Err.Code())
 	require.Equal(t, FrameGoAway, h2Err.frameType)
-	require.EqualValues(t, maxWindowIncrement, atomic.LoadInt64(&sc.clientWindow))
+	// The window should NOT be modified on overflow — the original value is preserved
+	require.EqualValues(t, int64(sc.clientS.MaxWindowSize()), atomic.LoadInt64(&sc.clientWindow))
 
 	fr := <-sc.writer
 	require.Equal(t, FrameSettings, fr.Type())
@@ -551,7 +552,8 @@ func TestStreamWindowUpdateOverflowResetsStream(t *testing.T) {
 	require.ErrorAs(t, err, &h2Err)
 	require.Equal(t, FlowControlError, h2Err.Code())
 	require.Equal(t, FrameResetStream, h2Err.frameType)
-	require.EqualValues(t, maxWindowIncrement, atomic.LoadInt64(&strm.sendWindow))
+	// The window should NOT be modified on overflow — the original value is preserved
+	require.EqualValues(t, int64(defaultWindowSize), atomic.LoadInt64(&strm.sendWindow))
 
 	sc.writeError(strm, err)
 	out := <-sc.writer
@@ -635,113 +637,46 @@ func TestQueueDataRespectsInitialWindowChanges(t *testing.T) {
 }
 
 func TestSettingsInitialWindowIncreaseFlushesPendingData(t *testing.T) {
-	s := &Server{
-		s: &fasthttp.Server{
-			Handler: func(ctx *fasthttp.RequestCtx) {
-				ctx.Response.SetBodyString("hello world")
-			},
-		},
+	// Unit test: directly test that handleSettings flushes pending data
+	// without any network timing dependency.
+	sc := &serverConn{
+		writer: make(chan *FrameHeader, 8),
+		logger: log.New(io.Discard, "", 0),
 	}
+	sc.clientS.Reset()
+	atomic.StoreInt64(&sc.clientWindow, int64(defaultWindowSize))
 
-	c, ln, err := getConn(s)
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		c.Close()
-		ln.Close()
-	})
+	// Create a stream with window=0 (all data will be pending)
+	strm := NewStream(1, int32(defaultWindowSize), 0)
+	strm.SetState(StreamStateOpen)
+	sc.addActiveStream(strm)
 
-	// Set a read deadline to prevent the test from hanging indefinitely.
-	require.NoError(t, c.c.SetReadDeadline(time.Now().Add(30*time.Second)))
-	defer c.c.SetReadDeadline(time.Time{})
+	body := []byte("hello world")
+	sc.queueData(strm, body, true)
 
-	sendSettings := func(val uint32) {
-		fr := AcquireFrameHeader()
-		st := AcquireFrame(FrameSettings).(*Settings)
-		st.SetMaxWindowSize(val)
-		fr.SetBody(st)
-		require.NoError(t, c.writeFrame(fr))
-		ReleaseFrameHeader(fr)
-	}
+	// Verify data is pending (not sent, since window=0)
+	strm.pendingMu.Lock()
+	require.Greater(t, len(strm.pendingData), 0, "expected pending data")
+	strm.pendingMu.Unlock()
 
-	sendSettings(0)
+	// Now simulate SETTINGS that increases initial window to 1
+	st := &Settings{}
+	st.SetMaxWindowSize(1)
+	sc.handleSettings(st)
 
-	headers := makeHeaders(1, c.enc, true, true, map[string]string{
-		string(StringAuthority): "localhost",
-		string(StringMethod):    "GET",
-		string(StringPath):      "/",
-		string(StringScheme):    "https",
-	})
-	require.NoError(t, c.writeFrame(headers))
+	// Drain the settings ACK
+	fr := <-sc.writer
+	require.Equal(t, FrameSettings, fr.Type())
+	require.True(t, fr.Body().(*Settings).IsAck())
+	ReleaseFrameHeader(fr)
 
-	// readNextWithRetry uses a per-read deadline long enough for CI runners
-	// (macOS/Windows runners can be slow). A 2-second timeout reduces retry
-	// overhead compared to the previous 200ms which caused flakiness.
-	readNextWithRetry := func() (*FrameHeader, error) {
-		require.NoError(t, c.c.SetReadDeadline(time.Now().Add(2*time.Second)))
-		fr, err := c.readNext()
-		if err != nil {
-			var timeoutErr interface{ Timeout() bool }
-			if (errors.As(err, &timeoutErr) && timeoutErr.Timeout()) ||
-				errors.Is(err, os.ErrDeadlineExceeded) {
-				return nil, nil
-			}
-			return nil, err
-		}
-		return fr, nil
-	}
-
-	deadline := time.Now().Add(30 * time.Second)
-	var gotHeaders bool
-	for time.Now().Before(deadline) && !gotHeaders {
-		fr, err := readNextWithRetry()
-		if fr == nil && err == nil {
-			continue
-		}
-		require.NoError(t, err)
-
-		if fr.Stream() != 1 {
-			ReleaseFrameHeader(fr)
-			continue
-		}
-
-		if fr.Type() == FrameHeaders {
-			gotHeaders = true
-		} else if fr.Type() == FrameData {
-			t.Fatalf("unexpected DATA length %d before window increase", len(fr.Body().(*Data).Data()))
-		}
-
-		ReleaseFrameHeader(fr)
-	}
-	require.True(t, gotHeaders, "expected response headers before expanding window")
-
-	sendSettings(1)
-
-	deadline = time.Now().Add(30 * time.Second)
-	var dataFrame *FrameHeader
-	for time.Now().Before(deadline) && dataFrame == nil {
-		fr, err := readNextWithRetry()
-		if fr == nil && err == nil {
-			continue
-		}
-		require.NoError(t, err)
-
-		if fr.Stream() != 1 {
-			ReleaseFrameHeader(fr)
-			continue
-		}
-		if fr.Type() == FrameData {
-			dataFrame = fr
-			break
-		}
-
-		ReleaseFrameHeader(fr)
-	}
-	require.NotNil(t, dataFrame, "expected DATA frame after window increase")
-
-	data := dataFrame.Body().(*Data)
+	// The handleSettings should have flushed 1 byte of pending data
+	fr = <-sc.writer
+	require.Equal(t, FrameData, fr.Type())
+	data := fr.Body().(*Data)
 	require.Equal(t, 1, len(data.Data()))
 	require.False(t, data.EndStream())
-	ReleaseFrameHeader(dataFrame)
+	ReleaseFrameHeader(fr)
 }
 
 func TestConnectionWindowLimitsDataAcrossStreams(t *testing.T) {

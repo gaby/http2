@@ -11,14 +11,20 @@ import (
 // ErrServerSupport indicates whether the server supports HTTP/2 or not.
 var ErrServerSupport = errors.New("server doesn't support HTTP/2")
 
-// clientAdapter adapts a Client.Do method to implement fasthttp.RoundTripper
-type clientAdapter struct {
+// ClientTransport wraps a Client to implement fasthttp.RoundTripper and
+// provides access to the underlying HTTP/2 client for connection management.
+type ClientTransport struct {
 	client *Client
 }
 
-// RoundTrip implements fasthttp.RoundTripper by calling the wrapped client's Do method
-func (ca *clientAdapter) RoundTrip(hc *fasthttp.HostClient, req *fasthttp.Request, resp *fasthttp.Response) (retry bool, err error) {
+// RoundTrip implements fasthttp.RoundTripper by calling the wrapped client's Do method.
+func (ca *ClientTransport) RoundTrip(hc *fasthttp.HostClient, req *fasthttp.Request, resp *fasthttp.Response) (retry bool, err error) {
 	return ca.client.RoundTrip(hc, req, resp)
+}
+
+// Close gracefully closes all HTTP/2 connections managed by this transport.
+func (ca *ClientTransport) Close() {
+	ca.client.Close()
 }
 
 func configureDialer(d *Dialer) {
@@ -52,6 +58,8 @@ func ConfigureClient(c *fasthttp.HostClient, opts ClientOpts) error {
 		Addr:      c.Addr,
 		TLSConfig: c.TLSConfig,
 		NetDial:   c.Dial,
+		Timeout:   opts.DialTimeout,
+		H2C:       opts.H2C,
 	}
 
 	cl := createClient(d, opts)
@@ -74,10 +82,12 @@ func ConfigureClient(c *fasthttp.HostClient, opts ClientOpts) error {
 		return err
 	}
 
-	c.IsTLS = true
-	c.TLSConfig = d.TLSConfig
+	if !opts.H2C {
+		c.IsTLS = true
+		c.TLSConfig = d.TLSConfig
+	}
 
-	c.Transport = &clientAdapter{client: cl}
+	c.Transport = &ClientTransport{client: cl}
 
 	return nil
 }
@@ -112,8 +122,38 @@ func ConfigureServer(s *fasthttp.Server, cnf ServerConfig) *Server {
 
 // ConfigureServerAndConfig configures the fasthttp server to handle HTTP/2 connections
 // and your own tlsConfig file. If you are NOT using your own tls config, you may want to use ConfigureServer.
-func ConfigureServerAndConfig(s *fasthttp.Server, tlsConfig *tls.Config) *Server {
-	var cnf ServerConfig
+func ConfigureServerAndConfig(s *fasthttp.Server, tlsConfig *tls.Config, cnf ...ServerConfig) *Server {
+	var cfg ServerConfig
+	if len(cnf) > 0 {
+		cfg = cnf[0]
+	}
+	cfg.defaults()
+
+	s2 := &Server{
+		s:   s,
+		cnf: cfg,
+	}
+
+	s.NextProto(H2TLSProto, s2.ServeConn)
+	tlsConfig.NextProtos = append(tlsConfig.NextProtos, H2TLSProto)
+
+	return s2
+}
+
+// ConfigureServerH2C configures a fasthttp server to handle HTTP/2 prior-knowledge
+// cleartext (h2c) connections. This enables HTTP/2 without TLS, which is useful
+// for internal services, testing, and behind TLS-terminating load balancers.
+//
+// To use h2c, set up a plain (non-TLS) listener and pass connections through
+// Server.ServeConn directly, or use this with fasthttp's connection handler.
+//
+// Example:
+//
+//	s := &fasthttp.Server{Handler: handler}
+//	h2s := http2.ConfigureServerH2C(s, http2.ServerConfig{})
+//	// For h2c, use ListenAndServe (not ListenAndServeTLS)
+//	s.ListenAndServe(":8080")
+func ConfigureServerH2C(s *fasthttp.Server, cnf ServerConfig) *Server {
 	cnf.defaults()
 
 	s2 := &Server{
@@ -121,10 +161,27 @@ func ConfigureServerAndConfig(s *fasthttp.Server, tlsConfig *tls.Config) *Server
 		cnf: cnf,
 	}
 
-	s.NextProto(H2TLSProto, s2.ServeConn)
-	tlsConfig.NextProtos = append(tlsConfig.NextProtos, H2TLSProto)
+	// Register for h2c protocol negotiation
+	s.NextProto(H2Clean, s2.ServeConn)
 
 	return s2
+}
+
+// ConfigureClientH2C configures the fasthttp.HostClient for cleartext HTTP/2 (h2c).
+// This is a convenience wrapper that sets H2C=true in the ClientOpts.
+func ConfigureClientH2C(c *fasthttp.HostClient, opts ClientOpts) error {
+	opts.H2C = true
+	return ConfigureClient(c, opts)
+}
+
+// GetClientTransport returns the HTTP/2 ClientTransport from a configured
+// fasthttp.HostClient, or nil if the client was not configured for HTTP/2.
+// This is useful for accessing the Close() method for cleanup.
+func GetClientTransport(c *fasthttp.HostClient) *ClientTransport {
+	if ct, ok := c.Transport.(*ClientTransport); ok {
+		return ct
+	}
+	return nil
 }
 
 var ErrNotAvailableStreams = errors.New("ran out of available streams")

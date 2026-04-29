@@ -15,6 +15,247 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
+func TestParseUintBytes(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected int
+		hasErr   bool
+	}{
+		{"0", 0, false},
+		{"200", 200, false},
+		{"404", 404, false},
+		{"1234", 1234, false},
+		{"", 0, true},
+		{"abc", 0, true},
+		{"12a", 0, true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.input, func(t *testing.T) {
+			n, err := parseUintBytes([]byte(tc.input))
+			if tc.hasErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, tc.expected, n)
+			}
+		})
+	}
+}
+
+func TestConnCloseIdempotent(t *testing.T) {
+	conn := NewConn(&stubConn{}, ConnOpts{})
+
+	// First close should succeed
+	err := conn.Close()
+	require.NoError(t, err)
+
+	// Second close should return io.EOF
+	err = conn.Close()
+	require.ErrorIs(t, err, io.EOF)
+
+	// Third close also io.EOF
+	err = conn.Close()
+	require.ErrorIs(t, err, io.EOF)
+}
+
+func TestConnWriteToClosedConn(t *testing.T) {
+	conn := NewConn(&stubConn{}, ConnOpts{})
+	conn.Close()
+
+	ctx := &Ctx{
+		Request:  fasthttp.AcquireRequest(),
+		Response: fasthttp.AcquireResponse(),
+		Err:      make(chan error, 1),
+	}
+	defer fasthttp.ReleaseRequest(ctx.Request)
+	defer fasthttp.ReleaseResponse(ctx.Response)
+
+	conn.Write(ctx)
+
+	select {
+	case err := <-ctx.Err:
+		require.ErrorIs(t, err, ErrConnectionClosed)
+		require.ErrorIs(t, err, net.ErrClosed) // ErrConnectionClosed wraps net.ErrClosed
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for error")
+	}
+}
+
+func TestConnDone(t *testing.T) {
+	// Before handshake, Done returns nil
+	conn := NewConn(&stubConn{}, ConnOpts{})
+	require.Nil(t, conn.Done())
+
+	// After manually setting done (simulating handshake), it's available
+	conn.done = make(chan struct{})
+	ch := conn.Done()
+	require.NotNil(t, ch)
+
+	// Channel should not be closed yet
+	select {
+	case <-ch:
+		t.Fatal("done channel should not be closed yet")
+	default:
+	}
+
+	// Close the done channel
+	close(conn.done)
+	select {
+	case <-ch:
+		// expected
+	case <-time.After(time.Second):
+		t.Fatal("done channel should be closed")
+	}
+}
+
+func TestConnCustomWindowSize(t *testing.T) {
+	// Default window size
+	conn := NewConn(&stubConn{}, ConnOpts{})
+	require.Equal(t, int32(1<<20), conn.maxWindow)
+	require.Equal(t, int32(1<<20), conn.currentWindow)
+
+	// Custom window size
+	conn2 := NewConn(&stubConn{}, ConnOpts{WindowSize: 1 << 22})
+	require.Equal(t, int32(1<<22), conn2.maxWindow)
+	require.Equal(t, int32(1<<22), conn2.currentWindow)
+}
+
+func TestConnRemoteAddr(t *testing.T) {
+	sc := &stubConn{}
+	conn := NewConn(sc, ConnOpts{})
+	require.NotNil(t, conn.RemoteAddr())
+	require.IsType(t, &net.TCPAddr{}, conn.RemoteAddr())
+}
+
+func TestConnLocalAddr(t *testing.T) {
+	sc := &stubConn{}
+	conn := NewConn(sc, ConnOpts{})
+	require.NotNil(t, conn.LocalAddr())
+	require.IsType(t, &net.TCPAddr{}, conn.LocalAddr())
+}
+
+func TestConnAddrNilConn(t *testing.T) {
+	conn := &Conn{}
+	require.Nil(t, conn.RemoteAddr())
+	require.Nil(t, conn.LocalAddr())
+}
+
+func TestConnPingInterval(t *testing.T) {
+	// Default interval when not set
+	conn := NewConn(&stubConn{}, ConnOpts{})
+	require.Equal(t, DefaultPingInterval, conn.PingInterval())
+
+	// Custom interval
+	conn2 := NewConn(&stubConn{}, ConnOpts{PingInterval: 5 * time.Second})
+	require.Equal(t, 5*time.Second, conn2.PingInterval())
+
+	// Negative interval returns default
+	conn3 := NewConn(&stubConn{}, ConnOpts{PingInterval: -1})
+	require.Equal(t, DefaultPingInterval, conn3.PingInterval())
+}
+
+func TestConnPublicAccessors(t *testing.T) {
+	conn := NewConn(&stubConn{}, ConnOpts{})
+
+	// ActiveStreams starts at 0
+	require.Equal(t, int32(0), conn.ActiveStreams())
+
+	// Increment and check
+	atomic.AddInt32(&conn.openStreams, 5)
+	require.Equal(t, int32(5), conn.ActiveStreams())
+
+	// RTT starts at 0
+	require.Equal(t, time.Duration(0), conn.RTT())
+
+	// ServerWindow
+	require.Equal(t, int32(defaultWindowSize), conn.ServerWindow())
+
+	// MaxConcurrentStreams
+	conn.serverS.SetMaxConcurrentStreams(200)
+	require.Equal(t, uint32(200), conn.MaxConcurrentStreams())
+
+	// Closed
+	require.False(t, conn.Closed())
+}
+
+func TestConnStats(t *testing.T) {
+	conn := NewConn(&stubConn{}, ConnOpts{})
+	conn.serverS.SetMaxConcurrentStreams(42)
+	atomic.AddInt32(&conn.openStreams, 3)
+
+	stats := conn.Stats()
+	require.Equal(t, int32(3), stats.ActiveStreams)
+	require.Equal(t, uint32(42), stats.MaxStreams)
+	require.False(t, stats.Closed)
+	require.Equal(t, int32(defaultWindowSize), stats.ServerWindow)
+	require.Equal(t, time.Duration(0), stats.RTT)
+	require.Equal(t, uint32(1), stats.NextStreamID) // initial nextID is 1
+}
+
+func TestConnStatsString(t *testing.T) {
+	stats := ConnStats{
+		ActiveStreams: 5,
+		MaxStreams:    100,
+		ServerWindow:  65535,
+		RTT:           10 * time.Millisecond,
+		UnackedPings:  1,
+		Closed:        false,
+	}
+	s := stats.String()
+	require.Contains(t, s, "state=open")
+	require.Contains(t, s, "streams=5/100")
+	require.Contains(t, s, "window=65535")
+
+	stats.Closed = true
+	s = stats.String()
+	require.Contains(t, s, "state=closed")
+}
+
+func TestTrySendOutNilDone(t *testing.T) {
+	// When done is nil, trySendOut uses non-blocking send
+	conn := &Conn{
+		out: make(chan *FrameHeader, 1),
+	}
+
+	fr := AcquireFrameHeader()
+	conn.trySendOut(fr)
+
+	// Frame should be in the out channel
+	select {
+	case got := <-conn.out:
+		require.Same(t, fr, got)
+		ReleaseFrameHeader(got)
+	default:
+		t.Fatal("expected frame in out channel")
+	}
+
+	// When out channel is full and done is nil, frame is released
+	conn.out = make(chan *FrameHeader) // unbuffered = always full for non-blocking
+	fr2 := AcquireFrameHeader()
+	conn.trySendOut(fr2) // should not block, frame is released
+}
+
+func TestTrySendOutDoneClosed(t *testing.T) {
+	// When done is closed, trySendOut should release the frame
+	conn := &Conn{
+		out:  make(chan *FrameHeader), // unbuffered
+		done: make(chan struct{}),
+	}
+	close(conn.done)
+
+	fr := AcquireFrameHeader()
+	conn.trySendOut(fr) // should not block
+}
+
+func BenchmarkParseUintBytes(b *testing.B) {
+	data := []byte("200")
+	b.ReportAllocs()
+	for b.Loop() {
+		parseUintBytes(data)
+	}
+}
+
 func TestConnHandleSettingsAndPing(t *testing.T) {
 	conn := &Conn{
 		enc: AcquireHPACK(),
@@ -692,6 +933,37 @@ func TestConnWriteRequest(t *testing.T) {
 
 	_, ok := conn.reqQueued.Load(ctx.streamID)
 	require.True(t, ok)
+}
+
+func BenchmarkConnWriteRequestGET(b *testing.B) {
+	rawConn := &stubConn{}
+	conn := NewConn(rawConn, ConnOpts{})
+	conn.serverS.SetMaxConcurrentStreams(1 << 20) // high limit
+
+	req := fasthttp.AcquireRequest()
+	res := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(res)
+
+	req.SetRequestURI("https://example.com/api/v1/users")
+	req.Header.SetMethod("GET")
+	req.Header.Set("Accept", "application/json")
+	req.Header.SetUserAgent("fasthttp/2.0")
+
+	b.ReportAllocs()
+	for b.Loop() {
+		rawConn.Buffer.Reset()
+
+		ctx := &Ctx{
+			Request:  req,
+			Response: res,
+			Err:      make(chan error, 1),
+		}
+
+		conn.writeRequest(ctx)
+		conn.reqQueued.Delete(atomic.LoadUint32(&ctx.streamID))
+		atomic.AddInt32(&conn.openStreams, -1)
+	}
 }
 
 type stubConn struct {

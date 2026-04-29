@@ -31,6 +31,53 @@ type ClientOpts struct {
 	// If MaxResponseTime is 0, DefaultMaxResponseTime will be used.
 	// If MaxResponseTime is <0, the max response timeout check will be disabled.
 	MaxResponseTime time.Duration
+
+	// MaxConns limits the maximum number of concurrent HTTP/2 connections
+	// the client will open to the host. A new connection is only created when
+	// all existing connections are at their max concurrent streams limit.
+	//
+	// A value of 0 means unlimited connections (the default).
+	MaxConns int
+
+	// DialTimeout sets a deadline for the TCP connection and TLS handshake
+	// when creating new connections. A value of 0 means no timeout.
+	DialTimeout time.Duration
+
+	// WindowSize sets the connection-level flow control window size for
+	// new connections. A value of 0 uses the default of 1 MiB (1 << 20).
+	// Maximum value is 2^31 - 1 (2147483647).
+	WindowSize int32
+
+	// DisablePingChecking disables the unacknowledged PING check.
+	// By default, the client closes connections that fail to respond
+	// to 3 consecutive PINGs. Set this to true for connections where
+	// the server may not respond to PINGs promptly.
+	DisablePingChecking bool
+
+	// H2C enables cleartext HTTP/2 (prior knowledge) without TLS.
+	// When true, the client connects via plain TCP without TLS negotiation.
+	// Use this for internal services or connections behind TLS-terminating proxies.
+	H2C bool
+
+	// EnableServerPush enables receiving server push (PUSH_PROMISE) frames.
+	// When false (default), the client sends SETTINGS_ENABLE_PUSH=0 to the server.
+	EnableServerPush bool
+}
+
+// String returns a human-readable representation of the client options.
+func (opts ClientOpts) String() string {
+	return "ClientOpts{ping=" + opts.PingInterval.String() +
+		", maxResp=" + opts.MaxResponseTime.String() +
+		", maxConns=" + uitoa(uint64(opts.MaxConns)) +
+		", h2c=" + boolStr(opts.H2C) +
+		", push=" + boolStr(opts.EnableServerPush) + "}"
+}
+
+func boolStr(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
 }
 
 func (opts *ClientOpts) sanitize() {
@@ -40,6 +87,12 @@ func (opts *ClientOpts) sanitize() {
 
 	if opts.PingInterval <= 0 {
 		opts.PingInterval = DefaultPingInterval
+	}
+
+	if opts.WindowSize < 0 {
+		opts.WindowSize = 0 // use default
+	} else if opts.WindowSize > maxWindowIncrement {
+		opts.WindowSize = maxWindowIncrement
 	}
 }
 
@@ -71,11 +124,11 @@ func (ctx *Ctx) resolve(err error) {
 }
 
 type Client struct {
-	opts ClientOpts
-
 	d *Dialer
 
 	conns list.List
+
+	opts ClientOpts
 
 	lck sync.Mutex
 }
@@ -89,6 +142,18 @@ func createClient(d *Dialer, opts ClientOpts) *Client {
 	}
 
 	return cl
+}
+
+// Close gracefully closes all connections currently managed by this client
+// and clears the client's tracked connection list.
+func (cl *Client) Close() {
+	cl.lck.Lock()
+	defer cl.lck.Unlock()
+
+	for e := cl.conns.Front(); e != nil; e = e.Next() {
+		_ = e.Value.(*Conn).Close()
+	}
+	cl.conns.Init()
 }
 
 func (cl *Client) onConnectionDropped(c *Conn) {
@@ -108,8 +173,12 @@ func (cl *Client) onConnectionDropped(c *Conn) {
 
 func (cl *Client) createConn() (*Conn, *list.Element, error) {
 	c, err := cl.d.Dial(ConnOpts{
-		PingInterval: cl.d.PingInterval,
-		OnDisconnect: cl.onConnectionDropped,
+		PingInterval:        cl.opts.PingInterval,
+		OnDisconnect:        cl.onConnectionDropped,
+		OnRTT:               cl.opts.OnRTT,
+		DisablePingChecking: cl.opts.DisablePingChecking,
+		WindowSize:          cl.opts.WindowSize,
+		EnableServerPush:    cl.opts.EnableServerPush,
 	})
 	if err != nil {
 		return nil, nil, err
@@ -119,6 +188,10 @@ func (cl *Client) createConn() (*Conn, *list.Element, error) {
 }
 
 var ErrRequestCanceled = errors.New("request timed out")
+
+// ErrMaxConnsReached is returned when all connections are busy and the
+// MaxConns limit has been reached, preventing a new connection from being created.
+var ErrMaxConnsReached = errors.New("maximum number of HTTP/2 connections reached")
 
 func (cl *Client) RoundTrip(_ *fasthttp.HostClient, req *fasthttp.Request, res *fasthttp.Response) (retry bool, err error) {
 	var c *Conn
@@ -131,8 +204,13 @@ func (cl *Client) RoundTrip(_ *fasthttp.HostClient, req *fasthttp.Request, res *
 		if e != nil {
 			c = e.Value.(*Conn)
 		} else {
+			if cl.opts.MaxConns > 0 && cl.conns.Len() >= cl.opts.MaxConns {
+				cl.lck.Unlock()
+				return false, ErrMaxConnsReached
+			}
 			c, e, err = cl.createConn()
 			if err != nil {
+				cl.lck.Unlock()
 				return false, err
 			}
 		}

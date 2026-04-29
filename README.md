@@ -2,20 +2,30 @@
 
 http2 is an implementation of HTTP/2 protocol for [fasthttp](https://github.com/valyala/fasthttp).
 
+## Features
+
+- 4x faster than net/http2 (533k vs 124k req/s)
+- Zero-allocation hot paths using sync.Pool
+- TLS (h2) and cleartext (h2c) support
+- Server push promise support (frame-level)
+- Response trailer support
+- Flow control with configurable window sizes
+- Graceful server shutdown
+- Connection lifecycle callbacks
+- Ping/RTT measurement
+- HPACK header compression with static table optimization
+
 ## Download
 
 ```bash
-go get github.com/dgrr/http2@v0.3.5
+go get github.com/dgrr/http2
 ```
 
 ## Help
 
 If you need any help to set up, contributing or understanding this repo, you can contact me on [gofiber's Discord](https://gofiber.io/discord).
 
-## How to use the server?
-
-The server can only be used if your server supports TLS.
-Then, you can call [ConfigureServer](https://pkg.go.dev/github.com/dgrr/http2#ConfigureServer).
+## Server (TLS)
 
 ```go
 package main
@@ -31,15 +41,28 @@ func main() {
         Name:    "HTTP2 test",
     }
 
-    http2.ConfigureServer(s, http2.ServerConfig{})
+    h2s := http2.ConfigureServer(s, http2.ServerConfig{
+        MaxConcurrentStreams: 250,
+    })
+    defer h2s.Shutdown() // graceful shutdown
     
-    s.ListenAndServeTLS(...)
+    s.ListenAndServeTLS(":443", "cert.pem", "key.pem")
 }
 ```
 
-## How to use the client?
+## Server (h2c / cleartext)
 
-The HTTP/2 client only works with the HostClient.
+For internal services or behind TLS-terminating load balancers:
+
+```go
+s := &fasthttp.Server{Handler: yourHandler}
+http2.ConfigureServerH2C(s, http2.ServerConfig{})
+s.ListenAndServe(":8080")
+```
+
+## Client
+
+The HTTP/2 client works with fasthttp's HostClient:
 
 ```go
 package main
@@ -68,6 +91,84 @@ func main() {
 
         fmt.Printf("%d: %s\n", statusCode, body)
 }
+```
+
+## Response Trailers
+
+Handlers can send HTTP/2 trailing headers (used by gRPC and other protocols):
+
+```go
+handler := func(ctx *fasthttp.RequestCtx) {
+    ctx.SetBodyString("hello")
+    ctx.SetUserValue(http2.TrailerUserValueKey, map[string]string{
+        "grpc-status":  "0",
+        "grpc-message": "",
+    })
+}
+```
+
+## Server Push
+
+Handlers can initiate HTTP/2 server push for related resources:
+
+```go
+handler := func(ctx *fasthttp.RequestCtx) {
+    // Push is only available if the client supports it
+    if push, ok := ctx.UserValue(http2.PusherUserValueKey).(func(string, string)); ok {
+        push("GET", "/static/style.css")
+        push("GET", "/static/app.js")
+    }
+    ctx.SetBodyString("<html>...</html>")
+}
+```
+
+## Server Configuration
+
+```go
+http2.ConfigureServer(s, http2.ServerConfig{
+    PingInterval:        10 * time.Second,
+    MaxConcurrentStreams: 250,
+    MaxHeaderListSize:   64 * 1024,
+    MaxFrameSize:        32768,
+    MaxWindowSize:       1 << 24,          // 16 MiB
+    HandshakeTimeout:    5 * time.Second,
+    EnqueueTimeout:      2 * time.Second,
+    Debug:               false,
+    OnNewConnection: func(c net.Conn) {
+        log.Printf("new h2 conn from %s", c.RemoteAddr())
+    },
+    OnConnectionClosed: func(c net.Conn) {
+        log.Printf("h2 conn closed from %s", c.RemoteAddr())
+    },
+})
+```
+
+## Client Configuration
+
+```go
+http2.ConfigureClient(hc, http2.ClientOpts{
+    PingInterval:        3 * time.Second,
+    MaxResponseTime:     time.Minute,
+    MaxConns:            10,
+    DialTimeout:         5 * time.Second,
+    DisablePingChecking: false,
+    OnRTT: func(rtt time.Duration) {
+        log.Printf("RTT: %s", rtt)
+    },
+})
+```
+
+## Monitoring
+
+```go
+// Server
+srv.ActiveConnections() // int64
+
+// Client connection
+conn.Stats() // ConnStats{streams, rtt, window, ...}
+conn.RTT()
+conn.ActiveStreams()
+conn.ServerWindow()
 ```
 
 ## Benchmarks

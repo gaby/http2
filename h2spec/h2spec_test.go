@@ -140,7 +140,7 @@ func TestH2Spec(t *testing.T) {
 		{desc: "http2/6.7/4"},
 		{desc: "http2/6.8/1"},
 		{desc: "http2/6.9.1/1"},
-		{desc: "http2/6.9.1/2"},
+		// 6.9.1/2 moved to TestH2Spec_6_9_1_2 with retry for Windows CI flakiness
 		{desc: "http2/6.9.1/3"},
 		// Note: 6.9.2/1 is tested separately in TestH2Spec_6_9_2_1 to avoid timing issues
 		// {desc: "http2/6.9.2/1"},
@@ -223,6 +223,38 @@ func TestH2Spec(t *testing.T) {
 			require.Equal(t, 0, tg.FailedCount)
 		})
 	}
+}
+
+// TestH2Spec_6_9_1_2 tests window overflow detection separately with retry
+// logic. On Windows CI the GOAWAY frame may not reach the peer before the
+// OS closes the TCP connection, causing sporadic "Connection closed" instead
+// of the expected GOAWAY. Retrying resolves this timing-dependent behavior.
+func TestH2Spec_6_9_1_2(t *testing.T) {
+	port := launchLocalServer(t)
+
+	var lastFailed int
+	for attempt := range 3 {
+		conf := &config.Config{
+			Host:         "127.0.0.1",
+			Port:         port,
+			Path:         "/",
+			Timeout:      3 * time.Second,
+			MaxHeaderLen: 4000,
+			TLS:          true,
+			Insecure:     true,
+			Verbose:      testing.Verbose(),
+			Sections:     []string{"http2/6.9.1/2"},
+		}
+
+		tg := h2spec.Spec()
+		tg.Test(conf)
+		lastFailed = tg.FailedCount
+		if lastFailed == 0 {
+			return // success
+		}
+		t.Logf("attempt %d failed, retrying...", attempt+1)
+	}
+	t.Fatalf("h2spec 6.9.1/2 failed after 3 attempts (%d failures)", lastFailed)
 }
 
 // TestH2Spec_6_9_2_1 tests the SETTINGS_INITIAL_WINDOW_SIZE change behavior

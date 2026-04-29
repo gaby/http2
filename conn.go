@@ -9,13 +9,35 @@ import (
 	"io"
 	"net"
 	"slices"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/valyala/fasthttp"
 )
+
+var errIntegerOverflow = errors.New("integer overflow")
+
+// parseUintBytes parses an unsigned integer from a byte slice without
+// allocating a string. Returns the parsed value and any error.
+func parseUintBytes(b []byte) (int, error) {
+	if len(b) == 0 {
+		return 0, errors.New("empty number")
+	}
+	const maxInt = int(^uint(0) >> 1)
+	n := 0
+	for _, c := range b {
+		if c < '0' || c > '9' {
+			return 0, fmt.Errorf("invalid digit: %c", c)
+		}
+		digit := int(c - '0')
+		if n > (maxInt-digit)/10 {
+			return 0, errIntegerOverflow
+		}
+		n = n*10 + digit
+	}
+	return n, nil
+}
 
 // windowWaitTimeout is the maximum duration to wait for flow control window credit
 // before giving up and returning a flow control–related error.
@@ -25,6 +47,10 @@ const windowWaitTimeout = 200 * time.Millisecond
 type ConnOpts struct {
 	// OnDisconnect is a callback that fires when the Conn disconnects.
 	OnDisconnect func(c *Conn)
+
+	// OnRTT is called after each round-trip time measurement when a PONG is received.
+	// The duration is the time between sending the PING and receiving the PONG.
+	OnRTT func(time.Duration)
 
 	// PingInterval defines the interval in which the client will ping the server.
 	//
@@ -36,8 +62,18 @@ type ConnOpts struct {
 	// A value of 0 uses the default of 200 ms.
 	WindowWaitTimeout time.Duration
 
+	// WindowSize sets the connection-level flow control window size.
+	// A value of 0 uses the default of 1 MiB (1 << 20).
+	// Maximum value is 2^31 - 1.
+	WindowSize int32
+
 	// DisablePingChecking ...
 	DisablePingChecking bool
+
+	// EnableServerPush tells the server that this client supports server push.
+	// When false (default), SETTINGS_ENABLE_PUSH=0 is sent to prevent the server
+	// from sending PUSH_PROMISE frames.
+	EnableServerPush bool
 }
 
 // Handshake performs an HTTP/2 handshake. It sends the preface (if requested),
@@ -97,6 +133,7 @@ type Conn struct {
 	out chan *FrameHeader
 
 	onDisconnect func(*Conn)
+	onRTT        func(time.Duration)
 
 	done chan struct{} // closed when writeLoop exits
 
@@ -104,6 +141,8 @@ type Conn struct {
 
 	current Settings
 	serverS Settings
+
+	lastRTT atomic.Int64 // nanoseconds
 
 	pingInterval time.Duration
 
@@ -141,6 +180,10 @@ func NewConn(c net.Conn, opts ConnOpts) *Conn {
 	if wwt <= 0 {
 		wwt = windowWaitTimeout
 	}
+	winSize := opts.WindowSize
+	if winSize <= 0 {
+		winSize = 1 << 20 // 1 MiB default
+	}
 	nc := &Conn{
 		c:                 c,
 		br:                bufio.NewReaderSize(c, 4096),
@@ -149,19 +192,20 @@ func NewConn(c net.Conn, opts ConnOpts) *Conn {
 		dec:               AcquireHPACK(),
 		nextID:            1,
 		serverWindow:      int32(defaultWindowSize), // RFC 7540 default initial window
-		maxWindow:         1 << 20,
-		currentWindow:     1 << 20,
+		maxWindow:         winSize,
+		currentWindow:     winSize,
 		in:                make(chan *Ctx, 128),
 		out:               make(chan *FrameHeader, 128),
 		pingInterval:      opts.PingInterval,
 		disableAcks:       opts.DisablePingChecking,
 		onDisconnect:      opts.OnDisconnect,
+		onRTT:             opts.OnRTT,
 		windowWaitTimeout: wwt,
 	}
 	nc.windowCond = sync.NewCond(&nc.windowMu)
 
-	nc.current.SetMaxWindowSize(1 << 20)
-	nc.current.SetPush(false)
+	nc.current.SetMaxWindowSize(uint32(winSize))
+	nc.current.SetPush(opts.EnableServerPush)
 
 	return nc
 }
@@ -183,21 +227,24 @@ type Dialer struct {
 	//
 	// An interval of 0 will make the library to use DefaultPingInterval. Because ping intervals can't be disabled.
 	PingInterval time.Duration
+
+	// Timeout sets a deadline for the TCP connection and TLS handshake.
+	// A value of 0 means no timeout (the default).
+	Timeout time.Duration
+
+	// H2C enables cleartext HTTP/2 (prior knowledge) without TLS.
+	// When true, the Dialer connects via plain TCP and skips TLS negotiation.
+	H2C bool
 }
 
-func (d *Dialer) tryDial() (net.Conn, error) {
-	if d.TLSConfig == nil || !slices.Contains(d.TLSConfig.NextProtos, "h2") {
-		configureDialer(d)
-	}
-
+func (d *Dialer) dialTCP() (net.Conn, error) {
 	var c net.Conn
 	var err error
 
 	if d.NetDial != nil {
 		c, err = d.NetDial(d.Addr)
-		if err != nil {
-			return nil, err
-		}
+	} else if d.Timeout > 0 {
+		c, err = net.DialTimeout("tcp", d.Addr, d.Timeout)
 	} else {
 		tcpAddr, err := net.ResolveTCPAddr("tcp", d.Addr)
 		if err != nil {
@@ -207,6 +254,27 @@ func (d *Dialer) tryDial() (net.Conn, error) {
 		if err != nil {
 			return nil, err
 		}
+		return c, nil
+	}
+	return c, err
+}
+
+func (d *Dialer) tryDial() (net.Conn, error) {
+	if d.H2C {
+		return d.dialTCP()
+	}
+
+	if d.TLSConfig == nil || !slices.Contains(d.TLSConfig.NextProtos, "h2") {
+		configureDialer(d)
+	}
+
+	c, err := d.dialTCP()
+	if err != nil {
+		return nil, err
+	}
+
+	if d.Timeout > 0 {
+		_ = c.SetDeadline(time.Now().Add(d.Timeout))
 	}
 
 	tlsConn := tls.Client(c, d.TLSConfig)
@@ -214,6 +282,11 @@ func (d *Dialer) tryDial() (net.Conn, error) {
 	if err := tlsConn.Handshake(); err != nil {
 		_ = c.Close()
 		return nil, err
+	}
+
+	// Clear the deadline after successful handshake
+	if d.Timeout > 0 {
+		_ = c.SetDeadline(time.Time{})
 	}
 
 	if tlsConn.ConnectionState().NegotiatedProtocol != "h2" {
@@ -380,9 +453,109 @@ func (c *Conn) CanOpenStream() bool {
 	return atomic.LoadInt32(&c.openStreams) < int32(maxStreams)
 }
 
+// ActiveStreams returns the number of currently open streams on this connection.
+func (c *Conn) ActiveStreams() int32 {
+	return atomic.LoadInt32(&c.openStreams)
+}
+
+// RTT returns the last measured round-trip time to the server.
+// Returns 0 if no PONG has been received yet.
+func (c *Conn) RTT() time.Duration {
+	return time.Duration(c.lastRTT.Load())
+}
+
+// ServerWindow returns the current server-side connection flow control window.
+// A value near zero indicates back-pressure from the server.
+func (c *Conn) ServerWindow() int32 {
+	return atomic.LoadInt32(&c.serverWindow)
+}
+
+// Stats returns a snapshot of connection statistics for monitoring.
+func (c *Conn) Stats() ConnStats {
+	return ConnStats{
+		ActiveStreams: c.ActiveStreams(),
+		RTT:           c.RTT(),
+		ServerWindow:  c.ServerWindow(),
+		MaxStreams:    c.MaxConcurrentStreams(),
+		Closed:        c.Closed(),
+		UnackedPings:  atomic.LoadInt32(&c.unacks),
+		NextStreamID:  atomic.LoadUint32(&c.nextID),
+		PingInterval:  c.PingInterval(),
+	}
+}
+
+// ConnStats holds a snapshot of connection statistics.
+type ConnStats struct {
+	RTT           time.Duration
+	PingInterval  time.Duration
+	ActiveStreams int32
+	ServerWindow  int32
+	MaxStreams    uint32
+	NextStreamID  uint32
+	UnackedPings  int32
+	Closed        bool
+}
+
+// String returns a human-readable representation of connection stats.
+func (s ConnStats) String() string {
+	state := "open"
+	if s.Closed {
+		state = "closed"
+	}
+	return fmt.Sprintf(
+		"ConnStats{state=%s, streams=%d/%d, window=%d, rtt=%s, pings_unacked=%d}",
+		state, s.ActiveStreams, s.MaxStreams, s.ServerWindow, s.RTT, s.UnackedPings,
+	)
+}
+
+// MaxConcurrentStreams returns the maximum number of concurrent streams
+// allowed by the server on this connection.
+func (c *Conn) MaxConcurrentStreams() uint32 {
+	c.serverSMu.RLock()
+	n := c.serverS.maxStreams
+	c.serverSMu.RUnlock()
+	return n
+}
+
+// RemoteAddr returns the remote network address of the underlying connection.
+// Returns nil if the connection is not set.
+func (c *Conn) RemoteAddr() net.Addr {
+	if c.c == nil {
+		return nil
+	}
+	return c.c.RemoteAddr()
+}
+
+// LocalAddr returns the local network address of the underlying connection.
+// Returns nil if the connection is not set.
+func (c *Conn) LocalAddr() net.Addr {
+	if c.c == nil {
+		return nil
+	}
+	return c.c.LocalAddr()
+}
+
+// PingInterval returns the interval at which the connection sends PING frames
+// to the peer. If the connection was created with a zero or negative interval,
+// DefaultPingInterval is used once the write loop starts; this accessor
+// reflects the currently configured value.
+func (c *Conn) PingInterval() time.Duration {
+	if c.pingInterval <= 0 {
+		return DefaultPingInterval
+	}
+	return c.pingInterval
+}
+
 // Closed indicates whether the connection is closed or not.
 func (c *Conn) Closed() bool {
 	return atomic.LoadUint64(&c.closed) == 1
+}
+
+// Done returns a channel that is closed when the connection's write loop exits.
+// This is useful for select-based event loops that need to react to connection
+// teardown. Returns nil if the connection was never fully handshaked.
+func (c *Conn) Done() <-chan struct{} {
+	return c.done
 }
 
 // Close closes the connection gracefully, sending a GoAway message
@@ -433,19 +606,33 @@ func (c *Conn) Close() error {
 	return nil
 }
 
+// Do sends a request and waits for the response synchronously.
+// This is a convenience wrapper around Write that handles Ctx creation.
+func (c *Conn) Do(req *fasthttp.Request, resp *fasthttp.Response) error {
+	ctx := &Ctx{
+		Request:  req,
+		Response: resp,
+		Err:      make(chan error, 1),
+	}
+
+	c.Write(ctx)
+
+	return <-ctx.Err
+}
+
 // Write queues the request to be sent to the server.
 //
 // If the connection is already closed, the request is resolved with
 // net.ErrClosed instead of panicking.
 func (c *Conn) Write(r *Ctx) {
 	if atomic.LoadUint64(&c.closed) == 1 {
-		r.resolve(net.ErrClosed)
+		r.resolve(ErrConnectionClosed)
 		return
 	}
 
 	defer func() {
 		if recover() != nil {
-			r.resolve(net.ErrClosed)
+			r.resolve(ErrConnectionClosed)
 		}
 	}()
 
@@ -536,7 +723,7 @@ func (c *Conn) writeLoop() {
 			ga := AcquireFrame(FrameGoAway).(*GoAway)
 			ga.SetStream(0)
 			ga.SetCode(NoError)
-			ga.SetData([]byte(NoError.String()))
+			ga.SetDataString(NoError.String())
 			fr.SetBody(ga)
 			_, _ = fr.WriteTo(c.bw)
 			_ = c.bw.Flush()
@@ -892,6 +1079,11 @@ loop:
 				c.handlePing(ping)
 			} else {
 				atomic.AddInt32(&c.unacks, -1)
+				rtt := time.Since(ping.DataAsTime())
+				c.lastRTT.Store(int64(rtt))
+				if c.onRTT != nil {
+					c.onRTT(rtt)
+				}
 			}
 		case FrameGoAway:
 			ga := fr.Body().(*GoAway)
@@ -1032,19 +1224,20 @@ func (c *Conn) readHeader(b []byte, res *fasthttp.Response) error {
 
 		if hf.IsPseudo() {
 			if hf.KeyBytes()[1] == 's' { // status
-				n, err := strconv.ParseInt(hf.Value(), 10, 64)
+				n, err := parseUintBytes(hf.ValueBytes())
 				if err != nil {
 					return err
 				}
 
-				res.SetStatusCode(int(n))
+				res.SetStatusCode(n)
 				continue
 			}
 		}
 
 		if bytes.Equal(hf.KeyBytes(), StringContentLength) {
-			n, _ := strconv.Atoi(hf.Value())
-			res.Header.SetContentLength(n)
+			if n, err := parseUintBytes(hf.ValueBytes()); err == nil {
+				res.Header.SetContentLength(n)
+			}
 		} else {
 			res.Header.AddBytesKV(hf.KeyBytes(), hf.ValueBytes())
 		}

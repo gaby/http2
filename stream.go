@@ -168,3 +168,30 @@ func (s *Stream) Ctx() *fasthttp.RequestCtx {
 func (s *Stream) SetData(ctx *fasthttp.RequestCtx) {
 	s.ctx = ctx
 }
+
+// String returns a human-readable representation of the stream.
+func (s *Stream) String() string {
+	return "Stream{id=" + uitoa(uint64(s.id)) + ", state=" + s.state.String() +
+		", window=" + itoa(s.window) + ", sendWindow=" + itoa(s.sendWindow) + "}"
+}
+
+func uitoa(n uint64) string {
+	if n < 10 {
+		return string(rune('0' + n))
+	}
+	var buf [20]byte
+	i := len(buf) - 1
+	for n > 0 {
+		buf[i] = byte('0' + n%10)
+		n /= 10
+		i--
+	}
+	return string(buf[i+1:])
+}
+
+func itoa(n int64) string {
+	if n < 0 {
+		return "-" + uitoa(uint64(-n))
+	}
+	return uitoa(uint64(n))
+}

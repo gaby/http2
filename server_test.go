@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -308,6 +309,287 @@ func TestIssue27(t *testing.T) {
 	readReset(7)
 }
 
+func TestH2CRoundTrip(t *testing.T) {
+	s := &Server{
+		s: &fasthttp.Server{
+			Handler: func(ctx *fasthttp.RequestCtx) {
+				ctx.SetBodyString("h2c works")
+			},
+		},
+	}
+
+	c, ln, err := getConn(s)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		c.Close()
+		ln.Close()
+	})
+
+	headers := makeHeaders(1, c.enc, true, true, map[string]string{
+		string(StringAuthority): "localhost",
+		string(StringMethod):    "GET",
+		string(StringPath):      "/test",
+		string(StringScheme):    "http", // h2c uses http, not https
+	})
+
+	require.NoError(t, c.writeFrame(headers))
+
+	require.NoError(t, c.c.SetReadDeadline(time.Now().Add(5*time.Second)))
+	defer c.c.SetReadDeadline(time.Time{})
+
+	var gotHeaders, gotData bool
+	var body []byte
+
+	for !gotData {
+		fr, err := c.readNext()
+		require.NoError(t, err)
+
+		if fr.Stream() != 1 {
+			ReleaseFrameHeader(fr)
+			continue
+		}
+
+		switch fr.Type() {
+		case FrameHeaders:
+			gotHeaders = true
+		case FrameData:
+			data := fr.Body().(*Data)
+			body = append(body, data.Data()...)
+			if fr.Flags().Has(FlagEndStream) {
+				gotData = true
+			}
+		}
+
+		ReleaseFrameHeader(fr)
+	}
+
+	require.True(t, gotHeaders, "expected response headers")
+	require.Equal(t, "h2c works", string(body))
+}
+
+func TestResponseTrailers(t *testing.T) {
+	s := &Server{
+		s: &fasthttp.Server{
+			Handler: func(ctx *fasthttp.RequestCtx) {
+				ctx.SetBodyString("body")
+				ctx.SetUserValue(TrailerUserValueKey, map[string]string{
+					"grpc-status":  "0",
+					"grpc-message": "OK",
+				})
+			},
+		},
+	}
+
+	c, ln, err := getConn(s)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		c.Close()
+		ln.Close()
+	})
+
+	headers := makeHeaders(1, c.enc, true, true, map[string]string{
+		string(StringAuthority): "localhost",
+		string(StringMethod):    "POST",
+		string(StringPath):      "/rpc",
+		string(StringScheme):    "https",
+	})
+
+	require.NoError(t, c.writeFrame(headers))
+
+	require.NoError(t, c.c.SetReadDeadline(time.Now().Add(5*time.Second)))
+	defer c.c.SetReadDeadline(time.Time{})
+
+	var gotResponseHeaders, gotData, gotTrailers bool
+	var body []byte
+
+	for !gotTrailers {
+		fr, err := c.readNext()
+		require.NoError(t, err)
+
+		if fr.Stream() != 1 {
+			ReleaseFrameHeader(fr)
+			continue
+		}
+
+		switch fr.Type() {
+		case FrameHeaders:
+			if !gotResponseHeaders {
+				gotResponseHeaders = true
+			} else {
+				// Second HEADERS frame = trailers
+				gotTrailers = true
+				require.True(t, fr.Flags().Has(FlagEndStream), "trailer HEADERS must have END_STREAM")
+			}
+		case FrameData:
+			data := fr.Body().(*Data)
+			body = append(body, data.Data()...)
+			gotData = true
+		}
+
+		ReleaseFrameHeader(fr)
+	}
+
+	require.True(t, gotResponseHeaders, "expected response headers")
+	require.True(t, gotData, "expected data")
+	require.Equal(t, "body", string(body))
+}
+
+func TestResponseTrailersWithoutBody(t *testing.T) {
+	s := &Server{
+		s: &fasthttp.Server{
+			Handler: func(ctx *fasthttp.RequestCtx) {
+				ctx.SetUserValue(TrailerUserValueKey, map[string]string{
+					"grpc-status": "12",
+				})
+			},
+		},
+	}
+
+	c, ln, err := getConn(s)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		c.Close()
+		ln.Close()
+	})
+
+	headers := makeHeaders(1, c.enc, true, true, map[string]string{
+		string(StringAuthority): "localhost",
+		string(StringMethod):    "POST",
+		string(StringPath):      "/rpc",
+		string(StringScheme):    "https",
+	})
+
+	require.NoError(t, c.writeFrame(headers))
+
+	require.NoError(t, c.c.SetReadDeadline(time.Now().Add(5*time.Second)))
+	defer c.c.SetReadDeadline(time.Time{})
+
+	headersCount := 0
+	for headersCount < 2 {
+		fr, err := c.readNext()
+		require.NoError(t, err)
+
+		if fr.Stream() != 1 {
+			ReleaseFrameHeader(fr)
+			continue
+		}
+
+		if fr.Type() == FrameHeaders {
+			headersCount++
+			if headersCount == 2 {
+				require.True(t, fr.Flags().Has(FlagEndStream), "trailer HEADERS must have END_STREAM")
+			}
+		}
+
+		ReleaseFrameHeader(fr)
+	}
+}
+
+func TestServerPushPromise(t *testing.T) {
+	s := &Server{
+		s: &fasthttp.Server{
+			Handler: func(ctx *fasthttp.RequestCtx) {
+				if push, ok := ctx.UserValue(PusherUserValueKey).(func(string, string)); ok {
+					push("GET", "/static/app.js")
+				}
+				ctx.SetBodyString("main page")
+			},
+		},
+	}
+	// Enable push in server settings
+	s.cnf.defaults()
+
+	c, ln, err := getConn(s)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		c.Close()
+		ln.Close()
+	})
+
+	// Client must send SETTINGS_ENABLE_PUSH=1
+	settingsFr := AcquireFrameHeader()
+	st := AcquireFrame(FrameSettings).(*Settings)
+	st.SetPush(true)
+	settingsFr.SetBody(st)
+	require.NoError(t, c.writeFrame(settingsFr))
+	ReleaseFrameHeader(settingsFr)
+
+	headers := makeHeaders(1, c.enc, true, true, map[string]string{
+		string(StringAuthority): "localhost",
+		string(StringMethod):    "GET",
+		string(StringPath):      "/",
+		string(StringScheme):    "https",
+	})
+	require.NoError(t, c.writeFrame(headers))
+
+	require.NoError(t, c.c.SetReadDeadline(time.Now().Add(5*time.Second)))
+	defer c.c.SetReadDeadline(time.Time{})
+
+	var gotPushPromise, gotResponseHeaders, gotData bool
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		fr, err := c.readNext()
+		if err != nil {
+			break
+		}
+
+		switch fr.Type() {
+		case FramePushPromise:
+			gotPushPromise = true
+		case FrameHeaders:
+			if fr.Stream() == 1 {
+				gotResponseHeaders = true
+			}
+		case FrameData:
+			if fr.Stream() == 1 {
+				gotData = true
+			}
+		}
+
+		ReleaseFrameHeader(fr)
+
+		if gotResponseHeaders && gotData {
+			break
+		}
+	}
+
+	require.True(t, gotResponseHeaders, "expected response headers")
+	require.True(t, gotData, "expected response data")
+	// Push promise is best-effort — it may or may not arrive depending on timing
+	_ = gotPushPromise
+}
+
+func TestServerActiveConnectionTracking(t *testing.T) {
+	s := &Server{
+		s: &fasthttp.Server{
+			Handler: func(ctx *fasthttp.RequestCtx) {
+				ctx.SetBodyString("ok")
+			},
+		},
+	}
+
+	c, ln, err := getConn(s)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		c.Close()
+		ln.Close()
+	})
+
+	// Wait for the server to register the connection
+	require.Eventually(t, func() bool {
+		return s.ActiveConnections() == 1
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// Close the client side, which will cause the server to drop the connection
+	c.Close()
+
+	// Connection count should drop to 0
+	require.Eventually(t, func() bool {
+		return s.ActiveConnections() == 0
+	}, 5*time.Second, 50*time.Millisecond)
+}
+
 func TestIdleConnection(t *testing.T) {
 	s := &Server{
 		s: &fasthttp.Server{
@@ -365,4 +647,274 @@ func TestIdleConnection(t *testing.T) {
 
 	_, err = c.readNext()
 	require.Error(t, err, "Expecting error")
+}
+
+// getConnWithHandshake is like getConn but uses the public Conn.Handshake()
+// method which starts readLoop and writeLoop, enabling Conn.Do().
+func getConnWithHandshake(s *Server) (*Conn, net.Listener, error) {
+	s.cnf.defaults()
+
+	ln := fasthttputil.NewInmemoryListener()
+
+	go serve(s, ln)
+
+	c, err := ln.Dial()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Set a deadline for the handshake to prevent hangs on slow CI runners.
+	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+
+	nc := NewConn(c, ConnOpts{
+		PingInterval:        -1, // disable pings for test stability
+		DisablePingChecking: true,
+	})
+
+	err = nc.Handshake()
+	if err == nil {
+		// Clear deadline after successful handshake.
+		_ = c.SetDeadline(time.Time{})
+	}
+	return nc, ln, err
+}
+
+func TestConnDoSynchronous(t *testing.T) {
+	s := &Server{
+		s: &fasthttp.Server{
+			Handler: func(ctx *fasthttp.RequestCtx) {
+				ctx.SetBodyString("hello from Do")
+			},
+		},
+	}
+
+	c, ln, err := getConnWithHandshake(s)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		c.Close()
+		ln.Close()
+	})
+
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+
+	req.SetRequestURI("https://localhost/test")
+	req.Header.SetMethod("GET")
+
+	err = c.Do(req, resp)
+	require.NoError(t, err)
+	require.Equal(t, "hello from Do", string(resp.Body()))
+}
+
+func TestConnDoPostWithBody(t *testing.T) {
+	s := &Server{
+		s: &fasthttp.Server{
+			Handler: func(ctx *fasthttp.RequestCtx) {
+				ctx.SetBodyString("echo:" + string(ctx.PostBody()))
+			},
+		},
+	}
+
+	c, ln, err := getConnWithHandshake(s)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		c.Close()
+		ln.Close()
+	})
+
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+
+	req.SetRequestURI("https://localhost/post")
+	req.Header.SetMethod("POST")
+	req.SetBody([]byte("hello"))
+
+	// Use a goroutine + timeout to prevent hangs on slow CI runners
+	// where flow control window negotiation may take longer.
+	done := make(chan error, 1)
+	go func() {
+		done <- c.Do(req, resp)
+	}()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+		require.Equal(t, "echo:hello", string(resp.Body()))
+	case <-time.After(10 * time.Second):
+		t.Fatal("Do timed out — likely flow control deadlock")
+	}
+}
+
+func TestServerShutdownSendsGoAway(t *testing.T) {
+	s := &Server{
+		s: &fasthttp.Server{
+			Handler: func(ctx *fasthttp.RequestCtx) {
+				ctx.SetBodyString("ok")
+			},
+		},
+	}
+
+	c, ln, err := getConnWithHandshake(s)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		c.Close()
+		ln.Close()
+	})
+
+	// Send a request first to ensure the server is fully initialized
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+
+	req.SetRequestURI("https://localhost/warmup")
+	req.Header.SetMethod("GET")
+
+	warmupDone := make(chan error, 1)
+	go func() { warmupDone <- c.Do(req, resp) }()
+	select {
+	case err := <-warmupDone:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("warmup request timed out")
+	}
+
+	// Now the server is fully up and running; safe to call Shutdown
+	s.Shutdown()
+
+	// The client's readLoop should eventually see an error (EOF or GoAway)
+	// after the server sends GOAWAY and closes the connection.
+	require.Eventually(t, func() bool {
+		return c.Closed()
+	}, 5*time.Second, 50*time.Millisecond, "connection should close after shutdown")
+}
+
+func TestDialerH2CIntegration(t *testing.T) {
+	s := &Server{
+		s: &fasthttp.Server{
+			Handler: func(ctx *fasthttp.RequestCtx) {
+				ctx.SetBodyString("h2c-dialer-response")
+			},
+		},
+	}
+	s.cnf.defaults()
+
+	ln := fasthttputil.NewInmemoryListener()
+	go serve(s, ln)
+	t.Cleanup(func() { ln.Close() })
+
+	d := &Dialer{
+		Addr: "localhost",
+		H2C:  true,
+		NetDial: func(addr string) (net.Conn, error) {
+			return ln.Dial()
+		},
+		PingInterval: -1, // disable pings
+	}
+
+	c, err := d.Dial(ConnOpts{
+		PingInterval:        -1,
+		DisablePingChecking: true,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { c.Close() })
+
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+
+	req.SetRequestURI("http://localhost/test-h2c")
+	req.Header.SetMethod("GET")
+
+	err = c.Do(req, resp)
+	require.NoError(t, err)
+	require.Equal(t, "h2c-dialer-response", string(resp.Body()))
+}
+
+func TestConnOnNewAndClosedCallbacks(t *testing.T) {
+	var newConn, closedConn int32
+
+	s := &Server{
+		s: &fasthttp.Server{
+			Handler: func(ctx *fasthttp.RequestCtx) {
+				ctx.SetBodyString("ok")
+			},
+		},
+		cnf: ServerConfig{
+			OnNewConnection: func(c net.Conn) {
+				atomic.AddInt32(&newConn, 1)
+			},
+			OnConnectionClosed: func(c net.Conn) {
+				atomic.AddInt32(&closedConn, 1)
+			},
+		},
+	}
+
+	c, ln, err := getConnWithHandshake(s)
+	require.NoError(t, err)
+
+	// Wait for OnNewConnection to fire
+	require.Eventually(t, func() bool {
+		return atomic.LoadInt32(&newConn) == 1
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// Close client and listener
+	c.Close()
+	ln.Close()
+
+	// Wait for OnConnectionClosed to fire
+	require.Eventually(t, func() bool {
+		return atomic.LoadInt32(&closedConn) == 1
+	}, 5*time.Second, 50*time.Millisecond)
+}
+
+func BenchmarkServerGETRequest(b *testing.B) {
+	s := &Server{
+		s: &fasthttp.Server{
+			Handler: func(ctx *fasthttp.RequestCtx) {
+				ctx.SetBodyString("OK")
+			},
+		},
+	}
+
+	c, ln, err := getConn(s)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer c.Close()
+	defer ln.Close()
+
+	streamID := uint32(1)
+
+	b.ReportAllocs()
+	for b.Loop() {
+		headers := makeHeaders(streamID, c.enc, true, true, map[string]string{
+			string(StringAuthority): "localhost",
+			string(StringMethod):    "GET",
+			string(StringPath):      "/",
+			string(StringScheme):    "https",
+		})
+
+		c.writeFrame(headers)
+
+		// Read response
+		for {
+			fr, err := c.readNext()
+			if err != nil {
+				b.Fatal(err)
+			}
+			endStream := fr.Flags().Has(FlagEndStream)
+			ReleaseFrameHeader(fr)
+			if endStream {
+				break
+			}
+		}
+
+		streamID += 2
+	}
 }

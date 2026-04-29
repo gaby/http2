@@ -1,7 +1,7 @@
 package http2
 
 import (
-	"fmt"
+	"strconv"
 
 	"github.com/dgrr/http2/http2utils"
 )
@@ -23,7 +23,9 @@ type GoAway struct {
 
 // Error returns a human-readable representation of the GOAWAY frame.
 func (ga *GoAway) Error() string {
-	return fmt.Sprintf("stream=%d, code=%s, data=%s", ga.stream, ga.code, ga.data)
+	return "stream=" + strconv.FormatUint(uint64(ga.stream), 10) +
+		", code=" + ga.code.String() +
+		", data=" + string(ga.data)
 }
 
 // Type returns FrameGoAway.
@@ -82,6 +84,12 @@ func (ga *GoAway) Data() []byte {
 // SetData sets the optional debug data.
 func (ga *GoAway) SetData(b []byte) {
 	ga.data = append(ga.data[:0], b...)
+}
+
+// SetDataString sets the optional debug data from a string without
+// an intermediate []byte allocation.
+func (ga *GoAway) SetDataString(s string) {
+	ga.data = append(ga.data[:0], s...)
 }
 
 // Deserialize reads a GOAWAY frame from the given frame header payload.

@@ -11,7 +11,6 @@ import (
 	"net"
 	"os"
 	"runtime/debug"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -26,7 +25,22 @@ const (
 	connStateClosed
 )
 
-var validHTTP2HeaderNamePunctuation = []byte("!#$%&'*+-.^_`|~")
+// validHeaderNameChar is a 256-byte lookup table where a non-zero value
+// indicates that the byte is valid inside an HTTP/2 header field name
+// (excluding the leading ':' for pseudo-headers, handled separately).
+var validHeaderNameChar [256]bool
+
+func init() {
+	for ch := byte('a'); ch <= 'z'; ch++ {
+		validHeaderNameChar[ch] = true
+	}
+	for ch := byte('0'); ch <= '9'; ch++ {
+		validHeaderNameChar[ch] = true
+	}
+	for _, ch := range []byte("!#$%&'*+-.^_`|~") {
+		validHeaderNameChar[ch] = true
+	}
+}
 
 type serverConn struct {
 	pingWindowStart time.Time
@@ -105,6 +119,7 @@ type serverConn struct {
 	// our values
 	maxWindow     int32
 	currentWindow int32
+	nextPushID    uint32 // next even stream ID for server push
 	writerClosed  atomic.Bool
 
 	state connState
@@ -131,9 +146,10 @@ const defaultEnqueueTimeout = 2 * time.Second
 
 // goawayFlushDelay is a brief pause given to the write loop to flush a GOAWAY
 // frame to the peer before the connection is torn down. The value must be large
-// enough for the writeLoop goroutine to be scheduled and flush the frame even
-// on slow CI platforms (Windows runners can need 50ms+ for a context switch).
-const goawayFlushDelay = 100 * time.Millisecond
+// enough for the writeLoop goroutine to be scheduled, flush the frame, AND for
+// the OS TCP stack to deliver the data to the peer. On Windows CI runners the
+// kernel may need 100ms+ for a context switch plus TCP delivery.
+const goawayFlushDelay = 200 * time.Millisecond
 
 // maxContinuationFrames is the maximum number of CONTINUATION frames allowed
 // for a single header block. A client fragmenting headers across more frames
@@ -196,9 +212,10 @@ func (sc *serverConn) signalConnClose() {
 			// Safety-net close: the normal shutdown path (writeLoop's defer)
 			// closes the connection after flushing all queued frames. This
 			// timer only fires when the writeLoop is stuck. Use a generous
-			// delay so that GOAWAY frames have time to be flushed to the
-			// TCP stack even on slow CI platforms (e.g., Windows runners).
-			time.AfterFunc(250*time.Millisecond, func() {
+			// delay so that GOAWAY frames have time to be written, flushed,
+			// and delivered by the OS TCP stack even on slow CI platforms
+			// (Windows runners may need 200ms+ for scheduling + TCP flush).
+			time.AfterFunc(500*time.Millisecond, func() {
 				_ = sc.c.Close()
 			})
 		}
@@ -1081,7 +1098,7 @@ func buildGoAwayFrame(strm uint32, code ErrorCode, message string) *FrameHeader 
 
 	ga.SetStream(strm)
 	ga.SetCode(code)
-	ga.SetData([]byte(message))
+	ga.SetDataString(message)
 
 	fr.SetBody(ga)
 	return fr
@@ -1176,9 +1193,10 @@ func handleState(fr *FrameHeader, strm *Stream) {
 					strm.pendingEndStream = true
 				}
 			}
-		} // TODO: else push promise ...
+		} // Push promise state transitions handled in sendPushPromise
 	case StreamStateReserved:
-		// TODO: ...
+		// Reserved streams are created by PUSH_PROMISE and transition to
+		// HalfClosed(local) when the server sends headers.
 	case StreamStateOpen:
 		if fr.Flags().Has(FlagEndStream) {
 			if strm.headersFinished {
@@ -1480,8 +1498,8 @@ func (sc *serverConn) handleHeaderFrame(strm *Stream, fr *FrameHeader) error {
 			case bytes.Equal(k, StringContentType):
 				req.Header.SetContentTypeBytes(v)
 			case bytes.Equal(k, StringContentLength):
-				contentLength, parseErr := strconv.ParseInt(hf.Value(), 10, 64)
-				if parseErr != nil || contentLength < 0 {
+				contentLength, parseErr := parseContentLength(v)
+				if parseErr != nil {
 					return NewResetStreamError(ProtocolError, "invalid content-length header")
 				}
 				if strm.contentLength >= 0 && strm.contentLength != contentLength {
@@ -1551,18 +1569,12 @@ func isValidHTTP2HeaderName(name []byte) bool {
 	if len(name) == 1 && name[0] == ':' {
 		return false
 	}
-	for i, ch := range name {
-		if i == 0 && ch == ':' {
-			continue
-		}
-		if ch >= 'A' && ch <= 'Z' {
-			return false
-		}
-		switch {
-		case ch >= 'a' && ch <= 'z':
-		case ch >= '0' && ch <= '9':
-		case bytes.IndexByte(validHTTP2HeaderNamePunctuation, ch) >= 0:
-		default:
+	start := 0
+	if name[0] == ':' {
+		start = 1
+	}
+	for _, ch := range name[start:] {
+		if !validHeaderNameChar[ch] {
 			return false
 		}
 	}
@@ -1579,21 +1591,35 @@ var (
 	teTrailers               = []byte("trailers")
 )
 
+// isForbiddenHeader checks if a header is forbidden in HTTP/2.
+// HTTP/2 header names are always lowercase, so we use bytes.Equal
+// and dispatch on length to minimize comparisons.
 func isForbiddenHeader(key, value []byte) (bool, string) {
-	switch {
-	case bytes.EqualFold(key, forbiddenConnection):
-		return true, "connection"
-	case bytes.EqualFold(key, forbiddenProxyConnection):
-		return true, "proxy-connection"
-	case bytes.EqualFold(key, forbiddenTransferEnc):
-		return true, "transfer-encoding"
-	case bytes.EqualFold(key, forbiddenUpgrade):
-		return true, "upgrade"
-	case bytes.EqualFold(key, forbiddenKeepAlive):
-		return true, "keep-alive"
-	case bytes.EqualFold(key, forbiddenTE):
-		if !bytes.EqualFold(bytes.TrimSpace(value), teTrailers) {
-			return true, "te"
+	switch len(key) {
+	case 2: // te
+		if bytes.Equal(key, forbiddenTE) {
+			if !bytes.EqualFold(bytes.TrimSpace(value), teTrailers) {
+				return true, "te"
+			}
+		}
+	case 7: // upgrade
+		if bytes.Equal(key, forbiddenUpgrade) {
+			return true, "upgrade"
+		}
+	case 10: // connection, keep-alive
+		if bytes.Equal(key, forbiddenConnection) {
+			return true, "connection"
+		}
+		if bytes.Equal(key, forbiddenKeepAlive) {
+			return true, "keep-alive"
+		}
+	case 16: // proxy-connection
+		if bytes.Equal(key, forbiddenProxyConnection) {
+			return true, "proxy-connection"
+		}
+	case 17: // transfer-encoding
+		if bytes.Equal(key, forbiddenTransferEnc) {
+			return true, "transfer-encoding"
 		}
 	}
 
@@ -1616,21 +1642,110 @@ func (sc *serverConn) verifyState(strm *Stream, fr *FrameHeader) error {
 	return nil
 }
 
+// TrailerUserValueKey is the key used to store response trailers
+// in the RequestCtx.UserValue. Handlers can set trailer headers
+// using this key with a map[string]string value:
+//
+//	ctx.SetUserValue(http2.TrailerUserValueKey, map[string]string{
+//	    "grpc-status": "0",
+//	    "grpc-message": "",
+//	})
+const TrailerUserValueKey = "h2-trailers"
+
+// PusherUserValueKey is the key used to access the server push function
+// from within a request handler. The value is a func(method, path string)
+// that sends a PUSH_PROMISE to the client:
+//
+//	push := ctx.UserValue(http2.PusherUserValueKey).(func(string, string))
+//	push("GET", "/static/style.css")
+//
+// Push is only available when the client has not disabled push via
+// SETTINGS_ENABLE_PUSH=0.
+const PusherUserValueKey = "h2-pusher"
+
+// sendPushPromise sends a PUSH_PROMISE frame on the parent stream,
+// advertising a server push for the given method and path.
+func (sc *serverConn) sendPushPromise(parentStrm *Stream, method, path string) {
+	promisedID := sc.nextServerStreamID()
+
+	fr := AcquireFrameHeader()
+	fr.SetStream(parentStrm.ID())
+
+	pp := AcquireFrame(FramePushPromise).(*PushPromise)
+	pp.SetStream(promisedID)
+	pp.SetEndHeaders(true)
+	pp.SetPadding(false)
+
+	// Encode the promised request pseudo-headers into the header block
+	hf := AcquireHeaderField()
+	var headerBuf []byte
+
+	sc.encMu.Lock()
+	hf.SetBytes(StringMethod, []byte(method))
+	headerBuf = sc.enc.AppendHeader(headerBuf, hf, true)
+
+	hf.SetBytes(StringPath, []byte(path))
+	headerBuf = sc.enc.AppendHeader(headerBuf, hf, true)
+
+	hf.SetBytes(StringScheme, parentStrm.scheme)
+	headerBuf = sc.enc.AppendHeader(headerBuf, hf, true)
+
+	host := parentStrm.ctx.Request.Header.Peek("Host")
+	if len(host) > 0 {
+		hf.SetBytes(StringAuthority, host)
+		headerBuf = sc.enc.AppendHeader(headerBuf, hf, true)
+	}
+	sc.encMu.Unlock()
+
+	ReleaseHeaderField(hf)
+	pp.SetHeader(headerBuf)
+
+	fr.SetBody(pp)
+	sc.enqueueFrame(fr)
+}
+
+// nextServerStreamID returns the next even-numbered stream ID for server push.
+// Uses a monotonically increasing atomic counter to avoid ID reuse.
+func (sc *serverConn) nextServerStreamID() uint32 {
+	for {
+		cur := atomic.LoadUint32(&sc.nextPushID)
+		next := cur + 2
+		if next < 2 {
+			next = 2
+		}
+		if atomic.CompareAndSwapUint32(&sc.nextPushID, cur, next) {
+			return next
+		}
+	}
+}
+
 // handleEndRequest dispatches the finished request to the handler.
 func (sc *serverConn) handleEndRequest(strm *Stream) {
 	ctx := strm.ctx
 	ctx.Request.Header.SetProtocolBytes(StringHTTP2)
 
+	// Provide push capability if the client supports it
+	sc.clientSMu.Lock()
+	pushEnabled := sc.clientS.Push()
+	sc.clientSMu.Unlock()
+	if pushEnabled {
+		ctx.SetUserValue(PusherUserValueKey, func(method, path string) {
+			sc.sendPushPromise(strm, method, path)
+		})
+	}
+
 	sc.h(ctx)
 
 	hasBody := ctx.Response.IsBodyStream() || len(ctx.Response.Body()) > 0
+	trailers, hasTrailers := ctx.UserValue(TrailerUserValueKey).(map[string]string)
 
 	fr := AcquireFrameHeader()
 	fr.SetStream(strm.ID())
 
 	h := AcquireFrame(FrameHeaders).(*Headers)
 	h.SetEndHeaders(true)
-	h.SetEndStream(!hasBody)
+	// Only set EndStream on headers if there's no body AND no trailers
+	h.SetEndStream(!hasBody && !hasTrailers)
 
 	fr.SetBody(h)
 
@@ -1639,11 +1754,13 @@ func (sc *serverConn) handleEndRequest(strm *Stream) {
 	sc.encMu.Unlock()
 
 	sc.enqueueFrame(fr)
-	if !hasBody {
+	if !hasBody && !hasTrailers {
 		sc.markResponseEnded(strm)
 	}
 
 	if hasBody {
+		// When trailers follow, the last DATA frame must NOT carry EndStream
+		endStreamOnData := !hasTrailers
 		if ctx.Response.IsBodyStream() {
 			streamWriter := acquireStreamWrite()
 			streamWriter.strm = strm
@@ -1653,9 +1770,53 @@ func (sc *serverConn) handleEndRequest(strm *Stream) {
 			_ = ctx.Response.BodyWriteTo(streamWriter)
 			releaseStreamWrite(streamWriter)
 		} else {
-			sc.queueData(strm, ctx.Response.Body(), true)
+			sc.queueData(strm, ctx.Response.Body(), endStreamOnData)
 		}
 	}
+
+	if hasTrailers {
+		sc.sendTrailers(strm, trailers)
+	}
+}
+
+// sendTrailers sends a trailing HEADERS frame with EndStream set.
+func (sc *serverConn) sendTrailers(strm *Stream, trailers map[string]string) {
+	fr := AcquireFrameHeader()
+	fr.SetStream(strm.ID())
+
+	h := AcquireFrame(FrameHeaders).(*Headers)
+	h.SetEndHeaders(true)
+	h.SetEndStream(true)
+
+	fr.SetBody(h)
+
+	hf := AcquireHeaderField()
+
+	// Use a stack buffer for key lowercasing to avoid per-trailer allocations.
+	var keyBuf [64]byte
+
+	sc.encMu.Lock()
+	for k, v := range trailers {
+		// Lowercase the key using a stack buffer when possible.
+		var lk []byte
+		if len(k) <= len(keyBuf) {
+			lk = keyBuf[:len(k)]
+		} else {
+			lk = make([]byte, len(k))
+		}
+		copy(lk, k)
+		ToLower(lk)
+
+		hf.SetKeyBytes(lk)
+		hf.SetValue(v)
+		sc.enc.AppendHeaderField(h, hf, false)
+	}
+	sc.encMu.Unlock()
+
+	ReleaseHeaderField(hf)
+
+	sc.enqueueFrame(fr)
+	sc.markResponseEnded(strm)
 }
 
 var (
@@ -1929,7 +2090,11 @@ func (sc *serverConn) handleSettings(st *Settings) {
 	// Hold streamsMu while updating initialClientWindow and adjusting streams
 	// to prevent race with stream creation and queueData
 	sc.streamsMu.Lock()
-	streamIDsToFlush := make([]uint32, 0, len(sc.streams))
+	var idBuf [32]uint32
+	streamIDsToFlush := idBuf[:0]
+	if len(sc.streams) > len(idBuf) {
+		streamIDsToFlush = make([]uint32, 0, len(sc.streams))
+	}
 	if delta != 0 {
 		for _, strm := range sc.streams {
 			newWin := atomic.AddInt64(&strm.sendWindow, delta)
@@ -2007,7 +2172,13 @@ func (sc *serverConn) deleteActiveStream(id uint32) {
 
 func (sc *serverConn) forEachActiveStream(fn func(*Stream)) {
 	sc.streamsMu.Lock()
-	streams := make([]*Stream, 0, len(sc.streams))
+	// Reuse a stack-local slice to avoid per-call heap allocation.
+	// Most connections have fewer than 32 concurrent streams.
+	var buf [32]*Stream
+	streams := buf[:0]
+	if len(sc.streams) > len(buf) {
+		streams = make([]*Stream, 0, len(sc.streams))
+	}
 	for _, strm := range sc.streams {
 		streams = append(streams, strm)
 	}
@@ -2032,13 +2203,9 @@ func addAndClampWindow(window *int64, inc int64) (int64, error) {
 
 	for {
 		current := atomic.LoadInt64(window)
-		if current >= maxWindowSize {
-			return maxWindowSize, nil
-		}
 
-		if current > maxWindowSize-inc {
-			atomic.StoreInt64(window, maxWindowSize)
-			return maxWindowSize, errWindowSizeOverflow
+		if current+inc > maxWindowSize {
+			return current, errWindowSizeOverflow
 		}
 
 		next := current + inc
@@ -2269,11 +2436,7 @@ func fasthttpResponseHeaders(dst *Headers, hp *HPACK, res *fasthttp.Response) {
 	defer ReleaseHeaderField(hf)
 
 	hf.SetKeyBytes(StringStatus)
-	hf.SetValue(
-		strconv.FormatInt(
-			int64(res.Header.StatusCode()), 10,
-		),
-	)
+	hf.SetValueBytes(statusCodeToBytes(res.Header.StatusCode()))
 
 	dst.AppendHeaderField(hp, hf, true)
 

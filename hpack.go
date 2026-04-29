@@ -6,7 +6,15 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"unsafe"
 )
+
+// unsafeString converts a byte slice to a string without copying.
+// The caller must ensure the byte slice is not modified while the
+// string is in use. Safe for map lookups within a single call.
+func unsafeString(b []byte) string {
+	return unsafe.String(unsafe.SliceData(b), len(b))
+}
 
 // HPACK represents header compression methods to
 // encode and decode header fields in HTTP/2.
@@ -65,7 +73,6 @@ var hpackPool = sync.Pool{
 
 // AcquireHPACK gets HPACK from pool.
 func AcquireHPACK() *HPACK {
-	// TODO: Change the name
 	hp := hpackPool.Get().(*HPACK)
 	hp.Reset()
 
@@ -175,13 +182,16 @@ func (hp *HPACK) search(hf *HeaderField) (n uint64, fullMatch bool) {
 	}
 
 	if n == 0 {
-		for i, hf2 := range staticTable {
-			if bytes.Equal(hf.key, hf2.key) {
-				if fullMatch = bytes.Equal(hf.value, hf2.value); fullMatch {
+		// Use the hash map for O(1) key lookup in the static table.
+		// The unsafe string conversion avoids a heap allocation; the
+		// resulting string is only used as a map key within this call.
+		if indices, ok := staticTableByKey[unsafeString(hf.key)]; ok {
+			for _, i := range indices {
+				if bytes.Equal(hf.value, staticTable[i].value) {
 					n = uint64(i + 1)
-					break
+					fullMatch = true
+					return
 				}
-
 				if n == 0 {
 					n = uint64(i + 1)
 				}
@@ -258,14 +268,13 @@ loop:
 			hf.SetKeyBytes(hf2.KeyBytes())
 		} else { // Read key literal string
 			b = b[1:]
-			dst := bytePool.Get().([]byte)
+			var stackBuf [128]byte
+			dst := stackBuf[:0]
 
-			b, dst, err = readString(dst[:0], b)
+			b, dst, err = readString(dst, b)
 			if err == nil {
 				hf.SetKeyBytes(dst)
 			}
-
-			bytePool.Put(dst)
 		}
 
 		// Reading value
@@ -274,16 +283,15 @@ loop:
 				b = b[1:]
 			}
 
-			dst := bytePool.Get().([]byte)
+			var stackBuf [128]byte
+			dst := stackBuf[:0]
 
-			b, dst, err = readString(dst[:0], b)
+			b, dst, err = readString(dst, b)
 			if err == nil {
 				hf.SetValueBytes(dst)
 				// add to the table as RFC specifies.
 				hp.addDynamic(hf)
 			}
-
-			bytePool.Put(dst)
 		}
 
 	// Literal Header Field Never Indexed.
@@ -308,14 +316,13 @@ loop:
 			hf.SetKeyBytes(hf2.key)
 		} else { // Reading key as string literal
 			b = b[1:]
-			dst := bytePool.Get().([]byte)
+			var stackBuf [128]byte
+			dst := stackBuf[:0]
 
-			b, dst, err = readString(dst[:0], b)
+			b, dst, err = readString(dst, b)
 			if err == nil {
 				hf.SetKeyBytes(dst)
 			}
-
-			bytePool.Put(dst)
 		}
 
 		// Reading value
@@ -324,14 +331,13 @@ loop:
 				b = b[1:]
 			}
 
-			dst := bytePool.Get().([]byte)
+			var stackBuf [128]byte
+			dst := stackBuf[:0]
 
-			b, dst, err = readString(dst[:0], b)
+			b, dst, err = readString(dst, b)
 			if err == nil {
 				hf.SetValueBytes(dst)
 			}
-
-			bytePool.Put(dst)
 		}
 
 	// Dynamic Table Size Update
@@ -453,17 +459,40 @@ var (
 	ErrDynamicUpdateMaxTableSize = errors.New("dynamic update is over the max table")
 )
 
+// huffmanEncodedLen returns the byte length of src after Huffman encoding,
+// without actually encoding. Used to decide whether encoding is worthwhile.
+func huffmanEncodedLen(src []byte) int {
+	var bits uint64
+	for _, b := range src {
+		bits += uint64(huffmanCodeLen[b])
+	}
+	return int((bits + 7) / 8)
+}
+
 // appendString writes bytes slice to dst and returns it.
 // https://tools.ietf.org/html/rfc7541#section-5.2
 func appendString(dst, src []byte, encode bool) []byte {
 	var b []byte
-	if !encode {
-		b = src
+	var poolBuf []byte
+	if encode {
+		// Only Huffman-encode when the result is not longer than the original.
+		if huffmanEncodedLen(src) <= len(src) {
+			// Use a stack-local buffer for small strings to avoid pool overhead.
+			// 128 bytes covers the vast majority of header field values.
+			var stackBuf [128]byte
+			if len(src) <= 128 {
+				b = HuffmanEncode(stackBuf[:0], src)
+			} else {
+				poolBuf = bytePool.Get().([]byte)
+				b = HuffmanEncode(poolBuf[:0], src)
+			}
+		} else {
+			encode = false
+			b = src
+		}
 	} else {
-		b = bytePool.Get().([]byte)
-		b = HuffmanEncode(b[:0], src)
+		b = src
 	}
-	// TODO: Encode only if length is lower with the string encoded
 
 	n := uint64(len(b))
 	nn := len(dst) - 1 // peek last byte
@@ -476,7 +505,9 @@ func appendString(dst, src []byte, encode bool) []byte {
 	dst = append(dst, b...)
 
 	if encode {
-		bytePool.Put(b)
+		if poolBuf != nil {
+			bytePool.Put(poolBuf)
+		}
 		dst[nn] |= 128 // setting H bit
 	}
 
@@ -609,3 +640,16 @@ var staticTable = []*HeaderField{ // entry + 1
 
 // maxIndex defines the maximum index number of the static table.
 const maxIndex = 62
+
+// staticTableByKey maps header names to their 0-based indices in the static
+// table for O(1) lookup instead of linear scan. The search code converts
+// to 1-based HPACK indices by adding 1 when returning results.
+var staticTableByKey map[string][]int
+
+func init() {
+	staticTableByKey = make(map[string][]int, 40)
+	for i, hf := range staticTable {
+		key := string(hf.key)
+		staticTableByKey[key] = append(staticTableByKey[key], i)
+	}
+}
