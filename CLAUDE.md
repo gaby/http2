@@ -19,7 +19,7 @@ test runs, log inspection, any file read larger than a few lines.
 | Situation | Tool | Example |
 |---|---|---|
 | Run tests | `ctx_execute` | `go test -race ./...`, `go test -run TestServerConn` |
-| Run lint / build | `ctx_execute` | `golangci-lint run`, `go vet ./...`, `make build` |
+| Run lint / build | `ctx_execute` | `golangci-lint run`, `go vet ./...`, `make audit` |
 | Run h2spec / fuzz | `ctx_execute` | `h2spec -p 8080`, `go test -fuzz=Fuzz` |
 | Git history / diffs | `ctx_execute` | `git log --oneline -50`, `git diff HEAD~5` |
 | GitHub CLI | `ctx_execute` | `gh pr list --json ...`, `gh run view ...` |
@@ -61,7 +61,7 @@ About to run a command, read a file, or call an API?
 - `go test ./... -v` → full test output in context. Use `ctx_execute` to capture and summarize.
 - `gh pr list` → raw JSON. Use `ctx_execute` with a `--jq` filter.
 - Piping through `| head -20` — the rest is lost. Use `ctx_execute` to analyze the full output and print a summary.
-- `curl https://...` — response body floods context. Use `ctx_execute` with fetch.
+- `curl https://...` — response body floods context. Use `ctx_fetch_and_index` → `ctx_search`.
 
 # Project instructions
 
