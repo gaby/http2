@@ -1147,8 +1147,12 @@ func (sc *serverConn) enqueueFrameWithTimeout(fr *FrameHeader, d time.Duration) 
 func (sc *serverConn) writeError(strm *Stream, err error) {
 	streamErr := Error{}
 	if !errors.As(err, &streamErr) {
-		sc.writeReset(strm.ID(), InternalError)
-		strm.SetState(StreamStateClosed)
+		if strm != nil {
+			sc.writeReset(strm.ID(), InternalError)
+			strm.SetState(StreamStateClosed)
+		} else {
+			sc.writeGoAway(0, InternalError, err.Error())
+		}
 		return
 	}
 
@@ -1160,7 +1164,11 @@ func (sc *serverConn) writeError(strm *Stream, err error) {
 			sc.writeGoAway(strm.ID(), streamErr.Code(), streamErr.Error())
 		}
 	case FrameResetStream:
-		sc.writeReset(strm.ID(), streamErr.Code())
+		if strm != nil {
+			sc.writeReset(strm.ID(), streamErr.Code())
+		} else {
+			sc.writeGoAway(0, streamErr.Code(), streamErr.Error())
+		}
 	}
 
 	if strm != nil {
@@ -1709,10 +1717,7 @@ func (sc *serverConn) sendPushPromise(parentStrm *Stream, method, path string) {
 func (sc *serverConn) nextServerStreamID() uint32 {
 	for {
 		cur := atomic.LoadUint32(&sc.nextPushID)
-		next := cur + 2
-		if next < 2 {
-			next = 2
-		}
+		next := max(cur+2, 2)
 		if atomic.CompareAndSwapUint32(&sc.nextPushID, cur, next) {
 			return next
 		}
