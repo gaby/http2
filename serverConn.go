@@ -1717,10 +1717,7 @@ func (sc *serverConn) sendPushPromise(parentStrm *Stream, method, path string) {
 func (sc *serverConn) nextServerStreamID() uint32 {
 	for {
 		cur := atomic.LoadUint32(&sc.nextPushID)
-		next := cur + 2
-		if next < 2 {
-			next = 2
-		}
+		next := max(cur+2, 2)
 		if atomic.CompareAndSwapUint32(&sc.nextPushID, cur, next) {
 			return next
 		}
