@@ -94,6 +94,9 @@ func TestHPACKReadInt(t *testing.T) {
 
 	b, n = readInt(7, b)
 	checkInt(t, err, n, 122, 0, b)
+
+	b, n = readInt(7, []byte{0xff})
+	checkInt(t, err, n, 127, 0, b)
 }
 
 func TestHPACKWriteTwoStrings(t *testing.T) {
@@ -916,6 +919,62 @@ func TestHPACKNonIndexedLiteralWithIndexedKey(t *testing.T) {
 	require.Equal(t, "test.com", hf.Value())
 	// Should NOT be added to dynamic table
 	require.Empty(t, hp.dynamic)
+}
+
+func TestHPACKLiteralTruncatedValueDoesNotPanic(t *testing.T) {
+	testCases := []struct {
+		name    string
+		b       []byte
+		errText string
+	}{
+		{
+			name:    "incremental indexing indexed name",
+			b:       []byte{0x41},
+			errText: "malformed indexed field",
+		},
+		{
+			name:    "incremental indexing literal name",
+			b:       []byte{0x40, 0x01, 'k'},
+			errText: "malformed indexed field",
+		},
+		{
+			name:    "without indexing indexed name",
+			b:       []byte{0x01},
+			errText: "malformed non indexed field",
+		},
+		{
+			name:    "without indexing literal name",
+			b:       []byte{0x00, 0x01, 'k'},
+			errText: "malformed non indexed field",
+		},
+		{
+			name:    "never indexed indexed name",
+			b:       []byte{0x11},
+			errText: "malformed non indexed field",
+		},
+		{
+			name:    "never indexed literal name",
+			b:       []byte{0x10, 0x01, 'k'},
+			errText: "malformed non indexed field",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			hp := AcquireHPACK()
+			defer ReleaseHPACK(hp)
+			hp.SetMaxTableSize(4096)
+
+			hf := AcquireHeaderField()
+			defer ReleaseHeaderField(hf)
+
+			require.NotPanics(t, func() {
+				_, err := hp.Next(hf, tc.b)
+				require.Error(t, err)
+				require.Contains(t, err.Error(), tc.errText)
+			})
+		})
+	}
 }
 
 func TestHPACKAppendHeaderVariants(t *testing.T) {
