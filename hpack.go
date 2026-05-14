@@ -279,6 +279,9 @@ loop:
 
 		// Reading value
 		if err == nil {
+			if len(b) == 0 {
+				return b, errors.New("malformed indexed field")
+			}
 			if b[0] == c {
 				b = b[1:]
 			}
@@ -379,16 +382,22 @@ func readInt(n int, b []byte) ([]byte, uint64) {
 
 	nn := uint64(0)
 	i := 1
+	ok := false
 	for i < len(b) {
 		nn |= uint64(b[i]&127) << ((i - 1) * 7)
 		if b[i]&128 != 128 {
+			ok = true
 			break
 		}
 
 		i++
 	}
 
-	return b[i+1:], nn + uint64(b0)
+	if ok {
+		return b[i+1:], nn + uint64(b0)
+	}
+
+	return b[i:], nn + uint64(b0)
 }
 
 // appendInt appends int type to header field excluding the last byte

@@ -94,6 +94,9 @@ func TestHPACKReadInt(t *testing.T) {
 
 	b, n = readInt(7, b)
 	checkInt(t, err, n, 122, 0, b)
+
+	b, n = readInt(7, []byte{0xff})
+	checkInt(t, err, n, 127, 0, b)
 }
 
 func TestHPACKWriteTwoStrings(t *testing.T) {
