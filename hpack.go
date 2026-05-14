@@ -330,6 +330,9 @@ loop:
 
 		// Reading value
 		if err == nil {
+			if len(b) == 0 {
+				return b, errors.New("malformed non indexed field")
+			}
 			if b[0] == c {
 				b = b[1:]
 			}
