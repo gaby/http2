@@ -1368,6 +1368,26 @@ func TestHandleHeaderFrameRejectsEmptyPath(t *testing.T) {
 	require.Equal(t, FrameResetStream, h2Err.frameType)
 }
 
+func TestHandleHeaderFrameRejectsAbsoluteURIPath(t *testing.T) {
+	sc := newTestServerConn()
+	strm := newTestStream(1)
+
+	fr := buildHeadersFrame(t, strm.ID(), [][2]string{
+		{":method", "GET"},
+		{":scheme", "https"},
+		{":authority", "public.example"},
+		{":path", "https://internal.example/admin?debug=1"},
+	})
+	defer ReleaseFrameHeader(fr)
+
+	err := sc.handleHeaderFrame(strm, fr)
+	require.Error(t, err)
+	var h2Err Error
+	require.ErrorAs(t, err, &h2Err)
+	require.Equal(t, ProtocolError, h2Err.Code())
+	require.Equal(t, FrameResetStream, h2Err.frameType)
+}
+
 func TestHandleFrameRejectsContentLengthMismatchOnHeadersEndStream(t *testing.T) {
 	sc := newTestServerConn()
 	strm := newTestStream(1)

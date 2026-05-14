@@ -1468,6 +1468,9 @@ func (sc *serverConn) handleHeaderFrame(strm *Stream, fr *FrameHeader) error {
 				if len(v) == 0 {
 					return NewResetStreamError(ProtocolError, ":path pseudo-header must not be empty")
 				}
+				if v[0] != '/' && !(len(v) == 1 && v[0] == '*') {
+					return NewResetStreamError(ProtocolError, ":path pseudo-header must be origin-form")
+				}
 
 				strm.seenPath = true
 				req.Header.SetRequestURIBytes(v)
