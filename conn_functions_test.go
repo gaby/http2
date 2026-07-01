@@ -162,7 +162,7 @@ func TestConnPublicAccessors(t *testing.T) {
 	require.Equal(t, int32(0), conn.ActiveStreams())
 
 	// Increment and check
-	atomic.AddInt32(&conn.openStreams, 5)
+	conn.openStreams.Add(5)
 	require.Equal(t, int32(5), conn.ActiveStreams())
 
 	// RTT starts at 0
@@ -182,7 +182,7 @@ func TestConnPublicAccessors(t *testing.T) {
 func TestConnStats(t *testing.T) {
 	conn := NewConn(&stubConn{}, ConnOpts{})
 	conn.serverS.SetMaxConcurrentStreams(42)
-	atomic.AddInt32(&conn.openStreams, 3)
+	conn.openStreams.Add(3)
 
 	stats := conn.Stats()
 	require.Equal(t, int32(3), stats.ActiveStreams)
@@ -469,7 +469,8 @@ func TestConnReadStreamSendsWindowUpdateForPaddingOnlyData(t *testing.T) {
 	require.NoError(t, conn.readStream(fr, res))
 	require.Empty(t, res.Body())
 	require.Equal(t, int32(6), conn.currentWindow)
-	require.Equal(t, int32(6), conn.serverWindow)
+	// serverWindow is the client's *send* credit and must not change when receiving DATA.
+	require.Equal(t, int32(10), conn.serverWindow)
 
 	streamWU := <-conn.out
 	require.Equal(t, FrameWindowUpdate, streamWU.Type())
@@ -506,7 +507,8 @@ func TestConnReadStreamUpdatesConnectionWindowWithPaddingOnlyData(t *testing.T) 
 	require.NoError(t, conn.readStream(fr, res))
 	require.Empty(t, res.Body())
 	require.Equal(t, int32(10), conn.currentWindow)
-	require.Equal(t, int32(3), conn.serverWindow)
+	// serverWindow is the client's *send* credit and must not change when receiving DATA.
+	require.Equal(t, int32(10), conn.serverWindow)
 
 	streamWU := <-conn.out
 	require.Equal(t, FrameWindowUpdate, streamWU.Type())
@@ -533,7 +535,7 @@ func TestConnWriteDataRespectsFlowControl(t *testing.T) {
 	ctx := &Ctx{
 		Err: make(chan error, 1),
 	}
-	atomic.StoreInt32(&ctx.sendWindow, 3)
+	ctx.sendWindow.Store(3)
 
 	fh := AcquireFrameHeader()
 	defer ReleaseFrameHeader(fh)
@@ -554,7 +556,7 @@ func TestConnWriteDataRespectsFlowControl(t *testing.T) {
 	}
 
 	atomic.AddInt32(&conn.serverWindow, 5)
-	atomic.AddInt32(&ctx.sendWindow, 5)
+	ctx.sendWindow.Add(5)
 	conn.notifyWindowAvailable()
 
 	time.Sleep(50 * time.Millisecond)
@@ -566,7 +568,7 @@ func TestConnWriteDataRespectsFlowControl(t *testing.T) {
 	}
 
 	atomic.AddInt32(&conn.serverWindow, 5)
-	atomic.AddInt32(&ctx.sendWindow, 5)
+	ctx.sendWindow.Add(5)
 	conn.notifyWindowAvailable()
 
 	require.Eventually(t, func() bool {
@@ -619,7 +621,7 @@ func TestConnWriteDataTimesOutWhenWindowStalled(t *testing.T) {
 	ctx := &Ctx{
 		Err: make(chan error, 1),
 	}
-	atomic.StoreInt32(&ctx.sendWindow, 0)
+	ctx.sendWindow.Store(0)
 
 	fh := AcquireFrameHeader()
 	defer ReleaseFrameHeader(fh)
@@ -644,7 +646,7 @@ func TestConnWriteDataUnblocksOnClose(t *testing.T) {
 	ctx := &Ctx{
 		Err: make(chan error, 1),
 	}
-	atomic.StoreInt32(&ctx.sendWindow, 0)
+	ctx.sendWindow.Store(0)
 
 	fh := AcquireFrameHeader()
 	defer ReleaseFrameHeader(fh)
@@ -677,18 +679,17 @@ func TestConnWritePing(t *testing.T) {
 
 	require.NoError(t, conn.writePing())
 	require.Greater(t, buf.Len(), 0)
-	require.Equal(t, int32(1), atomic.LoadInt32(&conn.unacks))
+	require.Equal(t, int32(1), conn.unacks.Load())
 }
 
 func TestConnFinishResolves(t *testing.T) {
-	conn := &Conn{
-		openStreams: 2,
-	}
+	conn := &Conn{}
+	conn.openStreams.Store(2)
 	ctx := &Ctx{Err: make(chan error, 1)}
 
 	conn.finish(ctx, 1, io.EOF)
 
-	require.Equal(t, int32(1), atomic.LoadInt32(&conn.openStreams))
+	require.Equal(t, int32(1), conn.openStreams.Load())
 	require.ErrorIs(t, <-ctx.Err, io.EOF)
 }
 
@@ -776,7 +777,7 @@ func TestWriteLoopPreservesExistingLastErr(t *testing.T) {
 
 	readErr := errors.New("read failure")
 	conn.setLastErr(readErr)
-	atomic.StoreUint64(&conn.closed, 1)
+	conn.closed.Store(1)
 
 	done := make(chan struct{})
 	go func() {
@@ -837,7 +838,7 @@ func TestConnSettingsUpdateLimitsStreamsDuringRequests(t *testing.T) {
 
 	conn.serverS.Reset()
 	conn.serverS.SetMaxConcurrentStreams(2)
-	atomic.StoreInt32(&conn.openStreams, 1)
+	conn.openStreams.Store(1)
 
 	st := &Settings{}
 	st.Reset()
@@ -902,7 +903,7 @@ func TestConnSettingsUpdateLimitsStreamsDuringRequests(t *testing.T) {
 	}
 
 	require.ErrorIs(t, conn.writeRequest(ctx), ErrNotAvailableStreams)
-	require.Equal(t, int32(1), atomic.LoadInt32(&conn.openStreams))
+	require.Equal(t, int32(1), conn.openStreams.Load())
 }
 
 func TestConnWriteRequest(t *testing.T) {
@@ -929,9 +930,9 @@ func TestConnWriteRequest(t *testing.T) {
 
 	require.NoError(t, conn.writeRequest(ctx))
 	require.Greater(t, rawConn.Buffer.Len(), 0)
-	require.Positive(t, atomic.LoadUint32(&ctx.streamID))
+	require.Positive(t, ctx.streamID.Load())
 
-	_, ok := conn.reqQueued.Load(ctx.streamID)
+	_, ok := conn.reqQueued.Load(ctx.streamID.Load())
 	require.True(t, ok)
 }
 
@@ -961,8 +962,8 @@ func BenchmarkConnWriteRequestGET(b *testing.B) {
 		}
 
 		conn.writeRequest(ctx)
-		conn.reqQueued.Delete(atomic.LoadUint32(&ctx.streamID))
-		atomic.AddInt32(&conn.openStreams, -1)
+		conn.reqQueued.Delete(ctx.streamID.Load())
+		conn.openStreams.Add(-1)
 	}
 }
 

@@ -74,9 +74,9 @@ type serverConn struct {
 	// should be int64 because the user can try to overflow it
 	clientWindow int64
 	// initial window advertised by the client for new streams
-	initialClientWindow int64
+	initialClientWindow atomic.Int64
 	// client's max frame size
-	clientMaxFrameSize int64
+	clientMaxFrameSize atomic.Int64
 
 	// maxRequestTime is the max time of a request over one single stream
 	maxRequestTime time.Duration
@@ -119,7 +119,7 @@ type serverConn struct {
 	// our values
 	maxWindow     int32
 	currentWindow int32
-	nextPushID    uint32 // next even stream ID for server push
+	nextPushID    atomic.Uint32 // next even stream ID for server push
 	writerClosed  atomic.Bool
 
 	state connState
@@ -133,7 +133,7 @@ type serverConn struct {
 	// closeRef stores the last stream that was valid before sending a GOAWAY.
 	// Thus, the number stored in closeRef is used to complete all the requests that were sent before
 	// to gracefully close the connection with a GOAWAY.
-	closeRef uint32
+	closeRef atomic.Uint32
 
 	debug bool
 }
@@ -336,8 +336,8 @@ func (sc *serverConn) Serve() error {
 		initWin = defaultWindowSize
 	}
 	atomic.StoreInt64(&sc.clientWindow, int64(initWin))
-	atomic.StoreInt64(&sc.initialClientWindow, int64(initWin))
-	atomic.StoreInt64(&sc.clientMaxFrameSize, int64(defaultDataFrameSize))
+	sc.initialClientWindow.Store(int64(initWin))
+	sc.clientMaxFrameSize.Store(int64(defaultDataFrameSize))
 
 	if sc.maxIdleTime > 0 {
 		sc.maxIdleTimer = time.AfterFunc(sc.maxIdleTime, sc.closeIdleConn)
@@ -759,10 +759,33 @@ func (sc *serverConn) handleStreams() {
 	var reqTimerArmed bool
 	var openStreams int
 
+	// maxTrackedClosedStreams bounds closedStrms. On a long-lived connection the
+	// total number of streams served is unbounded and IDs strictly increase, so
+	// entries far below lastID are never referenced again by a conformant peer.
+	const maxTrackedClosedStreams = 1 << 12
+
 	closedStrms := make(map[uint32]struct{})
 
-	markClosedStream := func(id uint32, origType FrameType) {
+	// markClosed records a closed/refused stream ID and keeps closedStrms bounded.
+	markClosed := func(id uint32) {
 		closedStrms[id] = struct{}{}
+		if len(closedStrms) > maxTrackedClosedStreams {
+			// ponytail: O(n) prune runs only when over the cap (amortized O(1) per
+			// close); a frame on a pruned old ID is still rejected by the id<lastID guard.
+			cutoff := uint32(0)
+			if sc.lastID > maxTrackedClosedStreams {
+				cutoff = sc.lastID - maxTrackedClosedStreams
+			}
+			for cid := range closedStrms {
+				if cid < cutoff {
+					delete(closedStrms, cid)
+				}
+			}
+		}
+	}
+
+	markClosedStream := func(id uint32, origType FrameType) {
+		markClosed(id)
 
 		if origType == FrameHeaders && id > sc.lastID {
 			sc.lastID = id
@@ -777,8 +800,8 @@ func (sc *serverConn) handleStreams() {
 		strmID := strm.ID()
 		sc.deleteActiveStream(strmID)
 
-		closedStrms[strm.ID()] = struct{}{}
-		strms.Del(strm.ID())
+		markClosed(strmID)
+		strms.Del(strmID)
 
 		ctxPool.Put(strm.ctx)
 
@@ -886,6 +909,7 @@ loop:
 						sc.writeGoAway(fr.Stream(), ProtocolError, "RST_STREAM on idle stream")
 					}
 
+					ReleaseFrameHeader(fr)
 					continue
 				}
 
@@ -894,6 +918,7 @@ loop:
 						sc.writeGoAway(fr.Stream(), StreamClosedError, "frame on closed stream")
 					}
 
+					ReleaseFrameHeader(fr)
 					continue
 				}
 
@@ -912,11 +937,13 @@ loop:
 					sc.writeReset(fr.Stream(), RefusedStreamError)
 					markClosedStream(fr.Stream(), fr.Type())
 
+					ReleaseFrameHeader(fr)
 					continue
 				}
 
 				if fr.Stream() < sc.lastID {
 					sc.writeGoAway(fr.Stream(), ProtocolError, "stream ID is lower than the latest")
+					ReleaseFrameHeader(fr)
 					continue
 				}
 
@@ -928,7 +955,7 @@ loop:
 				// so initialClientWindow always reflects the correct value including 0
 				// if the client explicitly set it to 0.
 				sc.streamsMu.Lock()
-				sendWindow := int32(atomic.LoadInt64(&sc.initialClientWindow))
+				sendWindow := int32(sc.initialClientWindow.Load())
 				strm = NewStream(fr.Stream(), recvWindow, sendWindow)
 				strms = append(strms, strm)
 				if sc.streams == nil {
@@ -969,6 +996,7 @@ loop:
 				nstrm := strms.getPrevious(FrameHeaders)
 				if nstrm != nil && !nstrm.headersFinished {
 					sc.writeError(nstrm, NewGoAwayError(ProtocolError, "previous stream headers not ended"))
+					ReleaseFrameHeader(fr)
 					continue
 				}
 
@@ -984,7 +1012,7 @@ loop:
 						nstrm.origType == FrameHeaders {
 
 						nstrm.SetState(StreamStateClosed)
-						closeStream(strm)
+						closeStream(nstrm)
 
 						if sc.debug {
 							sc.logger.Printf("Cancelling stream in idle state: %d\n", nstrm.ID())
@@ -1053,7 +1081,7 @@ loop:
 			}
 
 			if isClosing {
-				ref := atomic.LoadUint32(&sc.closeRef)
+				ref := sc.closeRef.Load()
 				// if there's no reference, then just close the connection
 				if ref == 0 {
 					break
@@ -1069,6 +1097,11 @@ loop:
 
 				break loop
 			}
+
+			// Normal (non-closing) path: the frame has been fully processed and its
+			// body copied out (headers into the request/HPACK table, DATA via
+			// AppendBody), so return it to the pool instead of leaking it to GC.
+			ReleaseFrameHeader(fr)
 		}
 	}
 }
@@ -1109,7 +1142,7 @@ func (sc *serverConn) writeGoAway(strm uint32, code ErrorCode, message string) {
 	sc.enqueueFrame(fr)
 
 	if strm != 0 {
-		atomic.StoreUint32(&sc.closeRef, sc.lastID)
+		sc.closeRef.Store(sc.lastID)
 	}
 
 	atomic.StoreInt32((*int32)(&sc.state), int32(connStateClosed))
@@ -1127,7 +1160,7 @@ func (sc *serverConn) writeGoAwayWithTimeout(strm uint32, code ErrorCode, messag
 	sent := sc.enqueueFrameWithTimeout(fr, timeout)
 
 	if sent && strm != 0 {
-		atomic.StoreUint32(&sc.closeRef, sc.lastID)
+		sc.closeRef.Store(sc.lastID)
 	}
 
 	atomic.StoreInt32((*int32)(&sc.state), int32(connStateClosed))
@@ -1298,11 +1331,14 @@ func (sc *serverConn) handleFrame(strm *Stream, fr *FrameHeader) error {
 		bodyLen := len(data.Data())
 
 		if err := sc.consumeStreamWindow(strm, payloadLen); err != nil {
+			// Stream is reset, but the connection window still owes these bytes.
+			sc.queueConnWindowUpdate(payloadLen)
 			return err
 		}
 
 		strm.bodyBytesReceived += int64(bodyLen)
 		if err := validateContentLengthState(strm, fr.Flags().Has(FlagEndStream)); err != nil {
+			sc.queueConnWindowUpdate(payloadLen)
 			return err
 		}
 
@@ -1395,13 +1431,24 @@ func (sc *serverConn) handleHeaderFrame(strm *Stream, fr *FrameHeader) error {
 		return NewGoAwayError(ProtocolError, "header block size exceeds maximum")
 	}
 
-	b := append(strm.previousHeaderBytes, incoming...)
+	// Common case: no CONTINUATION leftover, so decode straight from the frame body
+	// (each field is copied out into the request and any leftover is copied into
+	// previousHeaderBytes below before the frame is released), avoiding an
+	// allocation plus full header-block copy on every request.
+	var b []byte
+	if len(strm.previousHeaderBytes) == 0 {
+		b = incoming
+	} else {
+		b = append(strm.previousHeaderBytes, incoming...)
+		strm.previousHeaderBytes = strm.previousHeaderBytes[:0]
+	}
+
 	hf := AcquireHeaderField()
+	defer ReleaseHeaderField(hf)
 	req := &strm.ctx.Request
 
 	var err error
 
-	strm.previousHeaderBytes = strm.previousHeaderBytes[:0]
 	fieldsProcessed := 0
 
 	// maxHeaderListSize is what we advertised to the client in SETTINGS.
@@ -1719,9 +1766,9 @@ func (sc *serverConn) sendPushPromise(parentStrm *Stream, method, path string) {
 // Uses a monotonically increasing atomic counter to avoid ID reuse.
 func (sc *serverConn) nextServerStreamID() uint32 {
 	for {
-		cur := atomic.LoadUint32(&sc.nextPushID)
+		cur := sc.nextPushID.Load()
 		next := max(cur+2, 2)
-		if atomic.CompareAndSwapUint32(&sc.nextPushID, cur, next) {
+		if sc.nextPushID.CompareAndSwap(cur, next) {
 			return next
 		}
 	}
@@ -2066,7 +2113,7 @@ func (sc *serverConn) drainWriter() {
 }
 
 func (sc *serverConn) handleSettings(st *Settings) {
-	oldInitWin := atomic.LoadInt64(&sc.initialClientWindow)
+	oldInitWin := sc.initialClientWindow.Load()
 
 	sc.clientSMu.Lock()
 	st.CopyTo(&sc.clientS)
@@ -2091,7 +2138,7 @@ func (sc *serverConn) handleSettings(st *Settings) {
 	sc.enc.SetMaxTableSize(headerTableSize)
 	sc.encMu.Unlock()
 
-	atomic.StoreInt64(&sc.clientMaxFrameSize, int64(maxFrameSize))
+	sc.clientMaxFrameSize.Store(int64(maxFrameSize))
 
 	delta := newInitWin - oldInitWin
 
@@ -2116,7 +2163,7 @@ func (sc *serverConn) handleSettings(st *Settings) {
 			streamIDsToFlush = append(streamIDsToFlush, strm.ID())
 		}
 	}
-	atomic.StoreInt64(&sc.initialClientWindow, newInitWin)
+	sc.initialClientWindow.Store(newInitWin)
 
 	// Send ACK before releasing the stream lock so no DATA is flushed ahead of
 	// the acknowledgement when the window opens.
@@ -2287,7 +2334,7 @@ func (sc *serverConn) queueData(strm *Stream, data []byte, endStream bool) {
 		return
 	}
 
-	maxFrame := int(atomic.LoadInt64(&sc.clientMaxFrameSize))
+	maxFrame := int(sc.clientMaxFrameSize.Load())
 	if maxFrame <= 0 {
 		maxFrame = 1 << 14
 	}
@@ -2382,20 +2429,32 @@ func (sc *serverConn) consumeStreamWindow(strm *Stream, n int) error {
 	return nil
 }
 
-func (sc *serverConn) queueWindowUpdate(strm *Stream, n int) {
-	if n <= 0 || strm == nil {
+// queueConnWindowUpdate replenishes only the connection-level receive window.
+// Per RFC 7540 §6.9.1 connection flow control applies to every DATA frame
+// regardless of the stream's state, so received bytes must be credited back even
+// when the stream is reset (stream flow-control or content-length violation);
+// otherwise the connection window shrinks permanently on each rejected DATA frame.
+func (sc *serverConn) queueConnWindowUpdate(n int) {
+	if n <= 0 {
 		return
 	}
 
 	connInc := sc.windowIncrement(int64(sc.maxWindow), int64(sc.currentWindow), n)
-	streamInc := sc.windowIncrement(int64(strm.recvWindowSize), atomic.LoadInt64(&strm.window), n)
-
 	if connInc > 0 {
 		sc.sendWindowIncrement(0, connInc, func(inc int) {
 			sc.currentWindow += int32(inc)
 		})
 	}
+}
 
+func (sc *serverConn) queueWindowUpdate(strm *Stream, n int) {
+	if n <= 0 || strm == nil {
+		return
+	}
+
+	sc.queueConnWindowUpdate(n)
+
+	streamInc := sc.windowIncrement(int64(strm.recvWindowSize), atomic.LoadInt64(&strm.window), n)
 	if streamInc > 0 {
 		sc.sendWindowIncrement(strm.ID(), streamInc, func(inc int) {
 			atomic.AddInt64(&strm.window, int64(inc))

@@ -8,7 +8,6 @@ import (
 	"math/bits"
 	"net"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -300,9 +299,15 @@ func TestRstStreamDeserializeShortPayload(t *testing.T) {
 	fr := AcquireFrameHeader()
 	defer ReleaseFrameHeader(fr)
 
-	// Payload too short should fail
+	// RFC 7540 §6.4: a RST_STREAM length other than 4 octets is a FRAME_SIZE_ERROR.
 	fr.payload = make([]byte, 2)
-	require.ErrorIs(t, rst.Deserialize(fr), ErrMissingBytes)
+	err := rst.Deserialize(fr)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "rst_stream frame payload must be 4 bytes")
+
+	// Too long is equally invalid.
+	fr.payload = make([]byte, 5)
+	require.Error(t, rst.Deserialize(fr))
 
 	// Valid 4-byte payload should succeed
 	fr.payload = make([]byte, 4)
@@ -652,7 +657,7 @@ func TestConnCancelWithActiveStream(t *testing.T) {
 	}
 
 	// Set a non-zero stream ID to bypass ErrStreamNotReady
-	atomic.StoreUint32(&ctx.streamID, 5)
+	ctx.streamID.Store(5)
 
 	err := conn.Cancel(ctx)
 	require.NoError(t, err)

@@ -63,9 +63,18 @@ func getConn(s *Server) (*Conn, net.Listener, error) {
 		return nil, nil, err
 	}
 
+	// Set a deadline for the handshake to prevent hangs on slow CI runners.
+	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+
 	nc := NewConn(c, ConnOpts{})
 
-	return nc, ln, nc.doHandshake()
+	err = nc.doHandshake()
+	if err == nil {
+		// Clear deadline after successful handshake.
+		_ = c.SetDeadline(time.Time{})
+	}
+
+	return nc, ln, err
 }
 
 func makeHeaders(id uint32, enc *HPACK, endHeaders, endStream bool, hs map[string]string) *FrameHeader {
@@ -288,7 +297,7 @@ func TestIssue27(t *testing.T) {
 	readReset := func(expectedID uint32) {
 		t.Helper()
 
-		require.NoError(t, c.c.SetReadDeadline(time.Now().Add(2*time.Second)))
+		require.NoError(t, c.c.SetReadDeadline(time.Now().Add(5*time.Second)))
 		defer c.c.SetReadDeadline(time.Time{})
 
 		fr, err := c.readNext()

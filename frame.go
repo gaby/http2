@@ -5,7 +5,10 @@ import (
 	"sync"
 )
 
-type FrameType int8
+// FrameType is the 8-bit frame type field from the wire (RFC 7540 §4.1).
+// It must stay unsigned: a signed type turns bytes >= 0x80 negative, which would
+// bypass the "unknown frame type" guard and index framePools out of range.
+type FrameType uint8
 
 func (ft FrameType) String() string {
 	switch ft {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"unsafe"
@@ -54,8 +55,8 @@ type HPACK struct {
 func headerFieldsToString(hfs []*HeaderField, indexOffset int) string {
 	var s strings.Builder
 
-	for i := len(hfs) - 1; i >= 0; i-- {
-		s.WriteString(fmt.Sprintf("%d - %s\n", (len(hfs)-i)+indexOffset-1, hfs[i]))
+	for i, hf := range slices.Backward(hfs) {
+		s.WriteString(fmt.Sprintf("%d - %s\n", (len(hfs)-i)+indexOffset-1, hf))
 	}
 
 	return s.String()
@@ -157,11 +158,16 @@ func (hp *HPACK) peek(n uint64) *HeaderField {
 	if n < maxIndex {
 		index, table = int(n-1), staticTable
 	} else { // search in dynamic table
-		nn := len(hp.dynamic) - int(n-maxIndex) - 1
-		// dynamic_len = 11
-		// n = 64
-		// nn = 11 - (64 - 62) - 1 = 8
-		index, table = nn, hp.dynamic
+		// pos is the 0-based offset from the newest dynamic entry. Compute in
+		// unsigned space: a crafted index with bit 63 set would make int(n-maxIndex)
+		// negative and produce a huge positive nn that slips past the index<0 guard
+		// and panics on table[index].
+		pos := n - maxIndex
+		if pos >= uint64(len(hp.dynamic)) {
+			return nil
+		}
+		// dynamic_len = 11, n = 64 -> pos = 2 -> index = 11 - 2 - 1 = 8
+		index, table = len(hp.dynamic)-int(pos)-1, hp.dynamic
 	}
 
 	if index < 0 {

@@ -146,7 +146,7 @@ type Conn struct {
 
 	pingInterval time.Duration
 
-	closed uint64
+	closed atomic.Uint64
 
 	windowWaitTimeout time.Duration
 	serverSMu         sync.RWMutex
@@ -164,12 +164,12 @@ type Conn struct {
 	maxWindow     int32
 	currentWindow int32
 
-	openStreams int32
+	openStreams atomic.Int32
 
 	state    connState
 	closeRef uint32
 
-	unacks      int32
+	unacks      atomic.Int32
 	disableAcks bool
 }
 
@@ -413,7 +413,7 @@ func (c *Conn) updateServerSettings(st *Settings) {
 	if delta != 0 {
 		c.reqQueued.Range(func(_, value any) bool {
 			ctx := value.(*Ctx)
-			atomic.AddInt32(&ctx.sendWindow, delta)
+			ctx.sendWindow.Add(delta)
 			return true
 		})
 	}
@@ -450,12 +450,12 @@ func (c *Conn) CanOpenStream() bool {
 	maxStreams := c.serverS.maxStreams
 	c.serverSMu.RUnlock()
 
-	return atomic.LoadInt32(&c.openStreams) < int32(maxStreams)
+	return c.openStreams.Load() < int32(maxStreams)
 }
 
 // ActiveStreams returns the number of currently open streams on this connection.
 func (c *Conn) ActiveStreams() int32 {
-	return atomic.LoadInt32(&c.openStreams)
+	return c.openStreams.Load()
 }
 
 // RTT returns the last measured round-trip time to the server.
@@ -478,7 +478,7 @@ func (c *Conn) Stats() ConnStats {
 		ServerWindow:  c.ServerWindow(),
 		MaxStreams:    c.MaxConcurrentStreams(),
 		Closed:        c.Closed(),
-		UnackedPings:  atomic.LoadInt32(&c.unacks),
+		UnackedPings:  c.unacks.Load(),
 		NextStreamID:  atomic.LoadUint32(&c.nextID),
 		PingInterval:  c.PingInterval(),
 	}
@@ -548,7 +548,7 @@ func (c *Conn) PingInterval() time.Duration {
 
 // Closed indicates whether the connection is closed or not.
 func (c *Conn) Closed() bool {
-	return atomic.LoadUint64(&c.closed) == 1
+	return c.closed.Load() == 1
 }
 
 // Done returns a channel that is closed when the connection's write loop exits.
@@ -564,7 +564,7 @@ func (c *Conn) Done() <-chan struct{} {
 // Close is safe to call from any goroutine. The GoAway frame and TCP
 // teardown are handled by the writeLoop to avoid concurrent writes.
 func (c *Conn) Close() error {
-	if !atomic.CompareAndSwapUint64(&c.closed, 0, 1) {
+	if !c.closed.CompareAndSwap(0, 1) {
 		return io.EOF
 	}
 
@@ -625,7 +625,7 @@ func (c *Conn) Do(req *fasthttp.Request, resp *fasthttp.Response) error {
 // If the connection is already closed, the request is resolved with
 // net.ErrClosed instead of panicking.
 func (c *Conn) Write(r *Ctx) {
-	if atomic.LoadUint64(&c.closed) == 1 {
+	if c.closed.Load() == 1 {
 		r.resolve(ErrConnectionClosed)
 		return
 	}
@@ -645,7 +645,7 @@ var ErrStreamNotReady = errors.New("stream hasn't been created")
 //
 // Cancel can only return ErrStreamNotReady when the cancel is performed before the stream is created.
 func (c *Conn) Cancel(ctx *Ctx) error {
-	if atomic.LoadUint32(&ctx.streamID) == 0 {
+	if ctx.streamID.Load() == 0 {
 		return ErrStreamNotReady
 	}
 
@@ -656,7 +656,7 @@ func (c *Conn) Cancel(ctx *Ctx) error {
 
 func (c *Conn) cancel(ctx *Ctx) {
 	h := AcquireFrameHeader()
-	h.SetStream(atomic.LoadUint32(&ctx.streamID))
+	h.SetStream(ctx.streamID.Load())
 
 	fr := AcquireFrame(FrameResetStream).(*RstStream)
 	fr.SetCode(StreamCanceled)
@@ -820,7 +820,7 @@ loop:
 			}
 		}
 
-		if !c.disableAcks && atomic.LoadInt32(&c.unacks) >= 3 {
+		if !c.disableAcks && c.unacks.Load() >= 3 {
 			lastErr = ErrTimeout
 			break loop
 		}
@@ -839,7 +839,7 @@ func (c *Conn) writeFrame(fr *FrameHeader) error {
 }
 
 func (c *Conn) finish(r *Ctx, stream uint32, err error) {
-	atomic.AddInt32(&c.openStreams, -1)
+	c.openStreams.Add(-1)
 
 	r.resolve(err)
 
@@ -847,7 +847,14 @@ func (c *Conn) finish(r *Ctx, stream uint32, err error) {
 }
 
 func (c *Conn) readLoop() {
-	defer func() { _ = c.Close() }()
+	defer func() {
+		// A malicious or buggy server must never crash the whole client process:
+		// contain any panic from frame/HPACK decoding, record it, and close the conn.
+		if r := recover(); r != nil {
+			c.setLastErr(fmt.Errorf("http2: panic in client read loop: %v", r))
+		}
+		_ = c.Close()
+	}()
 
 	for {
 		fr, err := c.readNext()
@@ -936,7 +943,7 @@ func (c *Conn) writeRequest(ctx *Ctx) error {
 	h.SetEndHeaders(true)
 
 	// store the ctx before sending the request
-	atomic.StoreUint32(&ctx.streamID, id)
+	ctx.streamID.Store(id)
 	// Initialize stream send window and store in map atomically to avoid races with updateServerSettings
 	// We need write lock here to ensure we see consistent state with updateServerSettings
 	c.serverSMu.Lock()
@@ -944,7 +951,7 @@ func (c *Conn) writeRequest(ctx *Ctx) error {
 	if streamWin == 0 {
 		streamWin = 65535 // RFC 7540 default
 	}
-	atomic.StoreInt32(&ctx.sendWindow, streamWin)
+	ctx.sendWindow.Store(streamWin)
 	c.reqQueued.Store(id, ctx)
 	c.serverSMu.Unlock()
 
@@ -959,7 +966,7 @@ func (c *Conn) writeRequest(ctx *Ctx) error {
 	if err == nil {
 		err = c.bw.Flush()
 		if err == nil {
-			atomic.AddInt32(&c.openStreams, 1)
+			c.openStreams.Add(1)
 		}
 	}
 
@@ -998,13 +1005,13 @@ func (c *Conn) writeData(fh *FrameHeader, ctx *Ctx, body []byte) (err error) {
 
 		c.windowMu.Lock()
 		for {
-			if atomic.LoadUint64(&c.closed) == 1 {
+			if c.closed.Load() == 1 {
 				c.windowMu.Unlock()
 				return net.ErrClosed
 			}
 
 			connWin := atomic.LoadInt32(&c.serverWindow)
-			streamWin := atomic.LoadInt32(&ctx.sendWindow)
+			streamWin := ctx.sendWindow.Load()
 			if connWin > 0 && streamWin > 0 {
 				break
 			}
@@ -1013,9 +1020,9 @@ func (c *Conn) writeData(fh *FrameHeader, ctx *Ctx, body []byte) (err error) {
 			cond.Wait()
 			if !waitTimer.Stop() {
 				connWin = atomic.LoadInt32(&c.serverWindow)
-				streamWin = atomic.LoadInt32(&ctx.sendWindow)
+				streamWin = ctx.sendWindow.Load()
 
-				if atomic.LoadUint64(&c.closed) == 1 {
+				if c.closed.Load() == 1 {
 					c.windowMu.Unlock()
 					return net.ErrClosed
 				}
@@ -1028,14 +1035,14 @@ func (c *Conn) writeData(fh *FrameHeader, ctx *Ctx, body []byte) (err error) {
 		}
 
 		connWin := atomic.LoadInt32(&c.serverWindow)
-		streamWin := atomic.LoadInt32(&ctx.sendWindow)
+		streamWin := ctx.sendWindow.Load()
 
 		// Calculate chunk size respecting both windows and max frame size
 		toSend := min(min(min(remaining, maxFrame), int(connWin)), int(streamWin))
 
 		// Deduct from both windows
 		atomic.AddInt32(&c.serverWindow, -int32(toSend))
-		atomic.AddInt32(&ctx.sendWindow, -int32(toSend))
+		ctx.sendWindow.Add(-int32(toSend))
 		c.windowMu.Unlock()
 
 		data.SetEndStream(i+toSend == len(body))
@@ -1078,7 +1085,7 @@ loop:
 			if !ping.IsAck() {
 				c.handlePing(ping)
 			} else {
-				atomic.AddInt32(&c.unacks, -1)
+				c.unacks.Add(-1)
 				rtt := time.Since(ping.DataAsTime())
 				c.lastRTT.Store(int64(rtt))
 				if c.onRTT != nil {
@@ -1120,7 +1127,7 @@ func (c *Conn) writePing() error {
 	if err == nil {
 		err = c.bw.Flush()
 		if err == nil {
-			atomic.AddInt32(&c.unacks, 1)
+			c.unacks.Add(1)
 		}
 	}
 
@@ -1165,7 +1172,9 @@ func (c *Conn) readStream(fr *FrameHeader, res *fasthttp.Response) (err error) {
 		c.currentWindow -= int32(bytesConsumed)
 		currentWin := c.currentWindow
 
-		atomic.AddInt32(&c.serverWindow, -int32(bytesConsumed))
+		// Do NOT touch serverWindow here: it is our *send* credit to the server,
+		// replenished only by inbound connection-level WINDOW_UPDATE. Receiving
+		// DATA only consumes the receive window (currentWindow) above.
 
 		if data.Len() != 0 {
 			res.AppendBody(data.Data())
@@ -1188,7 +1197,7 @@ func (c *Conn) readStream(fr *FrameHeader, res *fasthttp.Response) (err error) {
 		win := int32(fr.Body().(*WindowUpdate).Increment())
 		if ri, ok := c.reqQueued.Load(fr.Stream()); ok {
 			ctx := ri.(*Ctx)
-			atomic.AddInt32(&ctx.sendWindow, win)
+			ctx.sendWindow.Add(win)
 			c.notifyWindowAvailable()
 		}
 	}
@@ -1222,8 +1231,8 @@ func (c *Conn) readHeader(b []byte, res *fasthttp.Response) error {
 			return err
 		}
 
-		if hf.IsPseudo() {
-			if hf.KeyBytes()[1] == 's' { // status
+		if key := hf.KeyBytes(); hf.IsPseudo() && len(key) > 1 {
+			if key[1] == 's' { // status
 				n, err := parseUintBytes(hf.ValueBytes())
 				if err != nil {
 					return err

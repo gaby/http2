@@ -105,8 +105,8 @@ type Ctx struct {
 	onResolve   func(error)
 	resolveOnce sync.Once
 
-	streamID   uint32
-	sendWindow int32 // tracked send window for this stream
+	streamID   atomic.Uint32
+	sendWindow atomic.Int32 // tracked send window for this stream
 }
 
 // resolve will resolve the context, meaning that provided an error,

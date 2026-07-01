@@ -323,7 +323,7 @@ func TestServerConnPingAndErrors(t *testing.T) {
 
 func TestHandleFrameDataStreamFlowControl(t *testing.T) {
 	sc := &serverConn{
-		writer: make(chan *FrameHeader, 1),
+		writer: make(chan *FrameHeader, 4),
 		logger: log.New(io.Discard, "", 0),
 	}
 	sc.maxWindow = 10
@@ -352,6 +352,14 @@ func TestHandleFrameDataStreamFlowControl(t *testing.T) {
 	require.Equal(t, FrameResetStream, h2Err.frameType)
 
 	sc.writeError(strm, err)
+
+	// A stream-level DATA rejection still credits the connection window back
+	// (RFC 7540 §6.9.1), so a connection-level WINDOW_UPDATE precedes the RST_STREAM.
+	connWU := <-sc.writer
+	require.Equal(t, FrameWindowUpdate, connWU.Type())
+	require.Equal(t, uint32(0), connWU.Stream())
+	ReleaseFrameHeader(connWU)
+
 	out := <-sc.writer
 	require.Equal(t, FrameResetStream, out.Type())
 	require.Equal(t, FlowControlError, out.Body().(*RstStream).Code())
@@ -493,7 +501,7 @@ func TestHandleFrameSendsWindowUpdatesAfterReading(t *testing.T) {
 
 func TestPaddedDataCountsAgainstWindow(t *testing.T) {
 	sc := &serverConn{
-		writer: make(chan *FrameHeader, 1),
+		writer: make(chan *FrameHeader, 4),
 		logger: log.New(io.Discard, "", 0),
 	}
 	sc.maxWindow = 15
@@ -523,6 +531,14 @@ func TestPaddedDataCountsAgainstWindow(t *testing.T) {
 	require.Equal(t, FrameResetStream, h2Err.frameType)
 
 	sc.writeError(strm, err)
+
+	// The rejected DATA frame still counts against connection flow control
+	// (RFC 7540 §6.9.1), so a connection-level WINDOW_UPDATE precedes the RST_STREAM.
+	connWU := <-sc.writer
+	require.Equal(t, FrameWindowUpdate, connWU.Type())
+	require.Equal(t, uint32(0), connWU.Stream())
+	ReleaseFrameHeader(connWU)
+
 	out := <-sc.writer
 	require.Equal(t, FrameResetStream, out.Type())
 	ReleaseFrameHeader(out)
@@ -744,7 +760,7 @@ func TestConnectionWindowQueuesUntilUpdate(t *testing.T) {
 		logger: log.New(io.Discard, "", 0),
 	}
 	atomic.StoreInt64(&sc.clientWindow, 0)
-	atomic.StoreInt64(&sc.initialClientWindow, int64(defaultWindowSize))
+	sc.initialClientWindow.Store(int64(defaultWindowSize))
 
 	strm := NewStream(1, int32(defaultWindowSize), int32(defaultWindowSize))
 	strm.SetState(StreamStateOpen)
@@ -921,9 +937,9 @@ func TestHandleStreamsRespectsMaxConcurrentStreams(t *testing.T) {
 		{":path", "/"},
 	}
 
+	// The single handleStreams goroutine consumes sc.reader in FIFO order, so
+	// stream 1 is fully opened before stream 3 is read; no sleep needed to order them.
 	sc.reader <- buildHeadersFrame(t, 1, headers)
-	// Give time for first stream to be processed
-	time.Sleep(10 * time.Millisecond)
 	sc.reader <- buildHeadersFrame(t, 3, headers)
 
 	var rst *FrameHeader
