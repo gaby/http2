@@ -65,9 +65,6 @@ func HuffmanDecode(dst, src []byte) ([]byte, error) {
 				root = rootHuffmanNode
 				bitsLeft = bits
 			}
-
-			// not needed:
-			// accBits &= 1<<bits - 1
 		}
 	}
 

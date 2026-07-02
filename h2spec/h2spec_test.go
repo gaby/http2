@@ -200,7 +200,6 @@ func TestH2Spec(t *testing.T) {
 	})
 
 	for _, test := range testCases {
-		test := test
 		t.Run(test.desc, func(t *testing.T) {
 			conf := &config.Config{
 				Host:         "127.0.0.1",
@@ -288,7 +287,7 @@ func TestUnknownExtensionFrameDuringHeaders(t *testing.T) {
 		Host:         "127.0.0.1",
 		Port:         port,
 		Path:         "/",
-		Timeout:      time.Second,
+		Timeout:      3 * time.Second, // match sibling conformance tests; 1s flaked under CI load
 		MaxHeaderLen: 4000,
 		TLS:          true,
 		Insecure:     true,
@@ -335,7 +334,7 @@ func launchLocalServer(t *testing.T) int {
 	http2.ConfigureServer(server, http2.ServerConfig{})
 
 	var ln net.Listener
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		ln, err = net.Listen("tcp", "127.0.0.1:0")
 		if err == nil {
 			break

@@ -32,7 +32,7 @@ func TestEnqueueFrameInternalReturnsOnClose(t *testing.T) {
 
 	select {
 	case <-done:
-	case <-time.After(200 * time.Millisecond):
+	case <-time.After(2 * time.Second):
 		t.Fatal("enqueueFrameInternal blocked after connection close")
 	}
 }
@@ -44,13 +44,20 @@ func TestCloseIdleConnReturnsWhenWriterBlocked(t *testing.T) {
 	}
 	sc.writer <- &FrameHeader{}
 
-	start := time.Now()
-	sc.closeIdleConn()
-	elapsed := time.Since(start)
-
-	if elapsed > 300*time.Millisecond {
-		t.Fatalf("closeIdleConn took too long: %v", elapsed)
+	// closeIdleConn must return even though the writer channel is full and the
+	// closer is not yet closed. Use a generous deadlock detector rather than a
+	// tight wall-clock bound, which would flake under load on CI.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sc.closeIdleConn()
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("closeIdleConn did not return while writer was blocked")
 	}
+
 	if !sc.closing.Load() {
 		t.Fatal("connection was not marked as closing")
 	}

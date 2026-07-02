@@ -1,5 +1,7 @@
 package http2
 
+import "slices"
+
 // Streams is a slice of Stream pointers with helper methods for search and deletion.
 type Streams []*Stream
 
@@ -40,10 +42,10 @@ func (strms Streams) GetFirstOf(frameType FrameType) *Stream {
 
 func (strms Streams) getPrevious(frameType FrameType) *Stream {
 	cnt := 0
-	for i := len(strms) - 1; i >= 0; i-- {
-		if strms[i].origType == frameType {
+	for _, strm := range slices.Backward(strms) {
+		if strm.origType == frameType {
 			if cnt != 0 {
-				return strms[i]
+				return strm
 			}
 			cnt++
 		}

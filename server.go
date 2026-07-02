@@ -115,7 +115,7 @@ type Server struct {
 
 	conns map[*serverConn]struct{}
 
-	activeConns int64
+	activeConns atomic.Int64
 
 	mu sync.Mutex
 }
@@ -128,7 +128,7 @@ func (s *Server) Config() ServerConfig {
 
 // ActiveConnections returns the number of currently active HTTP/2 connections.
 func (s *Server) ActiveConnections() int64 {
-	return atomic.LoadInt64(&s.activeConns)
+	return s.activeConns.Load()
 }
 
 // String returns a summary of the server state for debugging.
@@ -160,8 +160,8 @@ func (s *Server) Shutdown() {
 //
 // This function will fail if the connection does not support the HTTP/2 protocol.
 func (s *Server) ServeConn(c net.Conn) error {
-	atomic.AddInt64(&s.activeConns, 1)
-	defer atomic.AddInt64(&s.activeConns, -1)
+	s.activeConns.Add(1)
+	defer s.activeConns.Add(-1)
 	defer func() { _ = c.Close() }()
 
 	// Bound the TLS/preface handshake to avoid hangs on misbehaving clients.
@@ -219,7 +219,16 @@ func (s *Server) ServeConn(c net.Conn) error {
 	sc.dec.Reset()
 
 	sc.maxWindow = s.cnf.MaxWindowSize
+	// The connection begins with the mandatory 65535-byte base receive window
+	// (RFC 7540 §6.9.2) in addition to the maxWindow granted via WINDOW_UPDATE at
+	// handshake, so account for both. Otherwise the server under-counts its receive
+	// window by 65535 and can raise a spurious FLOW_CONTROL_ERROR when a conforming
+	// client sends up to the amount it was actually advertised. Clamp to avoid int32
+	// overflow when maxWindow is configured near the 2^31-1 ceiling.
 	sc.currentWindow = sc.maxWindow
+	if sc.currentWindow <= maxWindowIncrement-65535 {
+		sc.currentWindow += 65535
+	}
 
 	sc.st.Reset()
 	sc.st.SetMaxWindowSize(uint32(sc.maxWindow))

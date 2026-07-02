@@ -48,8 +48,10 @@ func (rst *RstStream) Error() error {
 
 // Deserialize reads a RST_STREAM frame from the given frame header payload.
 func (rst *RstStream) Deserialize(fr *FrameHeader) error {
-	if len(fr.payload) < 4 {
-		return ErrMissingBytes
+	// RFC 7540 §6.4: a RST_STREAM with a length other than 4 octets MUST be a
+	// connection error of type FRAME_SIZE_ERROR.
+	if len(fr.payload) != 4 {
+		return NewGoAwayError(FrameSizeError, "rst_stream frame payload must be 4 bytes")
 	}
 
 	rst.code = ErrorCode(http2utils.BytesToUint32(fr.payload))
