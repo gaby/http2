@@ -59,7 +59,7 @@ func (pry *Priority) Deserialize(fr *FrameHeader) (err error) {
 		pry.weight = fr.payload[4]
 	}
 
-	return
+	return err
 }
 
 func (pry *Priority) Serialize(fr *FrameHeader) {

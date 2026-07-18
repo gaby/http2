@@ -1,44 +1,56 @@
-run:
-  timeout: 5m
-
+version: "2"
 linters:
-  disable-all: true
+  default: none
   enable:
-    - errcheck
-    - gosimple
-    - govet
-    - ineffassign
-    - staticcheck
-    - unused
-    - gofumpt
-    - misspell
-    - unconvert
     - bidichk
     - durationcheck
-
-linters-settings:
-  gofumpt:
-    extra-rules: true
-  misspell:
-    locale: US
-
+    - errcheck
+    - govet
+    - ineffassign
+    - misspell
+    - staticcheck
+    - unconvert
+    - unused
+  settings:
+    misspell:
+      locale: US
+  exclusions:
+    generated: lax
+    rules:
+      - linters:
+          - errcheck
+        path: _test\.go
+      - linters:
+          - errcheck
+        path: http2utils/utils.go
+      - path: (hpack|serverConn)\.go
+        text: SA6002
+      - path: (.+)\.go$
+        text: 'ST1000: at least one file in a package should have a package comment'
+    paths:
+      - examples
+      - benchmark
+      - cmd
+      - maybe_later
+      - third_party$
+      - builtin$
+      - examples$
 issues:
-  exclude-dirs: [ "examples", "benchmark", "cmd", "maybe_later" ]
-  exclude-use-default: false
   max-issues-per-linter: 0
   max-same-issues: 0
-  exclude:
-    - 'ST1000: at least one file in a package should have a package comment'
-  exclude-rules:
-    # Test helpers routinely ignore errors from setup/teardown calls.
-    - path: _test\.go
-      linters:
-        - errcheck
-    # This assertion helper writes to a tabwriter/buffer that never errors.
-    - path: http2utils/utils.go
-      linters:
-        - errcheck
-    # Byte slices are intentionally pooled; the SA6002 pointer-wrapping
-    # micro-optimisation is not worth the churn here.
-    - path: (hpack|serverConn)\.go
-      text: 'SA6002'
+formatters:
+  enable:
+    - gofumpt
+  settings:
+    gofumpt:
+      extra-rules: true
+  exclusions:
+    generated: lax
+    paths:
+      - examples
+      - benchmark
+      - cmd
+      - maybe_later
+      - third_party$
+      - builtin$
+      - examples$

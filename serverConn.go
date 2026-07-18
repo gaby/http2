@@ -322,7 +322,7 @@ func (sc *serverConn) readLoop() (err error) {
 		ReleaseFrameHeader(fr)
 	}
 
-	return
+	return err
 }
 
 // handleStreams handles everything related to the streams
@@ -1294,10 +1294,10 @@ func fasthttpResponseHeaders(dst *Headers, hp *HPACK, res *fasthttp.Response) {
 	// Remove the Transfer-Encoding field
 	res.Header.Del("Transfer-Encoding")
 
-	res.Header.VisitAll(func(k, v []byte) {
+	for k, v := range res.Header.All() {
 		hf.SetBytes(ToLower(k), v)
 		dst.AppendHeaderField(hp, hf, false)
-	})
+	}
 }
 
 func limitedReaderSize(r io.Reader) int64 {

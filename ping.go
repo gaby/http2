@@ -37,7 +37,7 @@ func (p *Ping) CopyTo(other *Ping) {
 
 func (p *Ping) Write(b []byte) (n int, err error) {
 	copy(p.data[:], b)
-	return
+	return n, err
 }
 
 func (p *Ping) SetData(b []byte) {

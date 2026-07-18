@@ -747,5 +747,5 @@ func hexComparison(b, r []byte) (s string) {
 	for i := range r {
 		s += fmt.Sprintf("%x", r[i]) + " "
 	}
-	return
+	return s
 }

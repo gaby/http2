@@ -565,14 +565,14 @@ func (c *Conn) writeRequest(ctx *Ctx) error {
 	hf.SetBytes(StringUserAgent, req.Header.UserAgent())
 	enc.AppendHeaderField(h, hf, true)
 
-	req.Header.VisitAll(func(k, v []byte) {
+	for k, v := range req.Header.All() {
 		if bytes.EqualFold(k, StringUserAgent) {
-			return
+			continue
 		}
 
 		hf.SetBytes(ToLower(k), v)
 		enc.AppendHeaderField(h, hf, false)
-	})
+	}
 
 	h.SetPadding(false)
 	h.SetEndStream(!hasBody)
@@ -675,7 +675,7 @@ loop:
 		ReleaseFrameHeader(fr)
 	}
 
-	return
+	return fr, err
 }
 
 var ErrTimeout = errors.New("server is not replying to pings")
@@ -756,7 +756,7 @@ func (c *Conn) readStream(fr *FrameHeader, res *fasthttp.Response) (err error) {
 		}
 	}
 
-	return
+	return err
 }
 
 func (c *Conn) updateWindow(streamID uint32, size int) {

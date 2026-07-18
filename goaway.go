@@ -83,7 +83,7 @@ func (ga *GoAway) Deserialize(fr *FrameHeader) (err error) {
 		}
 	}
 
-	return
+	return err
 }
 
 func (ga *GoAway) Serialize(fr *FrameHeader) {

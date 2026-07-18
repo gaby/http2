@@ -102,7 +102,7 @@ func (hp *HPACK) DynamicSize() (n uint32) {
 	for _, hf := range hp.dynamic {
 		n += hf.Size()
 	}
-	return
+	return n
 }
 
 // add header field to the dynamic table.
@@ -190,7 +190,7 @@ func (hp *HPACK) search(hf *HeaderField) (n uint64, fullMatch bool) {
 		}
 	}
 
-	return
+	return n, fullMatch
 }
 
 const (
