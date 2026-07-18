@@ -33,7 +33,7 @@ jobs:
           git diff --exit-code go.sum
 
       - name: Vet
-        run: go vet ./ ./h2spec
+        run: go vet ./ ./http2utils/... ./h2spec
 
       - name: Unit tests
         run: go test ./
@@ -41,7 +41,10 @@ jobs:
       - name: h2spec conformance suite
         run: go test ./h2spec
 
+      # The examples/ and benchmark/ trees track an older API and are not part
+      # of the library build, so lint only the real packages.
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
           version: ${{ env.GOLANGCI_LINT_VERSION }}
+          args: ./ ./http2utils/... ./h2spec

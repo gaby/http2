@@ -407,7 +407,7 @@ loop:
 				if strm != nil {
 					reqTimerArmed = true
 					// try to arm the timer
-					when := strm.startedAt.Add(sc.maxRequestTime).Sub(time.Now())
+					when := time.Until(strm.startedAt.Add(sc.maxRequestTime))
 					// if the time is negative or zero it triggers imm
 					sc.maxRequestTimer.Reset(when)
 
@@ -569,7 +569,7 @@ loop:
 						closeStream(strm)
 
 						if sc.debug {
-							sc.logger.Printf("Cancelling stream in idle state: %d\n", nstrm.ID())
+							sc.logger.Printf("Canceling stream in idle state: %d\n", nstrm.ID())
 						}
 
 						sc.writeReset(nstrm.ID(), StreamCanceled)
@@ -1234,7 +1234,6 @@ func (sc *serverConn) sendPingAndSchedule() {
 }
 
 func (sc *serverConn) writeLoop() {
-
 	buffered := 0
 
 	for fr := range sc.writer {

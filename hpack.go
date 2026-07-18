@@ -35,7 +35,7 @@ type HPACK struct {
 	dynamic []*HeaderField
 
 	maxTableSize uint32
-	// maxTableSize comming from the settings frame
+	// maxTableSize coming from the settings frame
 	maxTableSizeSettings uint32
 }
 

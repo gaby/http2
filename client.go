@@ -154,19 +154,14 @@ func (cl *Client) RoundTrip(_ *fasthttp.HostClient, req *fasthttp.Request, res *
 
 	if cl.opts.MaxResponseTime > 0 {
 		cancelTimer = time.AfterFunc(cl.opts.MaxResponseTime, func() {
-			select {
-			case ch <- ErrRequestCanceled:
-			}
-
+			ch <- ErrRequestCanceled
 			c.cancel(ctx)
 		})
 	}
 
 	c.Write(ctx)
 
-	select {
-	case err = <-ch:
-	}
+	err = <-ch
 
 	if cancelTimer != nil {
 		cancelTimer.Stop()
