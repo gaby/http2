@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -510,8 +509,6 @@ func (c *Conn) readLoop() {
 				}
 			} else {
 				c.finish(r, fr.Stream(), err)
-
-				fmt.Fprintf(os.Stderr, "%s. payload=%v\n", err, fr.payload)
 
 				if errors.Is(err, FlowControlError) {
 					break

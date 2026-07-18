@@ -49,9 +49,20 @@ func makeHeaders(id uint32, enc *HPACK, endHeaders, endStream bool, hs map[strin
 
 	hf := AcquireHeaderField()
 
+	// Pseudo-header fields must be emitted before regular header fields
+	// (RFC 7540 8.1.2.1). Map iteration order is random, so split the two.
 	for k, v := range hs {
-		hf.Set(k, v)
-		enc.AppendHeaderField(h, hf, k[0] == ':')
+		if len(k) > 0 && k[0] == ':' {
+			hf.Set(k, v)
+			enc.AppendHeaderField(h, hf, true)
+		}
+	}
+
+	for k, v := range hs {
+		if len(k) == 0 || k[0] != ':' {
+			hf.Set(k, v)
+			enc.AppendHeaderField(h, hf, false)
+		}
 	}
 
 	h.SetPadding(false)
@@ -94,14 +105,14 @@ func testIssue52(t *testing.T) {
 		string(StringMethod):    "POST",
 		string(StringPath):      "/hello/world",
 		string(StringScheme):    "https",
-		"Content-Length":        strconv.Itoa(len(msg)),
+		"content-length":        strconv.Itoa(len(msg)),
 	})
 	h2 := makeHeaders(9, c.enc, true, false, map[string]string{
 		string(StringAuthority): "localhost",
 		string(StringMethod):    "POST",
 		string(StringPath):      "/hello/world",
 		string(StringScheme):    "https",
-		"Content-Length":        strconv.Itoa(len(msg)),
+		"content-length":        strconv.Itoa(len(msg)),
 	})
 	h3 := makeHeaders(7, c.enc, true, true, map[string]string{
 		string(StringAuthority): "localhost",
@@ -195,21 +206,21 @@ func TestIssue27(t *testing.T) {
 		string(StringMethod):    "POST",
 		string(StringPath):      "/hello/world",
 		string(StringScheme):    "https",
-		"Content-Length":        strconv.Itoa(len(msg)),
+		"content-length":        strconv.Itoa(len(msg)),
 	})
 	h2 := makeHeaders(5, c.enc, true, false, map[string]string{
 		string(StringAuthority): "localhost",
 		string(StringMethod):    "POST",
 		string(StringPath):      "/hello/world",
 		string(StringScheme):    "https",
-		"Content-Length":        strconv.Itoa(len(msg)),
+		"content-length":        strconv.Itoa(len(msg)),
 	})
 	h3 := makeHeaders(7, c.enc, false, false, map[string]string{
 		string(StringAuthority): "localhost",
 		string(StringMethod):    "GET",
 		string(StringPath):      "/hello/world",
 		string(StringScheme):    "https",
-		"Content-Length":        strconv.Itoa(len(msg)),
+		"content-length":        strconv.Itoa(len(msg)),
 	})
 
 	c.writeFrame(h1)

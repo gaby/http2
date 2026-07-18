@@ -18,6 +18,11 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
+// errConnClosed signals that the read loop terminated the connection on
+// purpose, typically after sending a connection-level GOAWAY. It is handled
+// as a graceful shutdown rather than a transport error.
+var errConnClosed = errors.New("connection closed after GOAWAY")
+
 type connState int32
 
 const (
@@ -93,10 +98,19 @@ func (sc *serverConn) Handshake() error {
 func (sc *serverConn) Serve() error {
 	sc.closer = make(chan struct{}, 1)
 	sc.maxRequestTimer = time.NewTimer(0)
-	sc.clientWindow = int64(sc.clientS.MaxWindowSize())
+	// The connection-level flow-control window always starts at 65535 octets,
+	// independent of SETTINGS_INITIAL_WINDOW_SIZE (RFC 7540 6.9.2).
+	sc.clientWindow = int64(defaultWindowSize)
 
 	if sc.maxIdleTime > 0 {
 		sc.maxIdleTimer = time.AfterFunc(sc.maxIdleTime, sc.closeIdleConn)
+	}
+
+	// Create the ping timer here, before spawning the read/write goroutines, so
+	// the field is written once and read (Stop) from other goroutines without a
+	// data race. The writer channel is buffered, so an early tick does not block.
+	if sc.pingInterval > 0 {
+		sc.pingTimer = time.AfterFunc(sc.pingInterval, sc.sendPingAndSchedule)
 	}
 
 	defer func() {
@@ -139,7 +153,9 @@ func (sc *serverConn) Serve() error {
 	}
 
 	err = sc.readLoop()
-	if errors.Is(err, io.EOF) {
+	if errors.Is(err, io.EOF) || errors.Is(err, errConnClosed) {
+		// errConnClosed means we deliberately terminated the connection
+		// after emitting a GOAWAY. It is not a transport failure.
 		err = nil
 	}
 
@@ -203,6 +219,12 @@ func (sc *serverConn) readLoop() (err error) {
 
 	var fr *FrameHeader
 
+	// expectContinuation holds the stream id of a header block that has been
+	// opened by a HEADERS frame without END_HEADERS. While it is non-zero the
+	// only frame the peer may send is a CONTINUATION on that same stream.
+	// https://httpwg.org/specs/rfc7540.html#rfc.section.6.10
+	var expectContinuation uint32
+
 	for err == nil {
 		fr, err = ReadFrameFromWithSize(sc.br, sc.clientS.frameSize)
 		if err != nil {
@@ -212,17 +234,48 @@ func (sc *serverConn) readLoop() (err error) {
 				continue
 			}
 
+			// a malformed frame (wrong size, bad padding, ...) is a
+			// connection error: emit the GOAWAY and close the connection.
+			var h2err Error
+			if errors.As(err, &h2err) && h2err.frameType == FrameGoAway {
+				sc.writeGoAway(0, h2err.Code(), h2err.Error())
+				return errConnClosed
+			}
+
 			break
 		}
 
-		if fr.Stream() != 0 {
-			err := sc.checkFrameWithStream(fr)
-			if err != nil {
-				sc.writeError(nil, err)
-			} else {
-				sc.reader <- fr
+		// Enforce the CONTINUATION rules before any other handling. A header
+		// block must be a single HEADERS/PUSH_PROMISE followed by zero or more
+		// CONTINUATION frames on the same stream, with nothing interleaved.
+		if expectContinuation != 0 {
+			if fr.Type() != FrameContinuation || fr.Stream() != expectContinuation {
+				sc.writeGoAway(0, ProtocolError, "expected a CONTINUATION frame")
+				ReleaseFrameHeader(fr)
+				return errConnClosed
 			}
 
+			if fr.Flags().Has(FlagEndHeaders) {
+				expectContinuation = 0
+			}
+		} else if fr.Type() == FrameContinuation {
+			sc.writeGoAway(0, ProtocolError, "unexpected CONTINUATION frame")
+			ReleaseFrameHeader(fr)
+			return errConnClosed
+		} else if fr.Type() == FrameHeaders && !fr.Flags().Has(FlagEndHeaders) {
+			expectContinuation = fr.Stream()
+		}
+
+		if fr.Stream() != 0 {
+			if cerr := sc.checkFrameWithStream(fr); cerr != nil {
+				// a frame that violates connection-level rules is a
+				// connection error: emit the GOAWAY and terminate.
+				sc.writeError(nil, cerr)
+				ReleaseFrameHeader(fr)
+				return errConnClosed
+			}
+
+			sc.reader <- fr
 			continue
 		}
 
@@ -232,18 +285,22 @@ func (sc *serverConn) readLoop() (err error) {
 			st := fr.Body().(*Settings)
 			if !st.IsAck() { // if it has ack, just ignore
 				sc.handleSettings(st)
+				// forward to handleStreams so the INITIAL_WINDOW_SIZE delta is
+				// applied to open streams in frame order.
+				sc.reader <- fr
+				continue
 			}
 		case FrameWindowUpdate:
 			win := int64(fr.Body().(*WindowUpdate).Increment())
 			if win == 0 {
 				sc.writeGoAway(0, ProtocolError, "window increment of 0")
-				// return
-				continue
+				ReleaseFrameHeader(fr)
+				return errConnClosed
 			}
 
-			if atomic.AddInt64(&sc.clientWindow, win) >= 1<<31-1 {
-				sc.writeGoAway(0, FlowControlError, "window is above limits")
-			}
+			// the actual window bookkeeping happens in handleStreams.
+			sc.reader <- fr
+			continue
 		case FramePing:
 			ping := fr.Body().(*Ping)
 			if !ping.IsAck() {
@@ -258,6 +315,8 @@ func (sc *serverConn) readLoop() (err error) {
 			}
 		default:
 			sc.writeGoAway(0, ProtocolError, "invalid frame")
+			ReleaseFrameHeader(fr)
+			return errConnClosed
 		}
 
 		ReleaseFrameHeader(fr)
@@ -278,6 +337,14 @@ func (sc *serverConn) handleStreams() {
 	var strms Streams
 	var reqTimerArmed bool
 	var openStreams int
+
+	// curInitialWindow tracks the client's SETTINGS_INITIAL_WINDOW_SIZE, which
+	// is the send window every new stream starts with. It starts at the spec
+	// default of 65535; the client's SETTINGS frames are forwarded to this
+	// goroutine, which applies any change as a delta to all open streams
+	// (RFC 7540 6.9.2). Reading it here rather than sc.clientS keeps all
+	// window state owned by this single goroutine.
+	curInitialWindow := int32(defaultWindowSize)
 
 	closedStrms := make(map[uint32]struct{})
 
@@ -354,6 +421,43 @@ loop:
 				return
 			}
 
+			// Connection-level flow-control frames are forwarded here so the
+			// window bookkeeping and the resumption of buffered response data
+			// happen in this single goroutine, in frame order.
+			if fr.Stream() == 0 {
+				switch fr.Type() {
+				case FrameSettings:
+					st := fr.Body().(*Settings)
+					if st.hasWindowSize {
+						delta := int64(int32(st.windowSize)) - int64(curInitialWindow)
+						curInitialWindow = int32(st.windowSize)
+
+						for _, s := range strms {
+							s.window += delta
+							if s.window > 1<<31-1 {
+								sc.writeGoAway(0, FlowControlError, "stream flow-control window exceeded maximum")
+								ReleaseFrameHeader(fr)
+								break loop
+							}
+						}
+
+						sc.flushStreams(strms, closeStream)
+					}
+				case FrameWindowUpdate:
+					sc.clientWindow += int64(fr.Body().(*WindowUpdate).Increment())
+					if sc.clientWindow > 1<<31-1 {
+						sc.writeGoAway(0, FlowControlError, "connection flow-control window exceeded maximum")
+						ReleaseFrameHeader(fr)
+						break loop
+					}
+
+					sc.flushStreams(strms, closeStream)
+				}
+
+				ReleaseFrameHeader(fr)
+				continue
+			}
+
 			isClosing := atomic.LoadInt32((*int32)(&sc.state)) == int32(connStateClosed)
 
 			var strm *Stream
@@ -403,7 +507,7 @@ loop:
 					continue
 				}
 
-				strm = NewStream(fr.Stream(), int32(sc.clientWindow))
+				strm = NewStream(fr.Stream(), curInitialWindow)
 				strms = append(strms, strm)
 
 				// RFC(5.1.1):
@@ -479,13 +583,30 @@ loop:
 
 			handleState(fr, strm)
 
-			switch strm.State() {
-			case StreamStateHalfClosed:
-				sc.handleEndRequest(strm)
-				// we fallthrough because once we send the response
-				// the stream is already consumed and thus finished
-				fallthrough
-			case StreamStateClosed:
+			// Generate the response once the client is done sending the
+			// request, then (re)send buffered response data. The response may
+			// not fit the flow-control window in one go, in which case the
+			// stream stays open until a WINDOW_UPDATE lets us finish.
+			if strm.State() == StreamStateHalfClosed && !strm.responded {
+				strm.responded = true
+
+				// The declared content-length must match the number of DATA
+				// bytes actually received.
+				// https://httpwg.org/specs/rfc7540.html#rfc.section.8.1.2.6
+				if strm.hasContentLength && strm.recvBody != strm.contentLength {
+					sc.writeReset(strm.ID(), ProtocolError)
+					strm.SetState(StreamStateClosed)
+				} else if sc.handleEndRequest(strm) {
+					strm.SetState(StreamStateClosed)
+				}
+			} else if strm.responded && len(strm.pendingData) > 0 {
+				// a stream-level WINDOW_UPDATE may have opened up space
+				if sc.sendData(strm) {
+					strm.SetState(StreamStateClosed)
+				}
+			}
+
+			if strm.State() == StreamStateClosed {
 				closeStream(strm)
 			}
 
@@ -655,6 +776,10 @@ func (sc *serverConn) handleFrame(strm *Stream, fr *FrameHeader) error {
 				return NewGoAwayError(ProtocolError, "END_HEADERS received on an incomplete stream")
 			}
 
+			if err := validateRequestPseudoHeaders(strm); err != nil {
+				return err
+			}
+
 			// calling req.URI() triggers a URL parsing, so because of that we need to delay the URL parsing.
 			strm.ctx.Request.URI().SetSchemeBytes(strm.scheme)
 		}
@@ -667,8 +792,9 @@ func (sc *serverConn) handleFrame(strm *Stream, fr *FrameHeader) error {
 			return NewGoAwayError(StreamClosedError, "stream closed")
 		}
 
-		strm.ctx.Request.AppendBody(
-			fr.Body().(*Data).Data())
+		data := fr.Body().(*Data).Data()
+		strm.recvBody += len(data)
+		strm.ctx.Request.AppendBody(data)
 	case FrameResetStream:
 		if strm.State() == StreamStateIdle {
 			return NewGoAwayError(ProtocolError, "RST_STREAM on idle stream")
@@ -725,7 +851,12 @@ func (sc *serverConn) handleHeaderFrame(strm *Stream, fr *FrameHeader) error {
 
 		b, err = sc.dec.nextField(hf, strm.headerBlockNum, fieldsProcessed, b)
 		if err != nil {
-			if errors.Is(err, ErrUnexpectedSize) && len(pb) > 0 {
+			// ErrUnexpectedSize means a header field spills past the bytes we
+			// currently have. That is only legal when more frames are coming:
+			// a HEADERS frame without END_HEADERS to be completed by a
+			// CONTINUATION. If END_HEADERS is set, the block is complete and a
+			// truncated field is a decoding error.
+			if errors.Is(err, ErrUnexpectedSize) && len(pb) > 0 && !fr.Flags().Has(FlagEndHeaders) {
 				err = nil
 				strm.previousHeaderBytes = append(strm.previousHeaderBytes, pb...)
 			} else {
@@ -736,38 +867,83 @@ func (sc *serverConn) handleHeaderFrame(strm *Stream, fr *FrameHeader) error {
 		}
 
 		k, v := hf.KeyBytes(), hf.ValueBytes()
-		if !hf.IsPseudo() &&
-			!bytes.Equal(k, StringUserAgent) &&
-			!bytes.Equal(k, StringContentType) {
 
-			req.Header.AddBytesKV(k, v)
-			continue
+		// Header field names must not contain uppercase characters.
+		// https://httpwg.org/specs/rfc7540.html#rfc.section.8.1.2
+		if hasUpperCase(k) {
+			return NewResetStreamError(ProtocolError, "header field name contains uppercase characters")
 		}
 
 		if hf.IsPseudo() {
-			k = k[1:]
-		}
-
-		switch k[0] {
-		case 'm': // method
-			req.Header.SetMethodBytes(v)
-		case 'p': // path
-			req.Header.SetRequestURIBytes(v)
-		case 's': // scheme
-			if !bytes.Equal(k, StringScheme[1:]) {
-				return NewGoAwayError(ProtocolError, "invalid pseudoheader")
+			// All pseudo-header fields must appear before regular header fields.
+			// https://httpwg.org/specs/rfc7540.html#rfc.section.8.1.2.1
+			if strm.regularSeen {
+				return NewResetStreamError(ProtocolError, "pseudo-header field after regular header field")
 			}
 
-			strm.scheme = append(strm.scheme[:0], v...)
-		case 'a': // authority
-			req.Header.SetHostBytes(v)
-			req.Header.AddBytesV("Host", v)
-		case 'u': // user-agent
+			switch {
+			case bytes.Equal(k, StringMethod):
+				if strm.pseudoMethod {
+					return NewResetStreamError(ProtocolError, "duplicate :method pseudo-header")
+				}
+				strm.pseudoMethod = true
+				req.Header.SetMethodBytes(v)
+			case bytes.Equal(k, StringPath):
+				if strm.pseudoPath {
+					return NewResetStreamError(ProtocolError, "duplicate :path pseudo-header")
+				}
+				strm.pseudoPath = true
+				strm.path = append(strm.path[:0], v...)
+				req.Header.SetRequestURIBytes(v)
+			case bytes.Equal(k, StringScheme):
+				if strm.pseudoScheme {
+					return NewResetStreamError(ProtocolError, "duplicate :scheme pseudo-header")
+				}
+				strm.pseudoScheme = true
+				strm.scheme = append(strm.scheme[:0], v...)
+			case bytes.Equal(k, StringAuthority):
+				if strm.pseudoAuthority {
+					return NewResetStreamError(ProtocolError, "duplicate :authority pseudo-header")
+				}
+				strm.pseudoAuthority = true
+				req.Header.SetHostBytes(v)
+				req.Header.AddBytesV("Host", v)
+			default:
+				// Any pseudo-header that is not a valid request pseudo-header
+				// (including response pseudo-headers such as :status) is invalid.
+				return NewResetStreamError(ProtocolError, fmt.Sprintf("invalid request pseudo-header %s", k))
+			}
+
+			fieldsProcessed++
+			continue
+		}
+
+		// From here on it is a regular header field.
+		strm.regularSeen = true
+
+		// Connection-specific header fields are forbidden.
+		// https://httpwg.org/specs/rfc7540.html#rfc.section.8.1.2.2
+		if isConnectionSpecific(k) {
+			return NewResetStreamError(ProtocolError, "connection-specific header field")
+		}
+
+		if bytes.Equal(k, StringTE) && !bytes.Equal(v, StringTrailers) {
+			return NewResetStreamError(ProtocolError, "TE header field with a value other than trailers")
+		}
+
+		switch {
+		case bytes.Equal(k, StringUserAgent):
 			req.Header.SetUserAgentBytes(v)
-		case 'c': // content-type
+		case bytes.Equal(k, StringContentType):
 			req.Header.SetContentTypeBytes(v)
+		case bytes.Equal(k, StringContentLength):
+			if n, perr := parseUint(v); perr == nil {
+				strm.contentLength = n
+				strm.hasContentLength = true
+			}
+			req.Header.AddBytesKV(k, v)
 		default:
-			return NewGoAwayError(ProtocolError, fmt.Sprintf("unknown header field %s", k))
+			req.Header.AddBytesKV(k, v)
 		}
 
 		fieldsProcessed++
@@ -776,6 +952,23 @@ func (sc *serverConn) handleHeaderFrame(strm *Stream, fr *FrameHeader) error {
 	strm.headerBlockNum++
 
 	return err
+}
+
+// validateRequestPseudoHeaders enforces that a completed request header block
+// carries the mandatory request pseudo-headers and a non-empty path.
+// https://httpwg.org/specs/rfc7540.html#rfc.section.8.1.2.3
+func validateRequestPseudoHeaders(strm *Stream) error {
+	if !strm.pseudoMethod || !strm.pseudoScheme || !strm.pseudoPath {
+		return NewResetStreamError(ProtocolError, "missing mandatory request pseudo-header")
+	}
+
+	// The :path pseudo-header must not be empty for http/https requests.
+	// CONNECT and OPTIONS-asterisk requests are not handled here.
+	if len(strm.path) == 0 {
+		return NewResetStreamError(ProtocolError, "empty :path pseudo-header")
+	}
+
+	return nil
 }
 
 func (sc *serverConn) verifyState(strm *Stream, fr *FrameHeader) error {
@@ -794,8 +987,12 @@ func (sc *serverConn) verifyState(strm *Stream, fr *FrameHeader) error {
 	return nil
 }
 
-// handleEndRequest dispatches the finished request to the handler.
-func (sc *serverConn) handleEndRequest(strm *Stream) {
+// handleEndRequest dispatches the finished request to the handler and starts
+// sending the response. It returns true when the whole response (including the
+// END_STREAM flag) has been written, meaning the stream can be closed. It
+// returns false when the response body is flow-control blocked and remains
+// buffered in strm.pendingData until a WINDOW_UPDATE resumes it.
+func (sc *serverConn) handleEndRequest(strm *Stream) bool {
 	ctx := strm.ctx
 	ctx.Request.Header.SetProtocolBytes(StringHTTP2)
 
@@ -816,17 +1013,90 @@ func (sc *serverConn) handleEndRequest(strm *Stream) {
 
 	sc.writer <- fr
 
-	if hasBody {
-		if ctx.Response.IsBodyStream() {
-			streamWriter := acquireStreamWrite()
-			streamWriter.strm = strm
-			streamWriter.writer = sc.writer
-			streamWriter.size = int64(ctx.Response.Header.ContentLength())
-			_ = ctx.Response.BodyWriteTo(streamWriter)
-			releaseStreamWrite(streamWriter)
-		} else {
-			sc.writeData(strm, ctx.Response.Body())
+	if !hasBody {
+		return true
+	}
+
+	// Streaming bodies bypass the flow-control buffering below; they are
+	// chunked by frame size only.
+	if ctx.Response.IsBodyStream() {
+		streamWriter := acquireStreamWrite()
+		streamWriter.strm = strm
+		streamWriter.writer = sc.writer
+		streamWriter.size = int64(ctx.Response.Header.ContentLength())
+		_ = ctx.Response.BodyWriteTo(streamWriter)
+		releaseStreamWrite(streamWriter)
+		return true
+	}
+
+	// Buffer the body and send as much as the flow-control windows allow.
+	strm.pendingData = append(strm.pendingData[:0], ctx.Response.Body()...)
+	strm.pendingEnd = true
+
+	return sc.sendData(strm)
+}
+
+// sendData writes as much of strm.pendingData as the connection and stream
+// flow-control windows allow, splitting into frames no larger than the maximum
+// frame size. It returns true once the entire buffer (and the END_STREAM flag)
+// has been sent. A negative window simply blocks until a WINDOW_UPDATE arrives.
+func (sc *serverConn) sendData(strm *Stream) bool {
+	for len(strm.pendingData) > 0 {
+		avail := strm.window
+		if sc.clientWindow < avail {
+			avail = sc.clientWindow
 		}
+
+		if avail <= 0 {
+			return false
+		}
+
+		step := int64(1 << 14) // max frame size 16384
+		if avail < step {
+			step = avail
+		}
+		if int64(len(strm.pendingData)) < step {
+			step = int64(len(strm.pendingData))
+		}
+
+		chunk := strm.pendingData[:step]
+		strm.pendingData = strm.pendingData[step:]
+		end := strm.pendingEnd && len(strm.pendingData) == 0
+
+		fr := AcquireFrameHeader()
+		fr.SetStream(strm.ID())
+
+		data := AcquireFrame(FrameData).(*Data)
+		data.SetEndStream(end)
+		data.SetPadding(false)
+		data.SetData(chunk)
+
+		fr.SetBody(data)
+
+		sc.writer <- fr
+
+		strm.window -= step
+		sc.clientWindow -= step
+	}
+
+	return true
+}
+
+// flushStreams resumes any streams whose buffered response data was blocked on
+// flow control, closing the ones that finish. It is called after a
+// connection-level window change.
+func (sc *serverConn) flushStreams(strms Streams, closeStream func(*Stream)) {
+	var done []*Stream
+
+	for _, s := range strms {
+		if s.responded && len(s.pendingData) > 0 && sc.sendData(s) {
+			done = append(done, s)
+		}
+	}
+
+	for _, s := range done {
+		s.SetState(StreamStateClosed)
+		closeStream(s)
 	}
 }
 
@@ -948,31 +1218,6 @@ func (s *streamWrite) ReadFrom(r io.Reader) (num int64, err error) {
 	return num, err
 }
 
-func (sc *serverConn) writeData(strm *Stream, body []byte) {
-	step := 1 << 14 // max frame size 16384
-	if strm.window > 0 && step > int(strm.window) {
-		step = int(strm.window)
-	}
-
-	for i := 0; i < len(body); i += step {
-		if i+step >= len(body) {
-			step = len(body) - i
-		}
-
-		fr := AcquireFrameHeader()
-		fr.SetStream(strm.ID())
-
-		data := AcquireFrame(FrameData).(*Data)
-		data.SetEndStream(i+step == len(body))
-		data.SetPadding(false)
-		data.SetData(body[i : step+i])
-
-		fr.SetBody(data)
-
-		sc.writer <- fr
-	}
-}
-
 func (sc *serverConn) sendPingAndSchedule() {
 	sc.writePing()
 
@@ -980,9 +1225,6 @@ func (sc *serverConn) sendPingAndSchedule() {
 }
 
 func (sc *serverConn) writeLoop() {
-	if sc.pingInterval > 0 {
-		sc.pingTimer = time.AfterFunc(sc.pingInterval, sc.sendPingAndSchedule)
-	}
 
 	buffered := 0
 
@@ -1009,8 +1251,9 @@ func (sc *serverConn) handleSettings(st *Settings) {
 	st.CopyTo(&sc.clientS)
 	sc.enc.SetMaxTableSize(sc.clientS.HeaderTableSize())
 
-	// atomically update the new window
-	atomic.StoreInt64(&sc.clientWindow, int64(sc.clientS.MaxWindowSize()))
+	// The per-stream send windows are adjusted in handleStreams, where the
+	// stream table lives. The connection-level window is not affected by
+	// SETTINGS_INITIAL_WINDOW_SIZE (RFC 7540 6.9.2).
 
 	fr := AcquireFrameHeader()
 

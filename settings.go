@@ -37,6 +37,10 @@ type Settings struct {
 	windowSize  uint32
 	frameSize   uint32
 	headerSize  uint32
+	// hasWindowSize reports whether SETTINGS_INITIAL_WINDOW_SIZE was present in
+	// the frame this Settings was decoded from. It lets the receiver apply the
+	// window delta to open streams only when the value actually changed.
+	hasWindowSize bool
 }
 
 func (st *Settings) Type() FrameType {
@@ -54,6 +58,7 @@ func (st *Settings) Reset() {
 	st.headerSize = 0
 	st.rawSettings = st.rawSettings[:0]
 	st.ack = false
+	st.hasWindowSize = false
 }
 
 // CopyTo copies st fields to st2.
@@ -66,6 +71,7 @@ func (st *Settings) CopyTo(st2 *Settings) {
 	st2.windowSize = st.windowSize
 	st2.frameSize = st.frameSize
 	st2.headerSize = st.headerSize
+	st2.hasWindowSize = st.hasWindowSize
 }
 
 // SetHeaderTableSize sets the maximum size of the header
@@ -190,6 +196,7 @@ func (st *Settings) Read(d []byte) error {
 				return NewGoAwayError(FlowControlError, "SETTINGS_INITIAL_WINDOW_SIZE above maximum")
 			}
 			st.windowSize = value
+			st.hasWindowSize = true
 		case MaxFrameSize:
 			if value < 1<<14 || value > 1<<24-1 {
 				return NewGoAwayError(ProtocolError, "wrong value for SETTINGS_MAX_FRAME_SIZE")
