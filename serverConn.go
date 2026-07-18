@@ -478,7 +478,16 @@ loop:
 				}
 
 				if _, ok := closedStrms[fr.Stream()]; ok {
-					if fr.Type() != FramePriority {
+					// A WINDOW_UPDATE, RST_STREAM or PRIORITY frame may
+					// legitimately arrive shortly after a stream is closed,
+					// because the peer had not yet processed the END_STREAM or
+					// RST_STREAM when it sent them. These MUST be ignored, not
+					// treated as connection errors (RFC 7540 5.1). Anything else
+					// (HEADERS, DATA, CONTINUATION) on a closed stream is an
+					// error.
+					switch fr.Type() {
+					case FramePriority, FrameWindowUpdate, FrameResetStream:
+					default:
 						sc.writeGoAway(fr.Stream(), StreamClosedError, "frame on closed stream")
 					}
 
